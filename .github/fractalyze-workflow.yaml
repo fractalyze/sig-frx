@@ -1,0 +1,37 @@
+# sig-frx — board extensions for the fractalyze-plugins workflow.
+#
+# sig-frx is a scheme library, so the board's primary axis is the Scheme
+# being worked on. `Shared` covers the primitives more than one scheme
+# builds on (WOTS+, the Merkle hash tree, lattice NTT helpers); `none`
+# catches infra / cross-cutting work. Two views: Scheme lanes for
+# day-to-day, Milestone rollup for week-over-week.
+#
+# Schema lives in `fractalyze/claude-plugins` (workflow plugin).
+
+board_extensions:
+  fields:
+    - name: Scheme
+      type: single_select
+      options: [Seam, Shared, SLH-DSA, ML-DSA, Falcon, XMSS, ECDSA, EdDSA, Infra, none]
+      derive_from_labels:
+        Seam: area:seam
+        Shared: area:shared
+        SLH-DSA: area:slh-dsa
+        ML-DSA: area:ml-dsa
+        Falcon: area:falcon
+        XMSS: area:xmss
+        ECDSA: area:ecdsa
+        EdDSA: area:eddsa
+        Infra: area:infra
+        _fallback: none
+
+  views:
+    - name: Scheme kanban
+      type: board
+      group_by: Scheme
+      column_by: Status
+
+    - name: Milestone rollup
+      type: board
+      group_by: Milestone
+      column_by: Status
