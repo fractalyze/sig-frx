@@ -1,0 +1,288 @@
+# Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
+"""WOTS+ — the one-time signature SLH-DSA and XMSS are both built from.
+
+FIPS 205 §5. A private key is `len` secret values; each is walked up a hash chain
+of length `w`, and the chain ends compress to the public key. A signature stops
+each chain at the base-`w` digit of the message it signs, so a verifier can walk
+the rest and arrive at the public key — and cannot walk backwards.
+
+**Every chain runs the full `w − 1` steps, and a mask decides which ones advance.**
+A chain's stopping point is a function of the message, so walking exactly as far
+as each digit asks would be a data-dependent trip count: it lowers to control
+flow, splits the kernel, and makes the timing a function of the message digest.
+The masked form does the same work whatever the message is, and `chain` is one
+batched hash per step instead of one per chain step — 15 calls where the literal
+reading of Algorithm 5 would make 525.
+
+Public-key compression is deliberately *not* here. FIPS 205 compresses the chain
+ends with one tweakable hash while RFC 8391 uses an L-tree, and that is the only
+place the two disagree — so `pk_gen` and `pk_from_sig` take the compression as an
+argument and XMSS supplies its own.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from functools import cached_property
+
+import frx.numpy as fnp
+import numpy as np
+from frx import Array
+from frx.typing import ArrayLike
+
+from sig_frx.hashbased import adrs
+from sig_frx.hashbased.tweakable import TweakableHash
+
+# The compression a caller supplies: chain ends `[B, len, n]` -> `[B, n]`.
+Compress = Callable[[Array], Array]
+
+
+@dataclass(frozen=True)
+class WotsParams:
+    """The four derived values of FIPS 205 §5, equations 5.1 to 5.4."""
+
+    n: int
+    lg_w: int = 4
+
+    @cached_property
+    def w(self) -> int:
+        return 1 << self.lg_w
+
+    @cached_property
+    def len1(self) -> int:
+        return -(-8 * self.n // self.lg_w)
+
+    @cached_property
+    def len2(self) -> int:
+        return (self.len1 * (self.w - 1)).bit_length() // self.lg_w + 1
+
+    @cached_property
+    def len(self) -> int:
+        return self.len1 + self.len2
+
+
+@dataclass(frozen=True)
+class WotsPosition:
+    """Which WOTS+ key pair this is — the address prefix every call tweaks with."""
+
+    layer: int
+    tree: int
+    key_pair: int
+
+
+def base_2b(data: ArrayLike, b: int, out_len: int) -> Array:
+    """`base_2b` — FIPS 205 §4.4, Algorithm 4: `X` as `out_len` base-2^b digits.
+
+    Vectorized over a leading batch axis, and unrolled: `out_len` and `b` are
+    parameter-set constants, so the standard's `while` over input bytes is a
+    static schedule rather than a loop over data. The accumulator keeps 24 bits,
+    which is more than the `b + 8` the algorithm can ever read from it.
+    """
+    values = fnp.asarray(data, dtype=fnp.uint32)
+    if values.ndim == 1:
+        values = values[None, :]
+    needed = -(-out_len * b // 8)
+    if values.shape[-1] < needed:
+        raise ValueError(
+            f"base_2b needs at least {needed} bytes for {out_len} digits of "
+            f"{b} bits, got {values.shape[-1]}"
+        )
+
+    digits = []
+    total = fnp.zeros(values.shape[0], dtype=fnp.uint32)
+    consumed = 0
+    bits = 0
+    for _ in range(out_len):
+        while bits < b:
+            total = ((total << 8) | values[:, consumed]) & 0xFFFFFF
+            consumed += 1
+            bits += 8
+        bits -= b
+        digits.append((total >> bits) & (2**b - 1))
+    return fnp.stack(digits, axis=-1)
+
+
+def message_digits(params: WotsParams, message: ArrayLike) -> Array:
+    """The `len` base-`w` digits a signature's chain lengths come from.
+
+    Algorithm 7 lines 1 to 7: the message's own digits, then the checksum's. The
+    checksum is what stops an attacker from raising a digit — walking one chain
+    further — because raising any message digit lowers the checksum, and the
+    checksum's own chains cannot be walked backwards.
+    """
+    digits = base_2b(message, params.lg_w, params.len1)
+    checksum = fnp.sum(
+        (params.w - 1) - digits.astype(fnp.uint32), axis=-1, dtype=fnp.uint32
+    )
+    # Left-aligned in its byte string, per line 6: for lg_w = 4 and len2 = 3 the
+    # 12 checksum bits sit in the top of two bytes.
+    checksum = checksum << ((8 - ((params.len2 * params.lg_w) % 8)) % 8)
+    checksum_bytes = -(-params.len2 * params.lg_w // 8)
+    packed = fnp.stack(
+        [
+            (checksum >> (8 * (checksum_bytes - 1 - i))) & 0xFF
+            for i in range(checksum_bytes)
+        ],
+        axis=-1,
+    ).astype(fnp.uint8)
+    return fnp.concatenate([digits, base_2b(packed, params.lg_w, params.len2)], axis=-1)
+
+
+def chain(
+    tweak: TweakableHash,
+    pk_seed: ArrayLike,
+    values: ArrayLike,
+    start: ArrayLike,
+    steps: ArrayLike,
+    step_addresses: Sequence[ArrayLike],
+) -> Array:
+    """`chain` — FIPS 205 §5, Algorithm 5, for a whole batch of chains at once.
+
+    Entry `k` iterates `F` on `values[k]` for `steps[k]` applications beginning at
+    index `start[k]`. `step_addresses[j]` holds every entry's address for step
+    `j`, which the caller built on the host — the hash address advances with the
+    step, so the addresses differ per step and not just per chain.
+
+    The work is `len(step_addresses)` batched hashes regardless of the starts and
+    steps: an entry that has already stopped is hashed anyway and its result
+    discarded by the select. That is the point — the alternative branches on
+    secret-adjacent data.
+    """
+    current = fnp.asarray(values, dtype=fnp.uint8)
+    starts = fnp.asarray(start, dtype=fnp.uint32)
+    counts = fnp.asarray(steps, dtype=fnp.uint32)
+    for step, addresses in enumerate(step_addresses):
+        stepped = tweak.f(pk_seed, addresses, current)
+        active = (starts <= step) & (step < starts + counts)
+        current = fnp.where(active[:, None], stepped, current)
+    return current
+
+
+def _chain_addresses(params: WotsParams, position: WotsPosition) -> list[np.ndarray]:
+    """Every chain's address at every step: `w − 1` batches of `len` addresses."""
+    return [
+        adrs.encode_batch(
+            [
+                adrs.wots_hash(
+                    layer=position.layer,
+                    tree=position.tree,
+                    key_pair=position.key_pair,
+                    chain=index,
+                    hash_index=step,
+                )
+                for index in range(params.len)
+            ],
+            compressed=True,
+        )
+        for step in range(params.w - 1)
+    ]
+
+
+def secret_values(
+    tweak: TweakableHash,
+    params: WotsParams,
+    pk_seed: ArrayLike,
+    sk_seed: ArrayLike,
+    position: WotsPosition,
+) -> Array:
+    """The `len` chain starting points — Algorithm 6 lines 1 to 6."""
+    addresses = adrs.encode_batch(
+        [
+            adrs.wots_prf(
+                layer=position.layer,
+                tree=position.tree,
+                key_pair=position.key_pair,
+                chain=index,
+            )
+            for index in range(params.len)
+        ],
+        compressed=True,
+    )
+    return tweak.prf(pk_seed, sk_seed, addresses)
+
+
+def pk_gen(
+    tweak: TweakableHash,
+    params: WotsParams,
+    pk_seed: ArrayLike,
+    sk_seed: ArrayLike,
+    position: WotsPosition,
+    compress: Compress,
+) -> Array:
+    """`wots_pkGen` — Algorithm 6. Every chain walked to its end, then compressed."""
+    ends = chain(
+        tweak,
+        pk_seed,
+        secret_values(tweak, params, pk_seed, sk_seed, position),
+        fnp.zeros(params.len, dtype=fnp.uint32),
+        fnp.full(params.len, params.w - 1, dtype=fnp.uint32),
+        _chain_addresses(params, position),
+    )
+    return compress(ends)
+
+
+def sign(
+    tweak: TweakableHash,
+    params: WotsParams,
+    message: ArrayLike,
+    pk_seed: ArrayLike,
+    sk_seed: ArrayLike,
+    position: WotsPosition,
+) -> Array:
+    """`wots_sign` — Algorithm 7: each chain stopped at its digit. `[len, n]`."""
+    digits = message_digits(params, message)[0]
+    return chain(
+        tweak,
+        pk_seed,
+        secret_values(tweak, params, pk_seed, sk_seed, position),
+        fnp.zeros(params.len, dtype=fnp.uint32),
+        digits,
+        _chain_addresses(params, position),
+    )
+
+
+def pk_from_sig(
+    tweak: TweakableHash,
+    params: WotsParams,
+    signature: ArrayLike,
+    message: ArrayLike,
+    pk_seed: ArrayLike,
+    position: WotsPosition,
+    compress: Compress,
+) -> Array:
+    """`wots_pkFromSig` — Algorithm 8: walk the rest of every chain.
+
+    The operation verification actually runs. A signature that stopped its chains
+    anywhere other than the message's digits arrives at a different public key,
+    which is what the caller compares against a root it already trusts.
+    """
+    digits = message_digits(params, message)[0]
+    ends = chain(
+        tweak,
+        pk_seed,
+        signature,
+        digits,
+        (params.w - 1) - digits,
+        _chain_addresses(params, position),
+    )
+    return compress(ends)
+
+
+def fips205_compression(
+    tweak: TweakableHash, params: WotsParams, pk_seed: ArrayLike, position: WotsPosition
+) -> Compress:
+    """FIPS 205's public-key compression: one `T_len` over all chain ends.
+
+    RFC 8391 compresses with an L-tree instead, which is why this is a value a
+    caller passes rather than something WOTS+ decides for itself.
+    """
+    address = adrs.encode_batch(
+        [adrs.wots_pk(position.layer, position.tree, position.key_pair)],
+        compressed=True,
+    )
+
+    def compress(ends: Array) -> Array:
+        return tweak.t(pk_seed, address, ends.reshape(1, params.len * params.n))[0]
+
+    return compress

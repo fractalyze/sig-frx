@@ -186,13 +186,14 @@ class Sha2TweakableHash:
     # -- the constructions the family is built from ------------------------
 
     def _tweak(self, pk_seed: ArrayLike, adrs: ArrayLike, payload: ArrayLike) -> Array:
-        payloads = fnp.asarray(payload, dtype=fnp.uint8)
+        # The addresses set the batch: there is one hash per position, and both
+        # the seed and the payload may be shared across them. `PRF` is the case
+        # that makes that concrete — one secret seed, one hash per chain.
         addresses = fnp.asarray(adrs, dtype=fnp.uint8)
         if addresses.ndim == 1:
             addresses = addresses[None, :]
-        if payloads.ndim == 1:
-            payloads = payloads[None, :]
         batch = addresses.shape[0]
+        payloads = _batched(payload, batch)
         seeds = _batched(pk_seed, batch)
         padding = fnp.zeros((batch, self._block_size - self.n), dtype=fnp.uint8)
         return self._digest(

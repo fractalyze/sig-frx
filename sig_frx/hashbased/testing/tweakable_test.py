@@ -108,6 +108,24 @@ class TweakedHashTest(absltest.TestCase):
 class BatchTest(absltest.TestCase):
     """One call, many positions — the shape every component above this uses."""
 
+    def test_a_shared_payload_is_hashed_once_per_position(self) -> None:
+        # `PRF` is called with one secret seed and one address per chain, so the
+        # payload is shared while the address is not — the case a batch of
+        # matching shapes never exercises.
+        family = _family()
+        addresses = [a.wots_prf(0, 0, 0, chain) for chain in range(4)]
+        batch = a.encode_batch(addresses, compressed=True)
+
+        got = np.asarray(family.prf(_u8(_PK_SEED), _u8(_SK_SEED), batch))
+
+        self.assertEqual(got.shape, (4, _N))
+        for index, address in enumerate(addresses):
+            self.assertEqual(
+                bytes(got[index]),
+                _spec_tweak(a.encode(address, compressed=True), _SK_SEED),
+                f"chain {index}",
+            )
+
     def test_each_entry_is_hashed_under_its_own_address(self) -> None:
         family = _family()
         addresses = [
