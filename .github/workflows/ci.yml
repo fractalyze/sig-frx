@@ -1,0 +1,122 @@
+# Copyright 2026 Fractalyze Inc. All rights reserved.
+
+name: CI
+
+permissions: read-all
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  # The full known-answer sweep. Per-PR runs drop the `slow_kat`-tagged suites
+  # (see .bazelrc.ci); this run puts them back, so an exhaustive sweep across
+  # every parameter set runs daily rather than never.
+  schedule:
+    - cron: "0 17 * * *"
+
+# Cancel in-progress runs for PRs (same head branch), but never cancel pushes
+# to main so that every merge gets a full CI run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# The test job runs a CPU leg and (when a GPU runner exists) a GPU leg on
+# self-hosted runners. Label runners by capability, not role: a CPU-only box is
+# `[self-hosted, cpu]`; a GPU box is `[self-hosted, cpu, gpu]` (it serves CPU
+# work too), so the CPU leg never starves when the CPU-only box is busy/offline.
+# The `setup` job adds the GPU leg only when the `HAS_GPU_RUNNER` repo variable
+# is `true`, so without GPU hardware the leg is absent, not queued forever. (A
+# job-level `if` can't read `matrix`, hence the dynamic matrix.)
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+      tag_filters: ${{ steps.set.outputs.tag_filters }}
+    steps:
+      - id: set
+        # Strict `cuda` on the GPU leg (no cpu fallback) so a green run really
+        # ran on GPU.
+        run: |
+          # Per-leg bazel flags: CPU leg runs on the Buildbarn pool
+          # (`--config=remote` + machine-local mTLS certs); the GPU leg runs
+          # local (pool is CPU-only), so its `rbe` is empty.
+          rbe_cpu='--config=remote --tls_certificate=/etc/rbe-certs/ca.pem --tls_client_certificate=/etc/rbe-certs/client.pem --tls_client_key=/etc/rbe-certs/client.key'
+          cpu='{"backend":"cpu","runs_on":["self-hosted","cpu"],"frx_platforms":"cpu","rbe":"'"${rbe_cpu}"'"}'
+          gpu='{"backend":"gpu","runs_on":["self-hosted","gpu"],"frx_platforms":"cuda","rbe":""}'
+          include="${cpu}"
+          if [ "${{ vars.HAS_GPU_RUNNER }}" = "true" ]; then
+            include="${cpu},${gpu}"
+          fi
+          echo "matrix={\"include\":[${include}]}" >> "$GITHUB_OUTPUT"
+          # A CLI --test_tag_filters *replaces* .bazelrc.ci's, so the scheduled
+          # sweep has to restate the `local_only` exclusion it still needs: those
+          # tests want the composite-capable dev frxlib, which CI's published
+          # wheel is not. Empty on a PR run, which leaves .bazelrc.ci's default.
+          tag_filters=""
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            tag_filters="--test_tag_filters=-local_only"
+          fi
+          echo "tag_filters=${tag_filters}" >> "$GITHUB_OUTPUT"
+
+  build-and-test:
+    # Explicit name; else GitHub appends every matrix value (incl. the long
+    # --config=remote + cert-path rbe flags) to the auto-generated job name.
+    name: build-and-test (${{ matrix.backend }})
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.runs_on }}
+    steps:
+      - uses: actions/checkout@v4
+      # No setup-bazel: it clobbers the box's ~/.bazelrc (self-hosted runners
+      # already persist bazel + caches). `.bazelrc.ci` drops the tests CI's
+      # wheel can't run and the slow sweeps a PR doesn't need.
+      #
+      # Prealloc-off on the GPU leg: the default grabs most of device memory up
+      # front, which turns a second concurrent job into a spurious OOM.
+      - name: Run bazel test
+        run: |
+          set -euo pipefail
+          prealloc=""
+          if [ "${{ matrix.backend }}" = "gpu" ]; then
+            prealloc="--test_env=XLA_PYTHON_CLIENT_PREALLOCATE=false"
+          fi
+          bazel --bazelrc=.bazelrc.ci test ${{ matrix.rbe }} ${prealloc} \
+            ${{ needs.setup.outputs.tag_filters }} \
+            --test_env=FRX_PLATFORMS=${{ matrix.frx_platforms }} -- //...
+
+      # Capture the runner-local test.log a failed test leaves behind — the CI
+      # stream only carries the FAIL summary, not the test output.
+      - name: Upload bazel test logs
+        if: ${{ failure() }}
+        uses: fractalyze/.github/.github/actions/upload-bazel-testlogs@main
+        with:
+          name: bazel-test-logs-${{ matrix.backend }}
+
+  pre-commit:
+    # The pin-bump PRs are authored by this account; their generated diffs are
+    # already formatted and their subjects are not written to the convention.
+    if: github.actor != 'fractalyze-dev'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pre-commit hook environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+      # --all-files rather than a diff range: the tree is small enough that the
+      # whole-repo run is cheap, and it catches a violation that arrives in a
+      # file the PR did not touch (a hook version bump, a new rule).
+      - name: Run pre-commit
+        run: |
+          pip install pre-commit
+          pre-commit run --all-files

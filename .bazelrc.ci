@@ -2,9 +2,18 @@
 # (`bazel --bazelrc=.bazelrc.ci ...`); it is NOT auto-imported, so a local
 # `bazel test //...` still runs every target.
 #
-# Skip `local_only`-tagged tests in CI. Those need the composite-capable dev
-# frxlib — vmapping a hash-frx composite marker takes the CompositeOp op plus its
-# batching rule, and CI runs the published wheel, which has neither. Run them
-# locally against that dev frxlib. Drop this filter (and the tags) once the
-# published frx pin carries the composite backport.
-test --test_tag_filters=-local_only
+# Two exclusions, for different reasons.
+#
+# `local_only` — needs the composite-capable dev frxlib. Vmapping a hash-frx
+# composite marker takes the CompositeOp op plus its batching rule, and CI runs
+# the published wheel, which has neither. Run them locally against that dev
+# frxlib. Drop this filter (and the tags) once the published frx pin carries the
+# composite backport.
+#
+# `slow_kat` — the exhaustive known-answer sweeps: every parameter set of a
+# scheme against every published vector. They are the standards-exactness gate,
+# so they must run, but a full sweep per PR makes review painful. The scheduled
+# CI run puts them back (see .github/workflows/ci.yml); tag a suite `slow_kat`
+# only when it is genuinely a sweep, since a tag here is a suite that does not
+# gate a merge.
+test --test_tag_filters=-local_only,-slow_kat
