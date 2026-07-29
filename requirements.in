@@ -1,0 +1,23 @@
+# sig-frx runtime dependencies.
+#
+# Pulled from the Fractalyze package index alongside upstream PyPI:
+#   pip install -r requirements.in \
+#     --extra-index-url https://fractalyze.github.io/pypi/simple/
+#
+# hash-frx — the symmetric layer every scheme here hashes through — is absent on
+# purpose: it is a Bazel module, pinned by commit in //MODULE.bazel, not a wheel.
+#
+# The frx build is pinned to the one hash-frx pins, and the two must move
+# together: hash-frx resolves frx from its own lock, so skew puts two different
+# frx copies on one test's sys.path. zk_dtypes (native finite-field dtypes)
+# arrives via frx but is pinned here directly — the frx extension-field lowering
+# reads `efinfo.modulus_low_coeffs` (zk_dtypes >= 0.0.6), and this frx build
+# registers the binary-field dtypes (tower t0..t7 + flat GHASH) in the frontend,
+# which requires zk_dtypes >= 0.0.10.
+absl-py
+numpy
+frx==0.10.0.dev20260723035840
+frxlib==0.10.0.dev20260723035840
+frx-cuda12-pjrt==0.10.0.dev20260723035840
+frx-cuda12-plugin==0.10.0.dev20260723035840
+zk-dtypes==0.0.10
