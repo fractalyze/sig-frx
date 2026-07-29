@@ -38,3 +38,17 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+py_test(
+    name = "tree_test",
+    size = "small",
+    srcs = ["tree_test.py"],
+    deps = [
+        "//sig_frx/hashbased:adrs",
+        "//sig_frx/hashbased:tree",
+        "//sig_frx/hashbased:tweakable",
+        "@hash_frx//hash_frx:sha256",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
