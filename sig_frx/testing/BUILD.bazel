@@ -1,16 +1,83 @@
-load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
+
+# The stand-in every seam- and harness-level test drives. Not a signature scheme;
+# see its docstring.
+py_library(
+    name = "checksum_scheme",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "checksum_scheme.py",
+    ],
+    visibility = ["//sig_frx:__subpackages__"],
+    deps = [
+        "//sig_frx:signature",
+        requirement("frx"),
+    ],
+)
+
+# The known-answer harness. testonly, and deliberately not part of the shipped
+# package: a consumer runs schemes, not their gate.
+py_library(
+    name = "kat",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "kat.py",
+    ],
+    visibility = ["//sig_frx:__subpackages__"],
+    deps = [
+        "//sig_frx:signature",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
 
 py_test(
     name = "signature_test",
     size = "small",
     srcs = ["signature_test.py"],
     deps = [
+        ":checksum_scheme",
         "//sig_frx:signature",
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
+    name = "kat_test",
+    size = "small",
+    srcs = ["kat_test.py"],
+    deps = [
+        ":checksum_scheme",
+        ":kat",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# Runs the loader over NIST's published files, fetched and sha256-pinned in
+# //MODULE.bazel rather than committed (they run to tens of megabytes).
+py_test(
+    name = "acvp_vectors_test",
+    size = "small",
+    srcs = ["acvp_vectors_test.py"],
+    data = [
+        "@acvp_ml_dsa_sigver_expected//file",
+        "@acvp_ml_dsa_sigver_prompt//file",
+        "@acvp_slh_dsa_keygen_expected//file",
+        "@acvp_slh_dsa_keygen_prompt//file",
+    ],
+    deps = [
+        ":checksum_scheme",
+        ":kat",
+        "@rules_python//python/runfiles",
+        requirement("absl_py"),
     ] + GPU_PLUGIN_DEPS,
 )
 

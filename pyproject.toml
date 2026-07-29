@@ -68,5 +68,5 @@ warn_redundant_casts = true
 # Bazel module graph rather than site-packages, so mypy run outside Bazel cannot
 # see it. disallow_untyped_defs still enforces our own annotations regardless.
 [[tool.mypy.overrides]]
-module = ["frx.*", "frxlib.*", "zk_dtypes.*", "hash_frx.*", "absl.*"]
+module = ["frx.*", "frxlib.*", "zk_dtypes.*", "hash_frx.*", "absl.*", "python.runfiles"]
 ignore_missing_imports = true
