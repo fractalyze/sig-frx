@@ -26,3 +26,18 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+py_library(
+    name = "wots",
+    srcs = [
+        "__init__.py",
+        "wots.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs",
+        ":tweakable",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

@@ -24,3 +24,17 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+py_test(
+    name = "wots_test",
+    size = "small",
+    srcs = ["wots_test.py"],
+    deps = [
+        "//sig_frx/hashbased:adrs",
+        "//sig_frx/hashbased:tweakable",
+        "//sig_frx/hashbased:wots",
+        "@hash_frx//hash_frx:sha256",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
