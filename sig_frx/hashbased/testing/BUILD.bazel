@@ -67,3 +67,19 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+py_test(
+    name = "xmss_test",
+    size = "small",
+    srcs = ["xmss_test.py"],
+    deps = [
+        "//sig_frx/hashbased:hypertree",
+        "//sig_frx/hashbased:tree",
+        "//sig_frx/hashbased:tweakable",
+        "//sig_frx/hashbased:wots",
+        "//sig_frx/hashbased:xmss",
+        "@hash_frx//hash_frx:sha256",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
