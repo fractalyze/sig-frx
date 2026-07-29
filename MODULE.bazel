@@ -1,0 +1,52 @@
+"""sig-frx — FRX-native digital signatures.
+
+bzlmod module. bazel 9 dropped WORKSPACE support, so dependencies and the
+hermetic Python toolchain are declared here rather than in WORKSPACE.bazel.
+"""
+
+module(
+    name = "sig_frx",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "platforms", version = "1.0.0")
+
+# The version MVS resolves anyway — protobuf, in rules_python's own dependency
+# graph, requires it. Declaring the lower version only adds a
+# direct-dependency-mismatch warning to every invocation.
+bazel_dep(name = "rules_python", version = "1.7.0")
+
+# The symmetric layer every scheme in this repo hashes through. It rides the
+# bzlmod module graph pinned to a commit rather than the pip lock: hash-frx is a
+# Bazel module and publishes no wheel, and a commit pin is exact, needs no
+# package index, and exposes `@hash_frx//hash_frx:...` targets directly.
+#
+# The cost is a second pip hub — hash-frx resolves frx from its own lock — so the
+# two locks pin the same frx build (see //:requirements.in). Skew there puts two
+# different frx copies on one test's sys.path.
+#
+# To build against a local hash-frx checkout instead of the pin:
+#   echo 'common --override_module=hash_frx=/abs/path/to/hash-frx' >> .bazelrc.user
+bazel_dep(name = "hash_frx", version = "0.0.0")
+git_override(
+    module_name = "hash_frx",
+    commit = "8c88ff23346b65c094c8f0ccb5a7b3de63392582",
+    remote = "https://github.com/fractalyze/hash-frx.git",
+)
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    is_default = True,
+    python_version = "3.11",
+)
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    # frx / frxlib / frx-cuda12-pjrt / frx-cuda12-plugin are published on the
+    # Fractalyze index.
+    extra_pip_args = ["--extra-index-url=https://fractalyze.github.io/pypi/simple/"],
+    hub_name = "sig_frx_pip",
+    python_version = "3.11",
+    requirements_lock = "//:requirements_lock_3_11.txt",
+)
+use_repo(pip, "sig_frx_pip")

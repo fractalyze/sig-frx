@@ -1,0 +1,10 @@
+load("@rules_python//python:defs.bzl", "py_library")
+
+# The package marker. Carries `__version__`, which dev-release stamps; the
+# scheme libraries (the Signature seam, SLH-DSA, ML-DSA, Falcon, XMSS, ECDSA,
+# EdDSA) land alongside it and depend on this for the package init.
+py_library(
+    name = "sig_frx",
+    srcs = ["__init__.py"],
+    visibility = ["//visibility:public"],
+)
