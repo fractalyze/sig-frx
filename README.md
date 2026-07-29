@@ -29,6 +29,9 @@ Bootstrapping. Work is tracked on the
 
 ## Development
 
+Conventions, the security posture, and per-scheme design notes live in
+[`docs/`](docs/README.md).
+
 The build is Bazel — bzlmod, with a hermetic Python 3.11 toolchain:
 
 ```sh
