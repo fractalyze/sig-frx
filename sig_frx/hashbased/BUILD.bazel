@@ -41,3 +41,18 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+py_library(
+    name = "tree",
+    srcs = [
+        "__init__.py",
+        "tree.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs",
+        ":tweakable",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
