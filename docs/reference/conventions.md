@@ -66,6 +66,28 @@ An exhaustive sweep — every parameter set against every published vector — i
 tagged `slow_kat`, which drops it from the per-PR run and keeps it in the
 scheduled one.
 
+### Vectors are fetched and pinned, never committed
+
+A vector set is declared as an `http_file` in [`MODULE.bazel`](../../MODULE.bazel)
+with a sha256 and a URL pinned to a specific upstream commit, and reaches a test
+through `data`. The published sets run to tens of megabytes — SLH-DSA sigGen's
+expected results alone are 31 MB — and committing them taxes every clone forever
+for data that never changes after publication. The sha256 means a swapped or
+truncated fetch fails the build rather than silently changing what a scheme is
+gated on, and the repository cache makes every build after the first offline.
+
+Pin the URL to a commit, never a branch: NIST regenerates these files in place,
+and a moving URL turns an upstream regeneration into a mystery failure here.
+
+### A vector the harness cannot run is an error, not a skip
+
+A standard's vector set covers every mode of its interface — FIPS 204 publishes
+a signing context, a pre-hash variant, and an external-mu variant, each a
+different operation from the plain one. A loader records what it could not
+express instead of dropping it, and the harness refuses the case. Running the
+plain operation against a vector published for another one reports a pass for a
+case nobody ran, which is worse than a failure because it looks like coverage.
+
 ## Scheme doc skeleton
 
 Every page in [`../schemes/`](../schemes) answers three things, and everything

@@ -50,3 +50,49 @@ pip.parse(
     requirements_lock = "//:requirements_lock_3_11.txt",
 )
 use_repo(pip, "sig_frx_pip")
+
+# Known-answer vectors are fetched and pinned, never committed. The published
+# sets for the schemes this repo targets run to tens of megabytes — SLH-DSA
+# sigGen's expected results alone are 31 MB — which is a permanent tax on every
+# clone, forever, for data that never changes after publication. `http_file`
+# pins content by sha256, so a corrupted or swapped fetch fails the build, and
+# the repository cache makes every build after the first offline.
+#
+# The URLs are pinned to one ACVP-Server commit rather than a branch: NIST
+# regenerates these files, and a moving URL would turn a vector regeneration
+# upstream into a mystery failure here. Bumping the commit is a deliberate
+# change with the diff visible in the sha256s.
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+# The ACVP JSON split: prompt.json carries the inputs, expectedResults.json the
+# outputs, joined on (tgId, tcId). Both halves are needed for one vector set.
+http_file(
+    name = "acvp_slh_dsa_keygen_prompt",
+    downloaded_file_path = "prompt.json",
+    sha256 = "bce170976f257ee3dfc8c54ea46722ccb553539847daa6d8048f0216cc28b51c",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/SLH-DSA-keyGen-FIPS205/prompt.json"],
+)
+
+http_file(
+    name = "acvp_slh_dsa_keygen_expected",
+    downloaded_file_path = "expectedResults.json",
+    sha256 = "f35f74b6676d6b369c87e88c36698f28c14d5929d31e507d910288c69258afee",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/SLH-DSA-keyGen-FIPS205/expectedResults.json"],
+)
+
+# The sigVer set is what pins the negative-vector handling: 144 of its 180 cases
+# are published failures, so a loader that dropped the verdict would turn them
+# into 144 false positives.
+http_file(
+    name = "acvp_ml_dsa_sigver_prompt",
+    downloaded_file_path = "prompt.json",
+    sha256 = "aeba1135e5dbda1681369cc7a7598c3d53e492d1c9881098556ba4dbe067b376",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ML-DSA-sigVer-FIPS204/prompt.json"],
+)
+
+http_file(
+    name = "acvp_ml_dsa_sigver_expected",
+    downloaded_file_path = "expectedResults.json",
+    sha256 = "99c5b82abf37bdf6f7bd11c6976e4d8007d70f9953dc13566232404647865bb8",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ML-DSA-sigVer-FIPS204/expectedResults.json"],
+)
