@@ -56,3 +56,20 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+py_library(
+    name = "fors",
+    srcs = [
+        "__init__.py",
+        "fors.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs",
+        ":tree",
+        ":tweakable",
+        ":wots",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
