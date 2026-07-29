@@ -1,0 +1,28 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# Addresses are host-side and hash-free: every SLH-DSA component builds them
+# before any hashing starts, so this depends on neither frx nor hash-frx.
+py_library(
+    name = "adrs",
+    srcs = [
+        "__init__.py",
+        "adrs.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [requirement("numpy")],
+)
+
+py_library(
+    name = "tweakable",
+    srcs = [
+        "__init__.py",
+        "tweakable.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@hash_frx//hash_frx:byte_hash",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
