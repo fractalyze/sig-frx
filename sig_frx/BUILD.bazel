@@ -1,4 +1,5 @@
 load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
 
 # The package marker. Carries `__version__`, which dev-release stamps; the
 # scheme libraries (the Signature seam, SLH-DSA, ML-DSA, Falcon, XMSS, ECDSA,
@@ -7,4 +8,13 @@ py_library(
     name = "sig_frx",
     srcs = ["__init__.py"],
     visibility = ["//visibility:public"],
+)
+
+# The one seam every scheme implements. Names no scheme and no hash, so a
+# consumer can code against it before any scheme exists.
+py_library(
+    name = "signature",
+    srcs = ["signature.py"],
+    visibility = ["//visibility:public"],
+    deps = [requirement("frx")],
 )
