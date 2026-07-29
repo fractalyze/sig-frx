@@ -2,6 +2,17 @@
 build --announce_rc
 test --test_output=errors
 
+# Every `__init__.py` comes from a target's srcs; bazel synthesizes none.
+#
+# This is data loss, not tidiness. A runfiles `__init__.py` entry is a symlink
+# into the source tree, and a target that does not itself supply a package's
+# `__init__.py` gets an empty one synthesized — so when one target supplies the
+# real file and a sibling does not, the empty write lands through the symlink and
+# truncates the source. The damage is invisible: `__version__` is stamped at
+# release time, so an emptied init breaks the wheel build weeks later and nothing
+# before it. `sig_frx/testing:package_test` is the guard that catches it.
+build --incompatible_default_to_explicit_init_py
+
 # Tests are backend-agnostic; CPU is the default (not a requirement) so plain
 # `bazel test` is deterministic on any machine. CI overrides it per matrix leg
 # via --test_env (the GPU leg pins FRX_PLATFORMS=cuda). Pinning the backend
