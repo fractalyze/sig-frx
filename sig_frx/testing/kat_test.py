@@ -41,7 +41,10 @@ def _reference_vectors() -> list[kat.KatVector]:
         message = bytes(rng.integers(0, 256, _MESSAGE_LEN, dtype=np.uint8))
         public_key, secret_key = scheme.keygen(fnp.asarray(bytearray(seed)))
         signature = scheme.sign(
-            secret_key, fnp.asarray(bytearray(message)), randomness=None
+            secret_key,
+            fnp.asarray(bytearray(message)),
+            randomness=None,
+            context=None,
         )
         vectors.append(
             kat.KatVector(
@@ -57,18 +60,57 @@ def _reference_vectors() -> list[kat.KatVector]:
     return vectors
 
 
+def _reference_vectors_with_context() -> list[kat.KatVector]:
+    """The same cases, signed under a non-empty context."""
+    scheme = ChecksumScheme(domain=7)
+    context = b"\x07\x07"
+    vectors = []
+    for vector in _reference_vectors():
+        assert vector.secret_key is not None and vector.message is not None
+        signature = scheme.sign(
+            fnp.asarray(bytearray(vector.secret_key)),
+            fnp.asarray(bytearray(vector.message)),
+            randomness=None,
+            context=fnp.asarray(bytearray(context)),
+        )
+        vectors.append(
+            kat.KatVector(
+                **{
+                    **vars(vector),
+                    "context": context,
+                    "signature": kat.to_bytes(signature),
+                }
+            )
+        )
+    return vectors
+
+
 class _AlwaysAccepts(ChecksumScheme):
     """The failure mode positive-only KAT suites cannot see."""
 
-    def verify(self, public_key: Array, message: ArrayLike, signature: Array) -> Array:
+    def verify(
+        self,
+        public_key: ArrayLike,
+        message: ArrayLike,
+        signature: ArrayLike,
+        *,
+        context: ArrayLike | None = None,
+    ) -> Array:
         return fnp.ones(np.shape(public_key)[0], dtype=fnp.bool_)
 
 
 class _VerdictForTheWholeBatch(ChecksumScheme):
     """Decides once for the batch instead of per entry — the `all` is the bug."""
 
-    def verify(self, public_key: Array, message: ArrayLike, signature: Array) -> Array:
-        per_entry = super().verify(public_key, message, signature)
+    def verify(
+        self,
+        public_key: ArrayLike,
+        message: ArrayLike,
+        signature: ArrayLike,
+        *,
+        context: ArrayLike | None = None,
+    ) -> Array:
+        per_entry = super().verify(public_key, message, signature, context=context)
         return fnp.full(np.shape(public_key)[0], fnp.all(per_entry))
 
 
@@ -77,12 +119,16 @@ class _WrongSignature(ChecksumScheme):
 
     def sign(
         self,
-        secret_key: Array,
+        secret_key: ArrayLike,
         message: ArrayLike,
         *,
         randomness: ArrayLike | None = None,
+        context: ArrayLike | None = None,
     ) -> Array:
-        return super().sign(secret_key, message, randomness=randomness) + 1
+        return (
+            super().sign(secret_key, message, randomness=randomness, context=context)
+            + 1
+        )
 
 
 class _WrongKeygen(ChecksumScheme):
@@ -91,6 +137,15 @@ class _WrongKeygen(ChecksumScheme):
     def keygen(self, seed: ArrayLike) -> tuple[Array, Array]:
         public_key, secret_key = super().keygen(seed)
         return public_key, secret_key + 1
+
+
+class _DropsTheContext(ChecksumScheme):
+    """Accepts a context and signs without it — a wrong answer, not a gap."""
+
+    def _mask(
+        self, secret_key: Array, message: ArrayLike, context: ArrayLike | None
+    ) -> Array:
+        return super()._mask(secret_key, message, None)
 
 
 class KatHarnessTest(absltest.TestCase):
@@ -118,6 +173,17 @@ class KatHarnessTest(absltest.TestCase):
         # it never ran.
         with self.assertRaisesRegex(kat.KatError, "empty set"):
             kat.check(ChecksumScheme(domain=7), [])
+
+    def test_catches_a_scheme_that_ignores_the_context(self) -> None:
+        # A dropped context verifies a different message than the one asked
+        # about, and the vectors that would catch it are the ones carrying a
+        # non-empty context.
+        vectors = [
+            kat.KatVector(**{**vars(v), "context": b"\x07\x07"})
+            for v in _reference_vectors_with_context()
+        ]
+        with self.assertRaisesRegex(kat.KatError, "wrong signature"):
+            kat.check(_DropsTheContext(domain=7), vectors)
 
     def test_refuses_a_vector_the_loader_could_not_fully_express(self) -> None:
         # The loader records what it could not feed to the seam. Running the

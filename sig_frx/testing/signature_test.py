@@ -34,9 +34,9 @@ def _valid_batch() -> tuple[ChecksumScheme, Array, Array, Array]:
     # keygen and sign are single-message; vmap is how a caller batches them, which
     # is exactly what the seam's docstring says.
     public_keys, secret_keys = frx.vmap(scheme.keygen)(seeds)
-    signatures = frx.vmap(lambda k, m: scheme.sign(k, m, randomness=None))(
-        secret_keys, messages
-    )
+    signatures = frx.vmap(
+        lambda k, m: scheme.sign(k, m, randomness=None, context=None)
+    )(secret_keys, messages)
     return scheme, public_keys, messages, signatures
 
 
@@ -53,31 +53,39 @@ class SignatureSeamTest(absltest.TestCase):
 
     def test_verify_returns_one_verdict_per_batch_entry(self) -> None:
         scheme, public_keys, messages, signatures = _valid_batch()
-        verdicts = scheme.verify(public_keys, messages, signatures)
+        verdicts = scheme.verify(public_keys, messages, signatures, context=None)
         self.assertEqual(verdicts.shape, (_BATCH,))
         self.assertEqual(verdicts.dtype, fnp.bool_)
         self.assertTrue(bool(fnp.all(verdicts)))
 
     def test_verify_rejects_only_the_tampered_signature(self) -> None:
         scheme, public_keys, messages, signatures = _valid_batch()
-        verdicts = scheme.verify(public_keys, messages, _flip_bit(signatures, 2))
+        verdicts = scheme.verify(
+            public_keys, messages, _flip_bit(signatures, 2), context=None
+        )
         self.assertEqual([bool(v) for v in verdicts], [True, True, False, True])
 
     def test_verify_rejects_only_the_tampered_message(self) -> None:
         scheme, public_keys, messages, signatures = _valid_batch()
-        verdicts = scheme.verify(public_keys, _flip_bit(messages, 1), signatures)
+        verdicts = scheme.verify(
+            public_keys, _flip_bit(messages, 1), signatures, context=None
+        )
         self.assertEqual([bool(v) for v in verdicts], [True, False, True, True])
 
     def test_verify_rejects_only_the_tampered_public_key(self) -> None:
         scheme, public_keys, messages, signatures = _valid_batch()
-        verdicts = scheme.verify(_flip_bit(public_keys, 3), messages, signatures)
+        verdicts = scheme.verify(
+            _flip_bit(public_keys, 3), messages, signatures, context=None
+        )
         self.assertEqual([bool(v) for v in verdicts], [True, True, True, False])
 
     def test_the_whole_batch_survives_jit_as_one_call(self) -> None:
         # The batch is what maps onto a GPU's width, so it has to trace as one
         # computation — not B of them.
         scheme, public_keys, messages, signatures = _valid_batch()
-        verdicts = frx.jit(scheme.verify)(public_keys, messages, signatures)
+        verdicts = frx.jit(scheme.verify)(
+            public_keys, messages, signatures, context=None
+        )
         self.assertTrue(bool(fnp.all(verdicts)))
 
     def test_value_equality_survives_reconstruction(self) -> None:

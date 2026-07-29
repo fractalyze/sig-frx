@@ -14,9 +14,9 @@ derives a tampered batch from whatever positives it is handed and requires the
 rejection, so a scheme never gets the choice.
 
 **A vector the harness cannot run faithfully is an error, not a skip.** Silently
-dropping a field — a signing context, a published failure verdict — reports a
-pass for a case that was never run, which is the one outcome worse than a
-failure.
+dropping a field — a published failure verdict, a mode marker selecting a
+different operation — reports a pass for a case that was never run, which is the
+one outcome worse than a failure.
 """
 
 from __future__ import annotations
@@ -54,13 +54,16 @@ class KatVector:
     # The published verdict. ACVP's sigVer sets are mostly deliberate failures,
     # so this is load-bearing rather than a formality.
     valid: bool = True
+    # The standard's application context string, which goes into the message the
+    # scheme signs.
+    context: bytes | None = None
     # Published fields the record cannot express, by name. A standard's vector
-    # set covers every mode of its interface — FIPS 204 publishes a signing
-    # context, a pre-hash variant, and an external-mu variant, each a different
-    # operation from the plain one — and the seam names a single operation. A
-    # loader records what it could not feed rather than dropping it, and `check`
-    # refuses the vector, because running the plain operation against a vector
-    # published for another one reports a pass for a case nobody ran.
+    # set covers every mode of its interface — FIPS 204 publishes a pre-hashed
+    # variant, an internal interface, and an external-mu variant, each a
+    # different operation from the one the seam names. A loader records what it
+    # could not feed rather than dropping it, and `check` refuses the vector,
+    # because running the seam's operation against a vector published for another
+    # one reports a pass for a case nobody ran.
     unsupported: tuple[str, ...] = ()
 
 
@@ -88,6 +91,16 @@ _ACVP_BYTE_FIELDS = {
     "message": "message",
     "signature": "signature",
     "rnd": "randomness",
+    "context": "context",
+}
+
+# Mode markers whose *value* decides whether the case is the operation the seam
+# names. Anything outside the benign value — a pre-hashed message, the internal
+# interface, a pre-computed message representative — is a different operation.
+_ACVP_BENIGN_MODES: dict[str, frozenset[Any]] = {
+    "signatureInterface": frozenset({"external"}),
+    "preHash": frozenset({"pure"}),
+    "externalMu": frozenset({False}),
 }
 
 # Fields that identify or annotate a case rather than feed it. Anything outside
@@ -141,9 +154,7 @@ def load_acvp(prompt_path: Path | str, expected_path: Path | str) -> list[KatVec
                     if name not in _ACVP_IGNORED_FIELDS
                     and name not in _ACVP_BYTE_FIELDS
                     and name not in _ACVP_SEED_FIELDS
-                    # An empty context selects the plain operation, so it is the
-                    # one mode marker that carries no requirement.
-                    and not (name == "context" and value == "")
+                    and value not in _ACVP_BENIGN_MODES.get(name, frozenset())
                 )
             )
             vectors.append(
@@ -217,7 +228,7 @@ _TAMPERINGS: tuple[tuple[str, Callable[[KatVector], KatVector]], ...] = (
 )
 
 
-def check(scheme: Signature[Any, Any, Any], vectors: Sequence[KatVector]) -> None:
+def check(scheme: Signature, vectors: Sequence[KatVector]) -> None:
     """Run every check the standard requires, plus the tampering it does not.
 
     `vectors` are one scheme instance's — one parameter set. Raises `KatError`
@@ -253,9 +264,7 @@ def _reject_unrunnable(vectors: Sequence[KatVector]) -> None:
         )
 
 
-def _check_keygen(
-    scheme: Signature[Any, Any, Any], vectors: Sequence[KatVector]
-) -> None:
+def _check_keygen(scheme: Signature, vectors: Sequence[KatVector]) -> None:
     """Keygen is deterministic in the seed, and reproduces the published bytes."""
     for vector in vectors:
         if vector.seed is None or (
@@ -269,7 +278,7 @@ def _check_keygen(
             raise KatError(f"{vector.case_id}: keygen produced the wrong secret key")
 
 
-def _check_sign(scheme: Signature[Any, Any, Any], vectors: Sequence[KatVector]) -> None:
+def _check_sign(scheme: Signature, vectors: Sequence[KatVector]) -> None:
     """Signing reproduces the published signature, byte for byte."""
     for vector in vectors:
         if vector.secret_key is None or vector.message is None:
@@ -281,14 +290,13 @@ def _check_sign(scheme: Signature[Any, Any, Any], vectors: Sequence[KatVector]) 
             _as_array(vector.secret_key),
             _as_array(vector.message),
             randomness=randomness,
+            context=None if vector.context is None else _as_array(vector.context),
         )
         if to_bytes(signature) != vector.signature:
             raise KatError(f"{vector.case_id}: signing produced the wrong signature")
 
 
-def _check_verify(
-    scheme: Signature[Any, Any, Any], vectors: Sequence[KatVector]
-) -> None:
+def _check_verify(scheme: Signature, vectors: Sequence[KatVector]) -> None:
     """Verification agrees with every published verdict, and rejects tampering.
 
     The batch is the unit: one call per equal-length group, never a loop over
@@ -316,9 +324,7 @@ def _check_verify(
         _check_tampering(scheme, [v for v in group if v.valid])
 
 
-def _check_tampering(
-    scheme: Signature[Any, Any, Any], group: Sequence[KatVector]
-) -> None:
+def _check_tampering(scheme: Signature, group: Sequence[KatVector]) -> None:
     """Every accepted case must be rejected once one of its three inputs moves.
 
     One bit, in one entry of the batch, with the other entries' verdicts pinned:
@@ -346,29 +352,37 @@ def _check_tampering(
                     )
 
 
-def _verify_batch(
-    scheme: Signature[Any, Any, Any], group: Sequence[KatVector]
-) -> list[bool]:
+def _verify_batch(scheme: Signature, group: Sequence[KatVector]) -> list[bool]:
     public_keys = _stack([_as_array(v.public_key) for v in group])  # type: ignore[arg-type]
     messages = _stack([_as_array(v.message) for v in group])  # type: ignore[arg-type]
     signatures = _stack([_as_array(v.signature) for v in group])  # type: ignore[arg-type]
-    verdicts = scheme.verify(public_keys, messages, signatures)
+    context = group[0].context
+    verdicts = scheme.verify(
+        public_keys,
+        messages,
+        signatures,
+        context=None if context is None else _as_array(context),
+    )
     return [bool(v) for v in np.asarray(verdicts)]
 
 
 def _group_by_shape(vectors: Sequence[KatVector]) -> list[list[KatVector]]:
-    """Split into batches of equal byte lengths.
+    """Split into batches of equal byte lengths and one shared context.
 
     A batch axis needs one static shape, and published sets deliberately vary
-    message length. Grouping keeps verification batched within each length
-    rather than falling back to a case-by-case loop.
+    message length. The context is one value per call rather than per entry — the
+    seam's shape, because a verifier serves one protocol domain — so cases with
+    different contexts cannot share a batch either. Grouping keeps verification
+    batched within each combination rather than falling back to a case-by-case
+    loop.
     """
-    groups: dict[tuple[int, int, int], list[KatVector]] = {}
+    groups: dict[tuple[int, int, int, bytes | None], list[KatVector]] = {}
     for vector in vectors:
-        shape = (
+        key = (
             len(vector.public_key or b""),
             len(vector.message or b""),
             len(vector.signature or b""),
+            vector.context,
         )
-        groups.setdefault(shape, []).append(vector)
+        groups.setdefault(key, []).append(vector)
     return list(groups.values())
