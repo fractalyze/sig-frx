@@ -1,0 +1,8 @@
+# actionlint cannot know which self-hosted labels exist, so it rejects every
+# `runs-on` it has not been told about. These are the capability labels the
+# fractalyze runners carry.
+
+self-hosted-runner:
+  labels:
+    - cpu
+    - gpu
