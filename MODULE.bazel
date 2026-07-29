@@ -30,7 +30,7 @@ bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "hash_frx", version = "0.0.0")
 git_override(
     module_name = "hash_frx",
-    commit = "8c88ff23346b65c094c8f0ccb5a7b3de63392582",
+    commit = "fe1d70d5f4a39c6637216623ca82f7d68eeb3185",
     remote = "https://github.com/fractalyze/hash-frx.git",
 )
 
