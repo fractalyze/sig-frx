@@ -85,13 +85,13 @@ class MlDsaSigVerTest(absltest.TestCase):
             self.assertIsNotNone(vector.signature, vector.case_id)
 
     def test_the_modes_the_seam_does_not_name_are_recorded_not_dropped(self) -> None:
-        # The set covers every mode of FIPS 204's interface: a signing context, a
-        # pre-hash variant, and an external-mu variant whose input is a 64-byte
-        # message representative rather than the message. Each is a different
-        # operation from the plain one the seam names.
+        # The set covers every mode of FIPS 204's interface. The seam names the
+        # external, pure one; the pre-hashed variant, the internal interface, and
+        # the external-mu variant whose input is a 64-byte message representative
+        # are each a different operation.
         recorded = {name for v in self.vectors for name in v.unsupported}
         self.assertContainsSubset(
-            {"context", "signatureInterface", "preHash", "externalMu", "mu"}, recorded
+            {"signatureInterface", "preHash", "hashAlg", "externalMu", "mu"}, recorded
         )
         # externalMu cases genuinely have no message — the loader must not have
         # invented one.
@@ -99,6 +99,25 @@ class MlDsaSigVerTest(absltest.TestCase):
         self.assertNotEmpty(external_mu)
         for vector in external_mu:
             self.assertIsNone(vector.message, vector.case_id)
+
+    def test_a_context_is_carried_rather_than_refused(self) -> None:
+        # The seam takes a context, so a case carrying one is runnable. Refusing
+        # it would exclude most of what FIPS 204 publishes for verification.
+        self.assertNotIn(
+            "context", {name for v in self.vectors for name in v.unsupported}
+        )
+        with_context = [v for v in self.vectors if v.context]
+        self.assertNotEmpty(with_context)
+
+    def test_the_runnable_subset_is_the_external_pure_interface(self) -> None:
+        # Three parameter sets x fifteen cases: what a scheme implementing the
+        # seam's operation can be gated on today, out of the twelve groups
+        # published.
+        runnable = [v for v in self.vectors if not v.unsupported]
+        self.assertLen(runnable, 45)
+        self.assertLen({v.parameter_set for v in runnable}, 3)
+        for vector in runnable:
+            self.assertIsNotNone(vector.message, vector.case_id)
 
     def test_the_harness_refuses_them_rather_than_running_the_wrong_operation(
         self,

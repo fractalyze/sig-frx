@@ -28,15 +28,37 @@ sampled in fixed-size blocks with a mask, or it runs on the host. Which one a
 scheme picks is a decision its page records, along with the timing consequence
 ([`security.md`](security.md)).
 
-## Keys and signatures are the pytrees
+## Keys and signatures are bytes at the seam
 
-They are what crosses a `jit` / `vmap` boundary here, so each is a registered
+They cross the `Signature` seam as `uint8` arrays in the standard's encoding, not
+as scheme-named pytrees: a consumer holds bytes, and a seam taking a structured
+form would make it call a scheme-specific decode first — which means naming the
+scheme, which is what the seam exists to prevent. A scheme parses its own
+encoding on entry, and any structured form it wants across calls is its own
+surface, below the seam.
+
+Inside a scheme, whatever crosses a `jit` / `vmap` boundary is a registered
 frozen dataclass, and a scheme instance carried as pytree aux needs value-based
-`__eq__`/`__hash__` — which is why the `Signature` seam requires them. Identity
-equality does not error; it silently re-traces the enclosing zone for every
-freshly built instance, so it surfaces as a slow call and never as a failure.
+`__eq__`/`__hash__` — which is why the seam requires them. Identity equality does
+not error; it silently re-traces the enclosing zone for every freshly built
+instance, so it surfaces as a slow call and never as a failure.
 
 A parameter record that never crosses a boundary stays plain data.
+
+## The context is part of what gets signed
+
+FIPS 204 and 205 both take an application context string, and it changes the
+message the scheme signs — so `sign` and `verify` take it and a scheme never
+accepts one it then ignores. A scheme whose standard has no context requires it
+empty and raises otherwise.
+
+One context per call, not per batch entry: a verifier serves one protocol domain
+at a time.
+
+The seam names the standards' plain external interface. A variant that prepares a
+different message — a pre-hashed message, the internal interface, a pre-computed
+message representative — is a different operation and lives under the scheme's
+own name, not on the seam.
 
 ## No blockchain in a core
 
