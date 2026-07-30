@@ -1,4 +1,4 @@
-load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
@@ -85,21 +85,61 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
-# The gate on published bytes: reproducing a key NIST published is what confirms
-# every reading the components beneath SLH-DSA were written from. Vectors are
-# fetched and sha256-pinned in //MODULE.bazel rather than committed.
+# The published vectors, grouped by operation, plus the seam adapters that let one
+# harness drive the interfaces the seam deliberately does not name. Shared by the
+# merge gate and the sweep so the two cannot disagree about what is runnable.
+# Vectors are fetched and sha256-pinned in //MODULE.bazel rather than committed.
+py_library(
+    name = "slh_dsa_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "slh_dsa_vectors.py",
+    ],
+    data = [
+        "@acvp_slh_dsa_keygen_expected//file",
+        "@acvp_slh_dsa_keygen_prompt//file",
+        "@acvp_slh_dsa_siggen_expected//file",
+        "@acvp_slh_dsa_siggen_prompt//file",
+        "@acvp_slh_dsa_sigver_expected//file",
+        "@acvp_slh_dsa_sigver_prompt//file",
+    ],
+    deps = [
+        "//sig_frx:signature",
+        "//sig_frx/hashbased:slh_dsa",
+        "//sig_frx/testing:kat",
+        "@rules_python//python/runfiles",
+        requirement("frx"),
+    ],
+)
+
+# The gate on published bytes: reproducing what NIST published is what confirms
+# every reading the components beneath SLH-DSA were written from. The `f`
+# parameter set, so a review waits on 8-key-pair trees rather than 512-key-pair
+# ones; `slh_dsa_sweep_test` is the exhaustive run.
 py_test(
     name = "slh_dsa_kat_test",
     size = "medium",
     srcs = ["slh_dsa_kat_test.py"],
-    data = [
-        "@acvp_slh_dsa_keygen_expected//file",
-        "@acvp_slh_dsa_keygen_prompt//file",
-    ],
     deps = [
+        ":slh_dsa_vectors",
         "//sig_frx/hashbased:slh_dsa",
         "//sig_frx/testing:kat",
-        "@rules_python//python/runfiles",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# Every constructible parameter set against every published vector. Tagged
+# `slow_kat`, so .bazelrc.ci drops it from a PR run and the scheduled job puts it
+# back: it is the standards-exactness gate, and it is too slow to sit in review.
+py_test(
+    name = "slh_dsa_sweep_test",
+    size = "large",
+    srcs = ["slh_dsa_sweep_test.py"],
+    tags = ["slow_kat"],
+    deps = [
+        ":slh_dsa_vectors",
         requirement("absl_py"),
     ] + GPU_PLUGIN_DEPS,
 )

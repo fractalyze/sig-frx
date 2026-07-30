@@ -14,7 +14,15 @@ The standard fixes everything observable. The parameter sets are Table 2's, the
 encodings are Figures 15 to 17, the domain separators and the context framing are
 §10.2, and the digest split is Algorithm 19 lines 6 to 10. None of it is
 negotiable: a signature is a byte string that either matches what NIST published
-or does not.
+or does not — and it does, for every operation the standard defines and every
+parameter set §11.2.1's family can build, against ACVP's `keyGen`, `sigGen` and
+`sigVer` sets. The exhaustive run over both sets is tagged `slow_kat`; the merge
+gate gets the same operations at the `f` set.
+
+Three interfaces, and the seam names one. §10's pure external operation is the
+seam; HashSLH-DSA and §9's internal interface prepend a different message, so they
+live under `hash_sign` / `hash_verify` and `sign_internal` / `verify_internal`. The
+validation program publishes vectors against all three, so all three are gated.
 
 What this implementation chooses:
 
@@ -42,6 +50,8 @@ What this implementation chooses:
   Algorithms 23 and 25 under their own names, because they sign a different message
   — domain separator one, and the pre-hash function's OID before the digest. Which
   is the whole point of the separator, so the two must not share an entry point.
+  SHA-256 is the pre-hash function available; ACVP exercises twelve, and the OID is
+  part of what gets signed, so the others need their hash rather than a stand-in.
 
 ## Where the batch axis is
 
