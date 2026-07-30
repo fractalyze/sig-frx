@@ -145,9 +145,14 @@ class SignVerifyTest(absltest.TestCase):
         return bytes(
             np.asarray(
                 fors.pk_from_sig(
-                    self.tweak, _PARAMS, signature, digest, _PK_SEED, _POSITION
+                    self.tweak,
+                    _PARAMS,
+                    signature[None, ...],
+                    digest[None, :],
+                    _PK_SEED,
+                    [_POSITION],
                 )
-            )
+            )[0]
         )
 
     def test_a_signature_reconstructs_the_public_key(self) -> None:
@@ -203,8 +208,100 @@ class SignVerifyTest(absltest.TestCase):
         self.assertNotEqual(bytes(other), bytes(self.public_key))
 
     def test_a_misshapen_signature_is_an_error(self) -> None:
-        with self.assertRaisesRegex(ValueError, "FORS signature is"):
+        with self.assertRaisesRegex(ValueError, "FORS signature batch"):
             self._pk_from_sig(self.signature[:, :-1, :], _DIGEST)
+
+
+class BatchedReconstructionTest(absltest.TestCase):
+    """Nothing about an entry is shared, including `PK.seed`.
+
+    An SLH-DSA verifier holds `B` claims whose digests each pick their own FORS
+    key, under whatever public key came with the signature — so the batch varies
+    by position, by digest and by seed at once. The reference form is the
+    one-entry call, which the cases above already tie to the standard.
+    """
+
+    ENTRIES = (
+        (fors.ForsPosition(tree=6, key_pair=2), _DIGEST, _PK_SEED),
+        (
+            fors.ForsPosition(tree=1, key_pair=0),
+            np.frombuffer(bytes([0b00011011, 0b11010010]), dtype=np.uint8),
+            _PK_SEED ^ 0xFF,
+        ),
+    )
+
+    def test_each_entry_reconstructs_its_own_key_under_its_own_seed(self) -> None:
+        tweak = _family()
+        expected = [
+            np.asarray(fors.pk_gen(tweak, _PARAMS, pk_seed, _SK_SEED, position))
+            for position, _, pk_seed in self.ENTRIES
+        ]
+        signatures = np.stack(
+            [
+                np.asarray(
+                    fors.sign(tweak, _PARAMS, digest, pk_seed, _SK_SEED, position)
+                )
+                for position, digest, pk_seed in self.ENTRIES
+            ]
+        )
+        got = np.asarray(
+            fors.pk_from_sig(
+                tweak,
+                _PARAMS,
+                signatures,
+                np.stack([digest for _, digest, _ in self.ENTRIES]),
+                np.stack([pk_seed for _, _, pk_seed in self.ENTRIES]),
+                [position for position, _, _ in self.ENTRIES],
+            )
+        )
+        for index, key in enumerate(expected):
+            self.assertEqual(bytes(got[index]), bytes(key), f"entry {index}")
+        # And the entries are genuinely distinct, so agreeing above is not two
+        # copies of the same reconstruction.
+        self.assertNotEqual(bytes(expected[0]), bytes(expected[1]))
+
+    def test_one_tampered_entry_fails_alone(self) -> None:
+        tweak = _family()
+        signatures = np.stack(
+            [
+                np.asarray(
+                    fors.sign(tweak, _PARAMS, digest, pk_seed, _SK_SEED, position)
+                )
+                for position, digest, pk_seed in self.ENTRIES
+            ]
+        )
+        signatures[0, 1, 0, 0] ^= 1
+        got = np.asarray(
+            fors.pk_from_sig(
+                tweak,
+                _PARAMS,
+                signatures,
+                np.stack([digest for _, digest, _ in self.ENTRIES]),
+                np.stack([pk_seed for _, _, pk_seed in self.ENTRIES]),
+                [position for position, _, _ in self.ENTRIES],
+            )
+        )
+        keys = [
+            bytes(np.asarray(fors.pk_gen(tweak, _PARAMS, pk_seed, _SK_SEED, position)))
+            for position, _, pk_seed in self.ENTRIES
+        ]
+        self.assertNotEqual(bytes(got[0]), keys[0])
+        self.assertEqual(bytes(got[1]), keys[1])
+
+    def test_one_digest_per_position_is_required(self) -> None:
+        tweak = _family()
+        signature = np.asarray(
+            fors.sign(tweak, _PARAMS, _DIGEST, _PK_SEED, _SK_SEED, _POSITION)
+        )
+        with self.assertRaisesRegex(ValueError, "one digest per position"):
+            fors.pk_from_sig(
+                tweak,
+                _PARAMS,
+                np.stack([signature, signature]),
+                _DIGEST[None, :],
+                _PK_SEED,
+                [_POSITION, _POSITION],
+            )
 
 
 if __name__ == "__main__":

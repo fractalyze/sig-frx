@@ -14,9 +14,11 @@ differing in how each function derives its digest rather than in what it is for.
 
 Inputs and outputs are `uint8` arrays with a leading batch axis, because the
 callers hash a whole WOTS+ chain step or a whole Merkle level at once. `pk_seed`
-is shared across the batch and the address is not: one seed, many positions.
-Addresses arrive already encoded (`adrs.encode_batch`) — they are structural, so
-they are built on the host before any hashing starts.
+is either shared across the batch — one seed, many positions, which is one key's
+own tree — or given per entry, which is what verifying a batch of signatures
+under different public keys needs. Addresses arrive already encoded
+(`adrs.encode_batch`) — they are structural, so they are built on the host before
+any hashing starts.
 
 `prf_msg` is the exception, taking one message rather than a batch: it is called
 once per signature, on the signing path, which this repo does not put on the hot
@@ -82,6 +84,22 @@ def _batched(value: ArrayLike, batch: int) -> Array:
     if array.ndim == 1:
         return fnp.broadcast_to(array, (batch, array.shape[0]))
     return array
+
+
+def repeat_per_entry(value: ArrayLike, times: int) -> Array:
+    """Line a per-entry operand up with an entry-major batch of `times` rows each.
+
+    A caller that widens `B` entries into `B · times` hashes — a key pair into its
+    `len` chains, a FORS signature into its `k` trees — has to widen whatever
+    varies per entry alongside them, and `pk_seed` varies per entry as soon as the
+    batch spans more than one public key. A shared `[k]` operand passes through
+    untouched, since `_batched` broadcasts it to whatever the row count turns out
+    to be.
+    """
+    array = fnp.asarray(value, dtype=fnp.uint8)
+    if array.ndim == 1:
+        return array
+    return fnp.repeat(array, times, axis=0)
 
 
 class Sha2TweakableHash:

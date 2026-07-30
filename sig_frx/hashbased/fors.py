@@ -17,10 +17,16 @@ That numbering is also why one index does two jobs in `tree.root_from_path`: the
 forest-wide index addresses the node, and its bit says which side the sibling
 goes, and those agree with the within-tree index at every level a path reaches
 (see that function's docstring).
+
+Signing takes one FORS key and verification takes a batch of them, the same
+asymmetry WOTS+ and the XMSS layer carry: a signer holds one key, while a verifier
+holds `B` claims whose digests each pick their own key. So `pk_from_sig` widens
+over signatures and everything on the key-generation and signing path does not.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -30,7 +36,7 @@ from frx import Array
 from frx.typing import ArrayLike
 
 from sig_frx.hashbased import adrs, tree, wots
-from sig_frx.hashbased.tweakable import TweakableHash
+from sig_frx.hashbased.tweakable import TweakableHash, repeat_per_entry
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,35 @@ def _node_addresses(position: ForsPosition) -> tree.NodeAddresses:
     return build
 
 
+def _batch_node_addresses(positions: Sequence[ForsPosition]) -> tree.NodeAddresses:
+    """Node addresses for a row batch whose rows sit in *different* FORS keys.
+
+    Row `r`'s node is addressed in `positions[r]`'s forest. Only usable where the
+    batch keeps one row per position at every level — `root_from_path`, where each
+    row walks its own path — and not in a whole-forest reduction, where the node
+    count halves each level and the correspondence would not hold.
+    """
+
+    def build(height: int, indices: np.ndarray) -> np.ndarray:
+        return adrs.encode_batch(
+            [
+                adrs.fors_tree(
+                    layer=0,
+                    tree=position.tree,
+                    key_pair=position.key_pair,
+                    height=height,
+                    index=int(index),
+                )
+                for position, index in zip(
+                    positions, np.asarray(indices).reshape(-1), strict=True
+                )
+            ],
+            compressed=True,
+        )
+
+    return build
+
+
 def secret_values(
     tweak: TweakableHash,
     pk_seed: ArrayLike,
@@ -131,9 +166,14 @@ def message_indices(params: ForsParams, digest: ArrayLike) -> np.ndarray:
     Algorithm 16 line 2 gives the within-tree index of each tree's chosen leaf;
     tree `i`'s offset `i·2^a` turns that into the forest-wide numbering
     everything else here uses.
+
+    Rank-preserving: one digest gives `[k]`, and a batch of them gives `[B, k]` —
+    which is what verifying a batch of signatures asks for, one digest per entry.
     """
-    within = np.asarray(wots.base_2b(digest, params.a, params.k))[0]
-    return np.arange(params.k) * params.t + within
+    values = np.asarray(digest)
+    within = np.asarray(wots.base_2b(values, params.a, params.k))
+    indices = np.arange(params.k) * params.t + within
+    return indices[0] if values.ndim == 1 else indices
 
 
 def sign(
@@ -158,15 +198,24 @@ def sign(
 
 
 def public_key(
-    tweak: TweakableHash, pk_seed: ArrayLike, position: ForsPosition, roots: ArrayLike
+    tweak: TweakableHash,
+    pk_seed: ArrayLike,
+    positions: Sequence[ForsPosition],
+    roots: ArrayLike,
 ) -> Array:
-    """`T_k` over the `k` tree roots — Algorithm 17 lines 21 to 24."""
-    address = adrs.encode_batch(
-        [adrs.fors_roots(layer=0, tree=position.tree, key_pair=position.key_pair)],
+    """`T_k` over each entry's `k` tree roots — Algorithm 17 lines 21 to 24.
+
+    `[B, k, n]` -> `[B, n]`: one `T_k` per entry, all of them in one call.
+    """
+    addresses = adrs.encode_batch(
+        [
+            adrs.fors_roots(layer=0, tree=position.tree, key_pair=position.key_pair)
+            for position in positions
+        ],
         compressed=True,
     )
-    stacked = fnp.asarray(roots, dtype=fnp.uint8)
-    return tweak.t(pk_seed, address, stacked.reshape(1, -1))[0]
+    stacked = fnp.asarray(roots, dtype=fnp.uint8).reshape(len(positions), -1)
+    return tweak.t(pk_seed, addresses, stacked)
 
 
 def pk_gen(
@@ -184,32 +233,61 @@ def pk_gen(
         params.a,
         _node_addresses(position),
     )
-    return public_key(tweak, pk_seed, position, roots)
+    return public_key(tweak, pk_seed, [position], roots)[0]
 
 
 def pk_from_sig(
     tweak: TweakableHash,
     params: ForsParams,
-    signature: ArrayLike,
-    digest: ArrayLike,
+    signatures: ArrayLike,
+    digests: ArrayLike,
     pk_seed: ArrayLike,
-    position: ForsPosition,
+    positions: Sequence[ForsPosition],
 ) -> Array:
-    """`fors_pkFromSig` — Algorithm 17: the operation verification runs.
+    """`fors_pkFromSig` — Algorithm 17, for a batch. `[B, k, a + 1, n]` -> `[B, n]`.
 
-    All `k` trees walk their paths together: one hash call per level for the whole
-    forest, `a` levels deep, then one `T_k` over the roots.
+    The operation verification actually runs, so it takes many signatures: each
+    with its own digest, its own FORS key and — when the batch spans more than one
+    public key — its own `pk_seed`. That is what an SLH-DSA verifier holds, since
+    the digest picks the FORS key and every entry's digest is its own.
+
+    All `B · k` trees walk their paths together: one hash call per level for every
+    tree of every entry, `a` levels deep, then one `T_k` per entry over its roots.
     """
-    parts = fnp.asarray(signature, dtype=fnp.uint8)
-    if parts.shape[:2] != (params.k, params.a + 1):
+    parts = fnp.asarray(signatures, dtype=fnp.uint8)
+    batch = len(positions)
+    expected = (batch, params.k, params.a + 1, params.n)
+    if parts.shape != expected:
         raise ValueError(
-            f"a FORS signature is {params.k} trees of {params.a + 1} values, "
-            f"got shape {tuple(parts.shape)}"
+            f"a FORS signature batch is {expected}, got {tuple(parts.shape)}"
         )
-    indices = message_indices(params, digest)
-    node_addresses = _node_addresses(position)
-    leaf_nodes = tweak.f(pk_seed, node_addresses(0, indices), parts[:, 0, :])
-    roots = tree.root_from_path(
-        tweak, pk_seed, leaf_nodes, indices, parts[:, 1:, :], node_addresses
+    md = np.atleast_2d(np.asarray(digests))
+    if md.shape[0] != batch:
+        raise ValueError(
+            f"one digest per position: got {batch} positions, {md.shape[0]} digests"
+        )
+
+    # Every entry's `k` trees are rows of one batch, entry-major, so the position
+    # and the seed both repeat `k` times to line up with them.
+    rows = batch * params.k
+    node_addresses = _batch_node_addresses(
+        [position for position in positions for _ in range(params.k)]
     )
-    return public_key(tweak, pk_seed, position, roots)
+    seeds = repeat_per_entry(pk_seed, params.k)
+    indices = message_indices(params, md).reshape(-1)
+    leaf_nodes = tweak.f(
+        seeds,
+        node_addresses(0, indices),
+        parts[:, :, 0, :].reshape(rows, params.n),
+    )
+    roots = tree.root_from_path(
+        tweak,
+        seeds,
+        leaf_nodes,
+        indices,
+        parts[:, :, 1:, :].reshape(rows, params.a, params.n),
+        node_addresses,
+    )
+    return public_key(
+        tweak, pk_seed, positions, roots.reshape(batch, params.k, params.n)
+    )
