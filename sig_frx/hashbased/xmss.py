@@ -112,20 +112,22 @@ def node_addresses(positions: Sequence[tree.TreePosition]) -> tree.NodeAddresses
     batch keeps one entry per position at every level — `root_from_path`, where a
     signature walks its own path — and not in a whole-tree reduction, where the
     node count halves each level and the correspondence would not hold.
+
+    The prefix columns are built once rather than per level, since every level of a
+    path addresses the same trees.
     """
+    layers = np.array([position.layer for position in positions])
+    trees = np.array([position.tree for position in positions])
 
     def build(height: int, indices: np.ndarray) -> np.ndarray:
         flat = np.asarray(indices).reshape(-1)
+        if flat.shape[0] != len(positions):
+            raise ValueError(
+                f"one node per position: got {len(positions)} positions and "
+                f"{flat.shape[0]} indices"
+            )
         return adrs.encode_batch(
-            [
-                adrs.hash_tree(
-                    layer=position.layer,
-                    tree=position.tree,
-                    height=height,
-                    index=int(index),
-                )
-                for position, index in zip(positions, flat, strict=True)
-            ],
+            adrs.hash_tree(layer=layers, tree=trees, height=height, index=flat),
             compressed=True,
         )
 

@@ -66,7 +66,7 @@ class TweakedHashTest(absltest.TestCase):
         self.family = _family()
         self.address = a.wots_hash(layer=2, tree=7, key_pair=3, chain=5, hash_index=1)
         self.adrs_c = a.encode(self.address, compressed=True)
-        self.batch = a.encode_batch([self.address], compressed=True)
+        self.batch = a.encode_batch(self.address, compressed=True)
 
     def test_f_is_the_standards_construction(self) -> None:
         m1 = bytes(range(30, 30 + _N))
@@ -96,7 +96,7 @@ class TweakedHashTest(absltest.TestCase):
         # replayed in another.
         payload = _u8(bytes(range(_N)))
         elsewhere = a.encode_batch(
-            [a.wots_hash(layer=2, tree=7, key_pair=3, chain=5, hash_index=2)],
+            a.wots_hash(layer=2, tree=7, key_pair=3, chain=5, hash_index=2),
             compressed=True,
         )
         self.assertNotEqual(
@@ -114,7 +114,7 @@ class BatchTest(absltest.TestCase):
         # matching shapes never exercises.
         family = _family()
         addresses = [a.wots_prf(0, 0, 0, chain) for chain in range(4)]
-        batch = a.encode_batch(addresses, compressed=True)
+        batch = a.encode_batch(a.wots_prf(0, 0, 0, np.arange(4)), compressed=True)
 
         got = np.asarray(family.prf(_u8(_PK_SEED), _u8(_SK_SEED), batch))
 
@@ -132,7 +132,10 @@ class BatchTest(absltest.TestCase):
             a.wots_hash(layer=0, tree=0, key_pair=0, chain=chain, hash_index=0)
             for chain in range(5)
         ]
-        batch = a.encode_batch(addresses, compressed=True)
+        batch = a.encode_batch(
+            a.wots_hash(layer=0, tree=0, key_pair=0, chain=np.arange(5), hash_index=0),
+            compressed=True,
+        )
         payloads = np.arange(5 * _N, dtype=np.uint8).reshape(5, _N)
 
         got = np.asarray(family.f(_u8(_PK_SEED), batch, payloads))
@@ -209,7 +212,7 @@ class SeamTest(absltest.TestCase):
         # families are one implementation. Device and host SHA-256 are the pair
         # available to check it with; a SHAKE family drops into the same seam.
         payload = _u8(bytes(range(_N)))
-        batch = a.encode_batch([a.wots_pk(1, 2, 3)], compressed=True)
+        batch = a.encode_batch(a.wots_pk(1, 2, 3), compressed=True)
         device = Sha2TweakableHash(Sha256(), n=_N, m=_M)
         host = Sha2TweakableHash(HostSha256(), n=_N, m=_M)
         self.assertEqual(

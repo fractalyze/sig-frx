@@ -160,6 +160,23 @@ def chain(
     return current
 
 
+def _position_columns(
+    positions: Sequence[WotsPosition], per_position: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Each key pair's address prefix, repeated once per row it owns.
+
+    The rows are key-pair-major, which is the layout every batch here uses: key
+    pair 0's `len` chains, then key pair 1's. Building the prefix as three columns
+    once is what keeps the cost of an address batch independent of how many
+    addresses are in it.
+    """
+    return (
+        np.repeat([position.layer for position in positions], per_position),
+        np.repeat([position.tree for position in positions], per_position),
+        np.repeat([position.key_pair for position in positions], per_position),
+    )
+
+
 def _chain_addresses(
     params: WotsParams, positions: Sequence[WotsPosition]
 ) -> list[np.ndarray]:
@@ -170,19 +187,17 @@ def _chain_addresses(
     call: 2^h' key pairs of `len` chains are one batch, so a tree's leaves cost
     `w − 1` hashes rather than `2^h' · (w − 1)`.
     """
+    layers, trees, key_pairs = _position_columns(positions, params.len)
+    chains = np.tile(np.arange(params.len), len(positions))
     return [
         adrs.encode_batch(
-            [
-                adrs.wots_hash(
-                    layer=position.layer,
-                    tree=position.tree,
-                    key_pair=position.key_pair,
-                    chain=index,
-                    hash_index=step,
-                )
-                for position in positions
-                for index in range(params.len)
-            ],
+            adrs.wots_hash(
+                layer=layers,
+                tree=trees,
+                key_pair=key_pairs,
+                chain=chains,
+                hash_index=step,
+            ),
             compressed=True,
         )
         for step in range(params.w - 1)
@@ -201,17 +216,14 @@ def secret_values(
     `[len(positions) · len, n]`, in the same key-pair-major order as
     `_chain_addresses`.
     """
+    layers, trees, key_pairs = _position_columns(positions, params.len)
     addresses = adrs.encode_batch(
-        [
-            adrs.wots_prf(
-                layer=position.layer,
-                tree=position.tree,
-                key_pair=position.key_pair,
-                chain=index,
-            )
-            for position in positions
-            for index in range(params.len)
-        ],
+        adrs.wots_prf(
+            layer=layers,
+            tree=trees,
+            key_pair=key_pairs,
+            chain=np.tile(np.arange(params.len), len(positions)),
+        ),
         compressed=True,
     )
     return tweak.prf(pk_seed, sk_seed, addresses)
@@ -308,12 +320,9 @@ def fips205_compression(
     RFC 8391 compresses with an L-tree instead, which is why this is a value a
     caller passes rather than something WOTS+ decides for itself.
     """
+    layers, trees, key_pairs = _position_columns(positions, 1)
     addresses = adrs.encode_batch(
-        [
-            adrs.wots_pk(position.layer, position.tree, position.key_pair)
-            for position in positions
-        ],
-        compressed=True,
+        adrs.wots_pk(layers, trees, key_pairs), compressed=True
     )
 
     def compress(ends: Array) -> Array:

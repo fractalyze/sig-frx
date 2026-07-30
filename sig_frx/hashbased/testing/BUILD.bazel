@@ -9,6 +9,7 @@ py_test(
     deps = [
         "//sig_frx/hashbased:adrs",
         requirement("absl_py"),
+        requirement("numpy"),
     ],
 )
 

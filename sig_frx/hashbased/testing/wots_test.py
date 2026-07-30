@@ -72,15 +72,13 @@ def _spec_chain(
     current = value
     for step in range(start, start + steps):
         address = adrs.encode_batch(
-            [
-                adrs.wots_hash(
-                    layer=position.layer,
-                    tree=position.tree,
-                    key_pair=position.key_pair,
-                    chain=chain_index,
-                    hash_index=step,
-                )
-            ],
+            adrs.wots_hash(
+                layer=position.layer,
+                tree=position.tree,
+                key_pair=position.key_pair,
+                chain=chain_index,
+                hash_index=step,
+            ),
             compressed=True,
         )
         current = np.asarray(tweak.f(_PK_SEED, address, current[None, :]))[0]
@@ -135,16 +133,13 @@ class ChainTest(absltest.TestCase):
     def _step_addresses(self, count: int) -> list[np.ndarray]:
         return [
             adrs.encode_batch(
-                [
-                    adrs.wots_hash(
-                        layer=_POSITION.layer,
-                        tree=_POSITION.tree,
-                        key_pair=_POSITION.key_pair,
-                        chain=index,
-                        hash_index=step,
-                    )
-                    for index in range(count)
-                ],
+                adrs.wots_hash(
+                    layer=_POSITION.layer,
+                    tree=_POSITION.tree,
+                    key_pair=_POSITION.key_pair,
+                    chain=np.arange(count),
+                    hash_index=step,
+                ),
                 compressed=True,
             )
             for step in range(_PARAMS.w - 1)
