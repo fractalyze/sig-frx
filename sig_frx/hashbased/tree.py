@@ -42,7 +42,7 @@ from frx import Array
 from frx.typing import ArrayLike
 
 from sig_frx.hashbased import adrs
-from sig_frx.hashbased.tweakable import TweakableHash
+from sig_frx.hashbased.tweakable import NodeHash
 
 # Builds the addresses of the given nodes at one height: `(height, indices)`.
 NodeAddresses = Callable[[int, np.ndarray], np.ndarray]
@@ -74,7 +74,7 @@ def xmss_node_addresses(position: TreePosition) -> NodeAddresses:
 
 
 def reduce_levels(
-    tweak: TweakableHash,
+    tweak: NodeHash,
     pk_seed: ArrayLike,
     nodes: ArrayLike,
     levels: int,
@@ -103,7 +103,7 @@ def reduce_levels(
 
 
 def root(
-    tweak: TweakableHash,
+    tweak: NodeHash,
     pk_seed: ArrayLike,
     leaves: ArrayLike,
     node_addresses: NodeAddresses,
@@ -122,7 +122,7 @@ def root(
 
 
 def auth_path(
-    tweak: TweakableHash,
+    tweak: NodeHash,
     pk_seed: ArrayLike,
     leaves: ArrayLike,
     indices: ArrayLike,
@@ -160,7 +160,7 @@ def _shifted(node_addresses: NodeAddresses, by: int) -> NodeAddresses:
 
 
 def root_from_path(
-    tweak: TweakableHash,
+    tweak: NodeHash,
     pk_seed: ArrayLike,
     leaves: ArrayLike,
     indices: ArrayLike,

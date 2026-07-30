@@ -13,6 +13,66 @@ py_test(
     ],
 )
 
+# RFC 8391 publishes no vectors, so the gate is the reference implementation §7
+# points at, digested the way its own `test/vectors.c` prints. The values are
+# committed constants with their provenance in the module docstring rather than a
+# fetched file — there is no published file to fetch.
+py_library(
+    name = "rfc8391_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "rfc8391_vectors.py",
+    ],
+    deps = [requirement("numpy")],
+)
+
+py_test(
+    name = "rfc8391_adrs_test",
+    size = "small",
+    srcs = ["rfc8391_adrs_test.py"],
+    deps = [
+        ":rfc8391_vectors",
+        "//sig_frx/hashbased:rfc8391_adrs",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ],
+)
+
+py_test(
+    name = "rfc8391_hashes_test",
+    size = "small",
+    srcs = ["rfc8391_hashes_test.py"],
+    deps = [
+        ":rfc8391_vectors",
+        "//sig_frx/hashbased:rfc8391_adrs",
+        "//sig_frx/hashbased:rfc8391_hashes",
+        "//sig_frx/hashbased:rfc8391_params",
+        "//sig_frx/hashbased:tweakable",
+        "@hash_frx//hash_frx:sha256",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The gate the substrate is finished against: a WOTS+ public key, a signature and
+# an L-tree leaf reproducing the reference's digests at both runnable OIDs.
+py_test(
+    name = "rfc8391_wots_test",
+    size = "medium",
+    srcs = ["rfc8391_wots_test.py"],
+    deps = [
+        ":rfc8391_vectors",
+        "//sig_frx/hashbased:rfc8391_adrs",
+        "//sig_frx/hashbased:rfc8391_hashes",
+        "//sig_frx/hashbased:rfc8391_params",
+        "//sig_frx/hashbased:rfc8391_wots",
+        "@hash_frx//hash_frx:sha256",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 py_test(
     name = "tweakable_test",
     size = "small",
