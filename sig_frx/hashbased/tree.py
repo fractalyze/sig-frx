@@ -61,15 +61,12 @@ def xmss_node_addresses(position: TreePosition) -> NodeAddresses:
 
     def build(height: int, indices: np.ndarray) -> np.ndarray:
         return adrs.encode_batch(
-            [
-                adrs.hash_tree(
-                    layer=position.layer,
-                    tree=position.tree,
-                    height=height,
-                    index=int(index),
-                )
-                for index in np.asarray(indices).reshape(-1)
-            ],
+            adrs.hash_tree(
+                layer=position.layer,
+                tree=position.tree,
+                height=height,
+                index=np.asarray(indices).reshape(-1),
+            ),
             compressed=True,
         )
 

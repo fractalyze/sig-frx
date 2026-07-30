@@ -75,16 +75,13 @@ def _node_addresses(position: ForsPosition) -> tree.NodeAddresses:
 
     def build(height: int, indices: np.ndarray) -> np.ndarray:
         return adrs.encode_batch(
-            [
-                adrs.fors_tree(
-                    layer=0,
-                    tree=position.tree,
-                    key_pair=position.key_pair,
-                    height=height,
-                    index=int(index),
-                )
-                for index in np.asarray(indices).reshape(-1)
-            ],
+            adrs.fors_tree(
+                layer=0,
+                tree=position.tree,
+                key_pair=position.key_pair,
+                height=height,
+                index=np.asarray(indices).reshape(-1),
+            ),
             compressed=True,
         )
 
@@ -98,22 +95,24 @@ def _batch_node_addresses(positions: Sequence[ForsPosition]) -> tree.NodeAddress
     batch keeps one row per position at every level — `root_from_path`, where each
     row walks its own path — and not in a whole-forest reduction, where the node
     count halves each level and the correspondence would not hold.
+
+    The prefix columns are built once rather than per level, since every level of a
+    path addresses the same forests.
     """
+    trees = np.array([position.tree for position in positions])
+    key_pairs = np.array([position.key_pair for position in positions])
 
     def build(height: int, indices: np.ndarray) -> np.ndarray:
+        flat = np.asarray(indices).reshape(-1)
+        if flat.shape[0] != len(positions):
+            raise ValueError(
+                f"one node per position: got {len(positions)} positions and "
+                f"{flat.shape[0]} indices"
+            )
         return adrs.encode_batch(
-            [
-                adrs.fors_tree(
-                    layer=0,
-                    tree=position.tree,
-                    key_pair=position.key_pair,
-                    height=height,
-                    index=int(index),
-                )
-                for position, index in zip(
-                    positions, np.asarray(indices).reshape(-1), strict=True
-                )
-            ],
+            adrs.fors_tree(
+                layer=0, tree=trees, key_pair=key_pairs, height=height, index=flat
+            ),
             compressed=True,
         )
 
@@ -129,15 +128,12 @@ def secret_values(
 ) -> Array:
     """`fors_skGen` — Algorithm 14, for a batch of forest-wide leaf indices."""
     addresses = adrs.encode_batch(
-        [
-            adrs.fors_prf(
-                layer=0,
-                tree=position.tree,
-                key_pair=position.key_pair,
-                index=int(index),
-            )
-            for index in np.asarray(indices).reshape(-1)
-        ],
+        adrs.fors_prf(
+            layer=0,
+            tree=position.tree,
+            key_pair=position.key_pair,
+            index=np.asarray(indices).reshape(-1),
+        ),
         compressed=True,
     )
     return tweak.prf(pk_seed, sk_seed, addresses)
@@ -208,10 +204,11 @@ def public_key(
     `[B, k, n]` -> `[B, n]`: one `T_k` per entry, all of them in one call.
     """
     addresses = adrs.encode_batch(
-        [
-            adrs.fors_roots(layer=0, tree=position.tree, key_pair=position.key_pair)
-            for position in positions
-        ],
+        adrs.fors_roots(
+            layer=0,
+            tree=np.array([position.tree for position in positions]),
+            key_pair=np.array([position.key_pair for position in positions]),
+        ),
         compressed=True,
     )
     stacked = fnp.asarray(roots, dtype=fnp.uint8).reshape(len(positions), -1)

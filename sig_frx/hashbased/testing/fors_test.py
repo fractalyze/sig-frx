@@ -35,15 +35,13 @@ def _family() -> Sha2TweakableHash:
 
 def _address(height: int, index: int) -> np.ndarray:
     return adrs.encode_batch(
-        [
-            adrs.fors_tree(
-                layer=0,
-                tree=_POSITION.tree,
-                key_pair=_POSITION.key_pair,
-                height=height,
-                index=index,
-            )
-        ],
+        adrs.fors_tree(
+            layer=0,
+            tree=_POSITION.tree,
+            key_pair=_POSITION.key_pair,
+            height=height,
+            index=index,
+        ),
         compressed=True,
     )
 
@@ -51,14 +49,12 @@ def _address(height: int, index: int) -> np.ndarray:
 def _spec_sk(tweak: Sha2TweakableHash, index: int) -> np.ndarray:
     """Algorithm 14, transcribed."""
     address = adrs.encode_batch(
-        [
-            adrs.fors_prf(
-                layer=0,
-                tree=_POSITION.tree,
-                key_pair=_POSITION.key_pair,
-                index=index,
-            )
-        ],
+        adrs.fors_prf(
+            layer=0,
+            tree=_POSITION.tree,
+            key_pair=_POSITION.key_pair,
+            index=index,
+        ),
         compressed=True,
     )
     return np.asarray(tweak.prf(_PK_SEED, _SK_SEED, address))[0]

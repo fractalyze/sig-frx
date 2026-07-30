@@ -12,6 +12,7 @@ order it chose.
 
 from __future__ import annotations
 
+import numpy as np
 from absl.testing import absltest
 
 from sig_frx.hashbased import adrs as a
@@ -112,18 +113,102 @@ class CompressedLayoutTest(absltest.TestCase):
 
 
 class BatchTest(absltest.TestCase):
-    def test_a_batch_is_one_row_per_address(self) -> None:
-        addresses = [a.wots_hash(0, 0, 0, chain, 0) for chain in range(4)]
-        batch = a.encode_batch(addresses, compressed=True)
-        self.assertEqual(batch.shape, (4, 22))
-        for index, address in enumerate(addresses):
-            self.assertEqual(
-                bytes(batch[index]), a.encode(address, compressed=True), f"row {index}"
+    """The batched encoding against the per-address one, field by field.
+
+    `encode_batch` writes a whole batch with array arithmetic while `encode` writes
+    one address the way §4.2 spells it out. The second is the reference: it is what
+    the cases above pin against the standard, so requiring the two to agree is what
+    carries that agreement over to the form every component actually calls.
+    """
+
+    def _reference(self, addresses: list[a.Adrs], *, compressed: bool) -> np.ndarray:
+        """One row per address, each encoded on its own."""
+        rows = [a.encode(address, compressed=compressed) for address in addresses]
+        return np.frombuffer(b"".join(rows), dtype=np.uint8).reshape(
+            len(rows), len(rows[0])
+        )
+
+    def test_a_varying_field_becomes_a_column(self) -> None:
+        for compressed in (False, True):
+            with self.subTest(compressed=compressed):
+                batch = a.encode_batch(
+                    a.wots_hash(0, 0, 0, np.arange(4), 0), compressed=compressed
+                )
+                self.assertEqual(batch.shape, (4, 22 if compressed else 32))
+                np.testing.assert_array_equal(
+                    batch,
+                    self._reference(
+                        [a.wots_hash(0, 0, 0, chain, 0) for chain in range(4)],
+                        compressed=compressed,
+                    ),
+                )
+
+    def test_every_field_can_vary_at_once(self) -> None:
+        # Six columns, all different, so a field written into the wrong slot cannot
+        # coincide with the right answer.
+        rows = 6
+        columns = [np.arange(rows) * (offset + 1) + offset for offset in range(5)]
+        batch = a.encode_batch(
+            a.fors_tree(
+                layer=columns[0],
+                tree=columns[1],
+                key_pair=columns[2],
+                height=columns[3],
+                index=columns[4],
+            ),
+            compressed=True,
+        )
+        np.testing.assert_array_equal(
+            batch,
+            self._reference(
+                [
+                    a.fors_tree(*(int(column[row]) for column in columns))
+                    for row in range(rows)
+                ],
+                compressed=True,
+            ),
+        )
+
+    def test_a_scalar_field_covers_the_whole_batch(self) -> None:
+        batch = a.encode_batch(
+            a.hash_tree(layer=2, tree=9, height=1, index=np.arange(3)), compressed=True
+        )
+        self.assertEqual(batch.shape, (3, 22))
+        # The layer, tree and type bytes are the same in every row; only the index
+        # word moves.
+        for row in range(1, 3):
+            np.testing.assert_array_equal(batch[row, :18], batch[0, :18])
+            self.assertNotEqual(bytes(batch[row, 18:]), bytes(batch[0, 18:]))
+
+    def test_all_scalars_is_a_batch_of_one(self) -> None:
+        address = a.wots_pk(1, 2, 3)
+        batch = a.encode_batch(address, compressed=True)
+        self.assertEqual(batch.shape, (1, 22))
+        self.assertEqual(bytes(batch[0]), a.encode(address, compressed=True))
+
+    def test_a_field_too_wide_for_its_slot_is_an_error(self) -> None:
+        # The same refusal `encode` makes, and for the same reason: cutting a field
+        # down would tweak two different positions identically.
+        with self.assertRaisesRegex(ValueError, "does not fit"):
+            a.encode_batch(
+                a.hash_tree(0, 0, 0, np.array([0, 1 << 32])), compressed=True
             )
 
-    def test_an_empty_batch_is_an_error(self) -> None:
-        with self.assertRaisesRegex(ValueError, "no addresses"):
-            a.encode_batch([], compressed=True)
+    def test_a_negative_field_is_an_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsigned"):
+            a.encode_batch(a.hash_tree(0, 0, 0, np.array([0, -1])), compressed=True)
+
+    def test_a_field_wider_than_the_columns_carry_is_an_error(self) -> None:
+        # `encode` is not width-bounded and takes this; the batched path carries
+        # 64-bit columns, and no defined parameter set comes near either limit.
+        a.encode(
+            a.hash_tree(layer=0, tree=1 << 64, height=0, index=0), compressed=False
+        )
+        with self.assertRaisesRegex(ValueError, "wider than 64 bits"):
+            a.encode_batch(
+                a.hash_tree(layer=0, tree=1 << 64, height=0, index=np.arange(2)),
+                compressed=False,
+            )
 
 
 if __name__ == "__main__":

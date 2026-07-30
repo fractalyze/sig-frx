@@ -42,11 +42,9 @@ def _spec_node(
     left = _spec_node(tweak, leaves, 2 * index, height - 1)
     right = _spec_node(tweak, leaves, 2 * index + 1, height - 1)
     address = adrs.encode_batch(
-        [
-            adrs.hash_tree(
-                layer=_POSITION.layer, tree=_POSITION.tree, height=height, index=index
-            )
-        ],
+        adrs.hash_tree(
+            layer=_POSITION.layer, tree=_POSITION.tree, height=height, index=index
+        ),
         compressed=True,
     )
     pair = np.concatenate([left, right])[None, :]
