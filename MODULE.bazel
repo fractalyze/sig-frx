@@ -80,6 +80,47 @@ http_file(
     urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/SLH-DSA-keyGen-FIPS205/expectedResults.json"],
 )
 
+# The SLH-DSA signature sets. Between them they cover every operation FIPS 205
+# defines — the pure and pre-hash external interfaces and §9's internal one, in
+# both the deterministic and the hedged mode — which is why they are what a
+# signing and verifying implementation is gated on rather than keyGen alone.
+#
+# These are the two files the storage decision above was written for: sigGen's
+# expected results are 32 MB of signatures and sigVer's prompts 30 MB of them,
+# because a signature at the largest parameter set is 49 856 bytes and the sets
+# carry 624 and 504 cases.
+http_file(
+    name = "acvp_slh_dsa_siggen_prompt",
+    downloaded_file_path = "prompt.json",
+    sha256 = "afa673eacdf0aec53512a159159b7632684adfcd0d88f8640a7f6f5796aacdc8",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/SLH-DSA-sigGen-FIPS205/prompt.json"],
+)
+
+http_file(
+    name = "acvp_slh_dsa_siggen_expected",
+    downloaded_file_path = "expectedResults.json",
+    sha256 = "71e8e0f7e4b0cfd1747314299204d9d4d50968d200a4ae873921eaa7aabeaad1",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/SLH-DSA-sigGen-FIPS205/expectedResults.json"],
+)
+
+# 72 of the 84 SLH-DSA-SHA2-128 cases here are published failures, and twelve of
+# those carry a signature one byte short or long — which is the only thing that
+# exercises Algorithm 20's length check, and the reason a wrong length has to be a
+# verdict rather than an error.
+http_file(
+    name = "acvp_slh_dsa_sigver_prompt",
+    downloaded_file_path = "prompt.json",
+    sha256 = "4e7beb1233e47baa0acdd36417c66c45811aa40a4e32ffdb1a35d93b13b289fb",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/SLH-DSA-sigVer-FIPS205/prompt.json"],
+)
+
+http_file(
+    name = "acvp_slh_dsa_sigver_expected",
+    downloaded_file_path = "expectedResults.json",
+    sha256 = "259f5e2a0665de0adc0fefa45b5db3a2a6ed13c3c44d14bdaf64a80aee12c687",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/SLH-DSA-sigVer-FIPS205/expectedResults.json"],
+)
+
 # The sigVer set is what pins the negative-vector handling: 144 of its 180 cases
 # are published failures, so a loader that dropped the verdict would turn them
 # into 144 false positives.

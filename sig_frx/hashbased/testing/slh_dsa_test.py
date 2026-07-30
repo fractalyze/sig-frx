@@ -517,14 +517,40 @@ class VerifyTest(absltest.TestCase):
         self.assertEqual(batched, [True, True, False])
         self.assertEqual(batched, one_at_a_time)
 
+    def test_a_wrong_length_signature_is_rejected_rather_than_refused(self) -> None:
+        # Algorithm 20 lines 1 to 3: a signature of the wrong length is a false
+        # verdict, not an error. The published vectors carry signatures a byte
+        # short and a byte long and expect each to be rejected, so raising here
+        # would turn twelve of them into crashes.
+        for signature in (self.signature[:-1], np.append(self.signature, 0)):
+            with self.subTest(len(signature)):
+                self.assertEqual(
+                    self._verify(
+                        self.public_key[None, :],
+                        _MESSAGE[None, :],
+                        signature[None, :],
+                    ),
+                    [False],
+                )
+        # The whole batch, since a batch carries one length: every entry's
+        # signature is the wrong length, so every entry is rejected.
+        self.assertEqual(
+            self._verify(
+                np.stack([self.public_key] * 2),
+                np.stack([_MESSAGE] * 2),
+                np.stack([self.signature[:-1]] * 2),
+            ),
+            [False, False],
+        )
+
     def test_a_misshapen_batch_is_an_error(self) -> None:
-        # Algorithm 20 line 1 rejects a wrong-length signature. A batch has one
-        # static shape, so that is a misshapen call rather than one verdict.
-        with self.assertRaisesRegex(ValueError, "signature batch is"):
+        # A wrong rank or a batch that does not line up is a caller mistake rather
+        # than a verdict the standard defines, so those still raise.
+        with self.assertRaisesRegex(ValueError, "one signature per public key"):
             self._verify(
                 self.public_key[None, :],
                 _MESSAGE[None, :],
-                self.signature[None, :-1],
+                np.stack([self.signature, self.signature]),
             )
         with self.assertRaisesRegex(ValueError, "public key batch is"):
             self._verify(
@@ -542,6 +568,75 @@ class VerifyTest(absltest.TestCase):
         # would otherwise be read as a batch of its own bytes.
         with self.assertRaisesRegex(ValueError, "one message per public key"):
             self._verify(self.public_key[None, :], _MESSAGE, self.signature[None, :])
+
+
+class InternalInterfaceTest(absltest.TestCase):
+    """§9's interface signs the message as given, and the external one wraps it.
+
+    Which makes the relationship between them testable rather than asserted: the
+    external operation is exactly the internal one over `M'`, and the two are
+    therefore different objects over the same content — the property §10.2.1's
+    domain separator exists to guarantee.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.scheme = _scheme()
+        self.public_key, self.secret_key = (
+            np.asarray(part) for part in self.scheme.keygen(_SEED)
+        )
+
+    def test_the_external_operation_is_the_internal_one_over_m_prime(self) -> None:
+        wrapped = np.frombuffer(
+            _pure_message(bytes(_MESSAGE), bytes(_CONTEXT)), dtype=np.uint8
+        )
+        self.assertEqual(
+            bytes(
+                np.asarray(
+                    self.scheme.sign(self.secret_key, _MESSAGE, context=_CONTEXT)
+                )
+            ),
+            bytes(np.asarray(self.scheme.sign_internal(self.secret_key, wrapped))),
+        )
+
+    def test_an_internal_signature_round_trips_internally(self) -> None:
+        signature = np.asarray(self.scheme.sign_internal(self.secret_key, _MESSAGE))
+        self.assertEqual(
+            [
+                bool(v)
+                for v in np.asarray(
+                    self.scheme.verify_internal(
+                        self.public_key[None, :], _MESSAGE[None, :], signature[None, :]
+                    )
+                )
+            ],
+            [True],
+        )
+
+    def test_the_interfaces_do_not_cross_verify(self) -> None:
+        # An unwrapped message and `M'` are different messages, so neither
+        # signature verifies under the other interface.
+        internal = np.asarray(self.scheme.sign_internal(self.secret_key, _MESSAGE))
+        external = np.asarray(self.scheme.sign(self.secret_key, _MESSAGE))
+        self.assertNotEqual(bytes(internal), bytes(external))
+        self.assertFalse(
+            bool(
+                np.asarray(
+                    self.scheme.verify(
+                        self.public_key[None, :], _MESSAGE[None, :], internal[None, :]
+                    )
+                )[0]
+            )
+        )
+        self.assertFalse(
+            bool(
+                np.asarray(
+                    self.scheme.verify_internal(
+                        self.public_key[None, :], _MESSAGE[None, :], external[None, :]
+                    )
+                )[0]
+            )
+        )
 
 
 class RealParameterSetTest(absltest.TestCase):

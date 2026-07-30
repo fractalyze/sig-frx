@@ -17,6 +17,15 @@ rejection, so a scheme never gets the choice.
 dropping a field — a published failure verdict, a mode marker selecting a
 different operation — reports a pass for a case that was never run, which is the
 one outcome worse than a failure.
+
+**A standard publishes vectors per operation, so the caller says which one it is
+running.** FIPS 205 publishes its internal interface and its pre-hash variant
+beside the plain one, and a scheme implements those under its own names rather
+than on the seam. Both reach the harness as an implementation of `Signature` —
+usually a thin adapter — which cannot say for itself which operation it performs,
+so `check` takes that as an argument and requires every vector to agree. The
+alternative is a harness that guesses, and a guess here is a green suite that
+verified the wrong thing.
 """
 
 from __future__ import annotations
@@ -57,13 +66,30 @@ class KatVector:
     # The standard's application context string, which goes into the message the
     # scheme signs.
     context: bytes | None = None
-    # Published fields the record cannot express, by name. A standard's vector
-    # set covers every mode of its interface — FIPS 204 publishes a pre-hashed
-    # variant, an internal interface, and an external-mu variant, each a
-    # different operation from the one the seam names. A loader records what it
-    # could not feed rather than dropping it, and `check` refuses the vector,
-    # because running the seam's operation against a vector published for another
-    # one reports a pass for a case nobody ran.
+    # Which of the standard's interfaces the case selects. A standard publishes
+    # vectors for every operation its interface defines, and they are separate
+    # operations rather than options on one: `external` signs the message wrapped
+    # with a domain separator and the context, `internal` signs it as given. The
+    # seam names the external one; a scheme that implements the internal one
+    # exposes it under its own name, so this says which of them a case belongs to
+    # rather than whether it can run.
+    interface: str = "external"
+    # The pre-hash function's published name for a pre-hash case, `None` for a
+    # pure one. The scheme signs a digest under this function and the function's
+    # identifier is part of what gets signed, so a case naming one the caller
+    # cannot compute is unrunnable rather than approximable.
+    pre_hash: str | None = None
+    # Whether the case is the deterministic signing variant, where the standard
+    # defines both, and `None` where it defines one or where the operation does
+    # not depend on it. `check` requires it to agree with the scheme instance,
+    # since the two modes produce different signatures from the same key.
+    deterministic: bool | None = None
+    # Published fields the record cannot express, by name. FIPS 204's external-mu
+    # variant takes a pre-computed message representative in place of a message,
+    # which no operation here names. A loader records what it could not feed
+    # rather than dropping it, and `check` refuses the vector, because running one
+    # operation against a vector published for another reports a pass for a case
+    # nobody ran.
     unsupported: tuple[str, ...] = ()
 
 
@@ -90,26 +116,74 @@ _ACVP_BYTE_FIELDS = {
     "pk": "public_key",
     "message": "message",
     "signature": "signature",
+    # The signing randomness of a hedged case. The two standards name it
+    # differently — FIPS 204's `rnd` and FIPS 205's `addrnd` — for the same role.
     "rnd": "randomness",
+    "additionalRandomness": "randomness",
     "context": "context",
 }
 
-# Mode markers whose *value* decides whether the case is the operation the seam
-# names. Anything outside the benign value — a pre-hashed message, the internal
-# interface, a pre-computed message representative — is a different operation.
+# Mode markers whose *value* decides whether the case is an operation anything
+# here names. `externalMu` selects one whose input is a pre-computed message
+# representative rather than a message, which nothing implements, so a case
+# setting it is refused rather than run.
 _ACVP_BENIGN_MODES: dict[str, frozenset[Any]] = {
-    "signatureInterface": frozenset({"external"}),
-    "preHash": frozenset({"pure"}),
     "externalMu": frozenset({False}),
 }
 
+# Mode markers the record expresses, so a case selecting one is routed rather
+# than refused: the interface, the pure/pre-hash variant and its hash function,
+# and the signing mode.
+_ACVP_MODE_FIELDS = frozenset(
+    {"signatureInterface", "preHash", "hashAlg", "deterministic"}
+)
+
+_ACVP_INTERFACES = frozenset({"external", "internal"})
+_ACVP_PURE = "pure"
+_ACVP_PREHASH = "preHash"
+
 # Fields that identify or annotate a case rather than feed it. Anything outside
-# these and the mapped fields above is a mode the seam does not express, and is
-# recorded on the vector as unsupported rather than ignored — a new ACVP field
-# then surfaces as a refusal instead of a silent behavior change.
+# these, the mapped fields and the mode fields above is a mode nothing here
+# expresses, and is recorded on the vector as unsupported rather than ignored — a
+# new ACVP field then surfaces as a refusal instead of a silent behavior change.
 _ACVP_IGNORED_FIELDS = frozenset(
     {"tgId", "tcId", "testType", "parameterSet", "tests", "testPassed", "reason"}
 )
+
+
+def _acvp_modes(
+    merged: dict[str, Any]
+) -> tuple[str, str | None, bool | None, list[str]]:
+    """The interface, pre-hash function and signing mode a case selects.
+
+    Returns the names of any mode field whose published value it could not
+    express alongside them, so an unrecognized value is refused rather than
+    silently read as the benign one.
+    """
+    unexpressed: list[str] = []
+
+    interface = merged.get("signatureInterface", "external")
+    if interface not in _ACVP_INTERFACES:
+        unexpressed.append("signatureInterface")
+        interface = "external"
+
+    pre_hash: str | None = None
+    variant = merged.get("preHash", _ACVP_PURE)
+    if variant == _ACVP_PREHASH:
+        pre_hash = merged.get("hashAlg")
+        if pre_hash is None:
+            # A pre-hash case has to name its function: the identifier goes into
+            # the message, so guessing one signs something else.
+            unexpressed.append("preHash")
+    elif variant != _ACVP_PURE:
+        unexpressed.append("preHash")
+
+    deterministic = merged.get("deterministic")
+    if deterministic is not None and not isinstance(deterministic, bool):
+        unexpressed.append("deterministic")
+        deterministic = None
+
+    return interface, pre_hash, deterministic, unexpressed
 
 
 def load_acvp(prompt_path: Path | str, expected_path: Path | str) -> list[KatVector]:
@@ -147,14 +221,19 @@ def load_acvp(prompt_path: Path | str, expected_path: Path | str) -> list[KatVec
                 for name in _ACVP_SEED_FIELDS
                 if name in merged
             )
+            interface, pre_hash, deterministic, unexpressed = _acvp_modes(merged)
             unsupported = tuple(
                 sorted(
-                    name
-                    for name, value in merged.items()
-                    if name not in _ACVP_IGNORED_FIELDS
-                    and name not in _ACVP_BYTE_FIELDS
-                    and name not in _ACVP_SEED_FIELDS
-                    and value not in _ACVP_BENIGN_MODES.get(name, frozenset())
+                    set(unexpressed)
+                    | {
+                        name
+                        for name, value in merged.items()
+                        if name not in _ACVP_IGNORED_FIELDS
+                        and name not in _ACVP_BYTE_FIELDS
+                        and name not in _ACVP_SEED_FIELDS
+                        and name not in _ACVP_MODE_FIELDS
+                        and value not in _ACVP_BENIGN_MODES.get(name, frozenset())
+                    }
                 )
             )
             vectors.append(
@@ -163,6 +242,9 @@ def load_acvp(prompt_path: Path | str, expected_path: Path | str) -> list[KatVec
                     parameter_set=parameter_set,
                     seed=seed or None,
                     valid=bool(merged.get("testPassed", True)),
+                    interface=interface,
+                    pre_hash=pre_hash,
+                    deterministic=deterministic,
                     unsupported=unsupported,
                     **fields,
                 )
@@ -228,32 +310,51 @@ _TAMPERINGS: tuple[tuple[str, Callable[[KatVector], KatVector]], ...] = (
 )
 
 
-def check(scheme: Signature, vectors: Sequence[KatVector]) -> None:
+def check(
+    scheme: Signature,
+    vectors: Sequence[KatVector],
+    *,
+    interface: str = "external",
+    pre_hash: str | None = None,
+) -> None:
     """Run every check the standard requires, plus the tampering it does not.
 
-    `vectors` are one scheme instance's — one parameter set. Raises `KatError`
-    on the first failure, naming the case.
+    `vectors` are one scheme instance's — one parameter set, one signing mode, one
+    operation. Raises `KatError` on the first failure, naming the case.
+
+    `interface` and `pre_hash` are the caller's statement of *which* operation
+    `scheme` performs, and every vector must agree with it. A `Signature` cannot
+    say for itself: an implementation of the internal interface or of the pre-hash
+    variant satisfies the same Protocol, usually as a thin adapter over the
+    scheme's own entry point. Declaring it at the call site is what keeps the
+    harness from running one operation against vectors published for another,
+    which would report a pass for a case nobody ran.
     """
     if not vectors:
         raise KatError("no vectors: an empty set passes trivially and proves nothing")
 
-    _reject_unrunnable(vectors)
+    _reject_unrunnable(scheme, vectors, interface, pre_hash)
     _check_keygen(scheme, vectors)
     _check_sign(scheme, vectors)
     _check_verify(scheme, vectors)
 
 
-def _reject_unrunnable(vectors: Sequence[KatVector]) -> None:
-    """Refuse a set carrying anything the seam cannot express."""
+def _reject_unrunnable(
+    scheme: Signature,
+    vectors: Sequence[KatVector],
+    interface: str,
+    pre_hash: str | None,
+) -> None:
+    """Refuse a set carrying anything this call cannot run faithfully."""
     unrunnable = [v for v in vectors if v.unsupported]
     if unrunnable:
         names = sorted({name for v in unrunnable for name in v.unsupported})
         raise KatError(
             f"{len(unrunnable)} of {len(vectors)} vectors carry unsupported "
             f"fields {names} (first: {unrunnable[0].case_id}). Each selects an "
-            f"operation the seam does not name, so running the plain one against "
-            f"them would report a pass for a case nobody ran. Wire the subset "
-            f"this scheme implements explicitly."
+            f"operation nothing here names, so running another against them would "
+            f"report a pass for a case nobody ran. Wire the subset this scheme "
+            f"implements explicitly."
         )
 
     parameter_sets = {v.parameter_set for v in vectors}
@@ -262,6 +363,47 @@ def _reject_unrunnable(vectors: Sequence[KatVector]) -> None:
             f"one scheme instance is one parameter set, got {sorted(parameter_sets)}; "
             f"group the vectors and build an instance per set"
         )
+
+    mismatched = [
+        v for v in vectors if (v.interface, v.pre_hash) != (interface, pre_hash)
+    ]
+    if mismatched:
+        published = sorted({(v.interface, v.pre_hash) for v in mismatched})
+        raise KatError(
+            f"this call runs the {interface} interface with pre-hash {pre_hash!r}, "
+            f"and {len(mismatched)} of {len(vectors)} vectors were published for "
+            f"{published} (first: {mismatched[0].case_id}); group by operation and "
+            f"pass the implementation of each"
+        )
+
+    # The two signing modes give different signatures from one key, so a set run
+    # against the wrong instance would fail case by case with nothing pointing at
+    # the cause.
+    modes = {v.deterministic for v in vectors if v.deterministic is not None}
+    if len(modes) > 1:
+        raise KatError(
+            f"one instance is one signing mode, got both in {sorted(parameter_sets)}; "
+            f"group the vectors by their `deterministic` flag"
+        )
+    if modes and modes != {scheme.deterministic}:
+        raise KatError(
+            f"the vectors are the "
+            f"{'deterministic' if modes == {True} else 'hedged'} mode and the "
+            f"scheme is the {'deterministic' if scheme.deterministic else 'hedged'} "
+            f"one; build the instance the vector set was published for"
+        )
+    for vector in vectors:
+        # A hedged case carries its randomness and a deterministic one does not;
+        # if those disagree the loader mapped the wrong field.
+        if vector.deterministic is not None and vector.deterministic != (
+            vector.randomness is None
+        ):
+            raise KatError(
+                f"{vector.case_id}: published as the "
+                f"{'deterministic' if vector.deterministic else 'hedged'} mode but "
+                f"{'carries' if vector.randomness is not None else 'carries no'} "
+                f"signing randomness"
+            )
 
 
 def _check_keygen(scheme: Signature, vectors: Sequence[KatVector]) -> None:

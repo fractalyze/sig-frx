@@ -31,11 +31,15 @@ them: the batch shares nothing but the context. The indices the digest yields ar
 host integers, because that is what addresses a node: every component below builds
 its addresses on the host from a concrete index.
 
-The seam names the pure variant (Algorithms 22 and 24). HashSLH-DSA (Algorithms 23
-and 25) signs a different message — domain separator 1, and the pre-hash
-function's OID as part of what is signed — so it lives under `hash_sign` and
-`hash_verify` rather than on the seam, which is what keeps a pre-hash signature
-from verifying as a pure one.
+**Three interfaces, one of them on the seam.** The seam is §10's pure external
+operation (Algorithms 22 and 24), which is what an application wants. The other
+two sign a different message and so live under their own names: HashSLH-DSA
+(Algorithms 23 and 25, `hash_sign` / `hash_verify`) prepends domain separator 1 and
+the pre-hash function's OID, and §9's internal interface (Algorithms 19 and 20,
+`sign_internal` / `verify_internal`) prepends nothing at all. Keeping them apart is
+the point rather than an inconvenience — the separator exists so a pre-hash
+signature cannot verify as a pure one — and the internal pair is also what the
+validation program publishes vectors against.
 """
 
 from __future__ import annotations
@@ -348,10 +352,10 @@ class SlhDsa:
         context: ArrayLike | None = None,
     ) -> Array:
         """`slh_sign` — Algorithm 22: pure signing, over Algorithm 19."""
-        return self._sign_internal(
+        return self.sign_internal(
             secret_key,
             _prepend(_context_prefix(_PURE_DOMAIN, context), message),
-            randomness,
+            randomness=randomness,
         )
 
     def hash_sign(
@@ -370,25 +374,32 @@ class SlhDsa:
         so this and `sign` over the same content produce signatures that do not
         verify as each other, which is the separation §10.2.1 introduces it for.
         """
-        return self._sign_internal(
+        return self.sign_internal(
             secret_key,
             _prepend(self._prehash_prefix(pre_hash, context), pre_hash.digest(message)),
-            randomness,
+            randomness=randomness,
         )
 
-    def _sign_internal(
+    def sign_internal(
         self,
         secret_key: ArrayLike,
-        message: Array,
-        randomness: ArrayLike | None,
+        message: ArrayLike,
+        *,
+        randomness: ArrayLike | None = None,
     ) -> Array:
-        """`slh_sign_internal` — Algorithm 19."""
+        """`slh_sign_internal` — Algorithm 19.
+
+        §9's interface: the message is signed as given, without §10's domain
+        separator and context, which is what makes it the one the validation
+        program drives. Not on the seam, for the reason §10 gives — an application
+        wants the domain separation, and a signature over an unwrapped message is a
+        different object from one over `M'`.
+        """
         key = self._parse_secret_key(secret_key)
-        randomizer = self._tweak.prf_msg(
-            key.prf, self._opt_rand(key, randomness), message
-        )
+        body = fnp.asarray(message, dtype=fnp.uint8)
+        randomizer = self._tweak.prf_msg(key.prf, self._opt_rand(key, randomness), body)
         md, tree_indices, leaf_indices = self._split_digest(
-            randomizer, key.pk_seed, key.pk_root, message
+            randomizer, key.pk_seed, key.pk_root, body
         )
         # Lines 11 to 13: the digest picks the FORS key, by tree and by key pair.
         position = fors.ForsPosition(tree=tree_indices[0], key_pair=leaf_indices[0])
@@ -460,7 +471,7 @@ class SlhDsa:
         context: ArrayLike | None = None,
     ) -> Array:
         """`slh_verify` — Algorithm 24 over Algorithm 20, for the whole batch."""
-        return self._verify_internal(
+        return self.verify_internal(
             public_key,
             _prepend(_context_prefix(_PURE_DOMAIN, context), message),
             signature,
@@ -476,21 +487,29 @@ class SlhDsa:
         context: ArrayLike | None = None,
     ) -> Array:
         """`hash_slh_verify` — Algorithm 25: the counterpart of `hash_sign`."""
-        return self._verify_internal(
+        return self.verify_internal(
             public_key,
             _prepend(self._prehash_prefix(pre_hash, context), pre_hash.digest(message)),
             signature,
         )
 
-    def _verify_internal(
-        self, public_key: ArrayLike, messages: Array, signature: ArrayLike
+    def verify_internal(
+        self, public_key: ArrayLike, messages: ArrayLike, signature: ArrayLike
     ) -> Array:
         """`slh_verify_internal` — Algorithm 20, with the batch axis added.
 
-        Algorithm 20's first act is to reject a signature of the wrong length. A
-        batch has one static shape, so a wrong length is not one entry's verdict
-        but a misshapen call, and it raises here rather than returning `false` for
-        everything.
+        §9's interface: the message is verified as given, without §10's domain
+        separator and context. It is what the validation program tests against, and
+        it is not on the seam — a caller who reaches for it is naming the scheme
+        anyway, and passing an unwrapped message to the external operation would
+        verify something other than what the standard says it verifies.
+
+        Lines 1 to 3 reject a signature whose length is wrong. A batch carries one
+        static length, so a wrong one is every entry's verdict rather than an
+        error: the published vectors include signatures a byte short and a byte
+        long, and each expects a rejection. A wrong *rank*, or a batch that does
+        not line up, stays an error — that is a caller mistake and not a verdict
+        the standard defines.
         """
         params = self.params
         keys = fnp.asarray(public_key, dtype=fnp.uint8)
@@ -501,16 +520,21 @@ class SlhDsa:
             )
         batch = keys.shape[0]
         signatures = fnp.asarray(signature, dtype=fnp.uint8)
-        if signatures.shape != (batch, params.signature_size):
+        if signatures.ndim != 2 or signatures.shape[0] != batch:
             raise ValueError(
-                f"a signature batch is {(batch, params.signature_size)}, got shape "
+                f"one signature per public key, as a [B, {params.signature_size}] "
+                f"batch: got {batch} keys and signatures of shape "
                 f"{tuple(signatures.shape)}"
             )
+        messages = fnp.asarray(messages, dtype=fnp.uint8)
         if messages.ndim != 2 or messages.shape[0] != batch:
             raise ValueError(
                 f"one message per public key, as a [B, L] batch: got {batch} keys "
                 f"and messages of shape {tuple(messages.shape)}"
             )
+        if signatures.shape[1] != params.signature_size:
+            # Algorithm 20 lines 1 to 3.
+            return fnp.zeros(batch, dtype=bool)
 
         pk_seeds, pk_roots = keys[:, : params.n], keys[:, params.n :]
         randomizers, fors_signatures, hypertree_signatures = self._parse_signature(
