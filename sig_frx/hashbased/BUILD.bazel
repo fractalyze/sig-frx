@@ -73,3 +73,37 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+py_library(
+    name = "xmss",
+    srcs = [
+        "__init__.py",
+        "xmss.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs",
+        ":tree",
+        ":tweakable",
+        ":wots",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "hypertree",
+    srcs = [
+        "__init__.py",
+        "hypertree.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tree",
+        ":tweakable",
+        ":wots",
+        ":xmss",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

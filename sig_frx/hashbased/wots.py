@@ -34,7 +34,8 @@ from frx.typing import ArrayLike
 from sig_frx.hashbased import adrs
 from sig_frx.hashbased.tweakable import TweakableHash
 
-# The compression a caller supplies: chain ends `[B, len, n]` -> `[B, n]`.
+# The compression a caller supplies: each key pair's chain ends, `[P, len · n]`,
+# compressed to `[P, n]`.
 Compress = Callable[[Array], Array]
 
 
@@ -159,8 +160,16 @@ def chain(
     return current
 
 
-def _chain_addresses(params: WotsParams, position: WotsPosition) -> list[np.ndarray]:
-    """Every chain's address at every step: `w − 1` batches of `len` addresses."""
+def _chain_addresses(
+    params: WotsParams, positions: Sequence[WotsPosition]
+) -> list[np.ndarray]:
+    """Every chain's address at every step, for every key pair.
+
+    `w − 1` batches of `len(positions) · len` addresses, laid out key pair by key
+    pair. That layout is what lets an XMSS tree walk all of its WOTS+ keys in one
+    call: 2^h' key pairs of `len` chains are one batch, so a tree's leaves cost
+    `w − 1` hashes rather than `2^h' · (w − 1)`.
+    """
     return [
         adrs.encode_batch(
             [
@@ -171,6 +180,7 @@ def _chain_addresses(params: WotsParams, position: WotsPosition) -> list[np.ndar
                     chain=index,
                     hash_index=step,
                 )
+                for position in positions
                 for index in range(params.len)
             ],
             compressed=True,
@@ -184,9 +194,13 @@ def secret_values(
     params: WotsParams,
     pk_seed: ArrayLike,
     sk_seed: ArrayLike,
-    position: WotsPosition,
+    positions: Sequence[WotsPosition],
 ) -> Array:
-    """The `len` chain starting points — Algorithm 6 lines 1 to 6."""
+    """Every key pair's `len` chain starting points — Algorithm 6 lines 1 to 6.
+
+    `[len(positions) · len, n]`, in the same key-pair-major order as
+    `_chain_addresses`.
+    """
     addresses = adrs.encode_batch(
         [
             adrs.wots_prf(
@@ -195,6 +209,7 @@ def secret_values(
                 key_pair=position.key_pair,
                 chain=index,
             )
+            for position in positions
             for index in range(params.len)
         ],
         compressed=True,
@@ -207,19 +222,24 @@ def pk_gen(
     params: WotsParams,
     pk_seed: ArrayLike,
     sk_seed: ArrayLike,
-    position: WotsPosition,
+    positions: Sequence[WotsPosition],
     compress: Compress,
 ) -> Array:
-    """`wots_pkGen` — Algorithm 6. Every chain walked to its end, then compressed."""
+    """`wots_pkGen` — Algorithm 6, for every key pair at once. `[P, n]`.
+
+    Every chain of every key pair walks to its end in the same `w − 1` batched
+    hashes, because none of them depend on each other.
+    """
+    rows = len(positions) * params.len
     ends = chain(
         tweak,
         pk_seed,
-        secret_values(tweak, params, pk_seed, sk_seed, position),
-        fnp.zeros(params.len, dtype=fnp.uint32),
-        fnp.full(params.len, params.w - 1, dtype=fnp.uint32),
-        _chain_addresses(params, position),
+        secret_values(tweak, params, pk_seed, sk_seed, positions),
+        fnp.zeros(rows, dtype=fnp.uint32),
+        fnp.full(rows, params.w - 1, dtype=fnp.uint32),
+        _chain_addresses(params, positions),
     )
-    return compress(ends)
+    return compress(ends.reshape(len(positions), params.len * params.n))
 
 
 def sign(
@@ -230,59 +250,70 @@ def sign(
     sk_seed: ArrayLike,
     position: WotsPosition,
 ) -> Array:
-    """`wots_sign` — Algorithm 7: each chain stopped at its digit. `[len, n]`."""
+    """`wots_sign` — Algorithm 7: each chain stopped at its digit. `[len, n]`.
+
+    One key pair, because signing is one key pair — verification is the side that
+    batches, and it goes through `pk_from_sig`.
+    """
     digits = message_digits(params, message)[0]
     return chain(
         tweak,
         pk_seed,
-        secret_values(tweak, params, pk_seed, sk_seed, position),
+        secret_values(tweak, params, pk_seed, sk_seed, [position]),
         fnp.zeros(params.len, dtype=fnp.uint32),
         digits,
-        _chain_addresses(params, position),
+        _chain_addresses(params, [position]),
     )
 
 
 def pk_from_sig(
     tweak: TweakableHash,
     params: WotsParams,
-    signature: ArrayLike,
-    message: ArrayLike,
+    signatures: ArrayLike,
+    messages: ArrayLike,
     pk_seed: ArrayLike,
-    position: WotsPosition,
+    positions: Sequence[WotsPosition],
     compress: Compress,
 ) -> Array:
-    """`wots_pkFromSig` — Algorithm 8: walk the rest of every chain.
+    """`wots_pkFromSig` — Algorithm 8, for a batch. `[P, len, n]` -> `[P, n]`.
 
-    The operation verification actually runs. A signature that stopped its chains
-    anywhere other than the message's digits arrives at a different public key,
+    The operation verification actually runs, so it takes many signatures: each
+    with its own message and its own key pair. A signature that stopped its chains
+    anywhere other than its message's digits arrives at a different public key,
     which is what the caller compares against a root it already trusts.
     """
-    digits = message_digits(params, message)[0]
+    digits = message_digits(params, messages).reshape(-1)
+    rows = fnp.asarray(signatures, dtype=fnp.uint8).reshape(
+        len(positions) * params.len, params.n
+    )
     ends = chain(
         tweak,
         pk_seed,
-        signature,
+        rows,
         digits,
         (params.w - 1) - digits,
-        _chain_addresses(params, position),
+        _chain_addresses(params, positions),
     )
-    return compress(ends)
+    return compress(ends.reshape(len(positions), params.len * params.n))
 
 
 def fips205_compression(
-    tweak: TweakableHash, params: WotsParams, pk_seed: ArrayLike, position: WotsPosition
+    tweak: TweakableHash, pk_seed: ArrayLike, positions: Sequence[WotsPosition]
 ) -> Compress:
-    """FIPS 205's public-key compression: one `T_len` over all chain ends.
+    """FIPS 205's public-key compression: one `T_len` over each key pair's ends.
 
     RFC 8391 compresses with an L-tree instead, which is why this is a value a
     caller passes rather than something WOTS+ decides for itself.
     """
-    address = adrs.encode_batch(
-        [adrs.wots_pk(position.layer, position.tree, position.key_pair)],
+    addresses = adrs.encode_batch(
+        [
+            adrs.wots_pk(position.layer, position.tree, position.key_pair)
+            for position in positions
+        ],
         compressed=True,
     )
 
     def compress(ends: Array) -> Array:
-        return tweak.t(pk_seed, address, ends.reshape(1, params.len * params.n))[0]
+        return tweak.t(pk_seed, addresses, ends)
 
     return compress

@@ -199,15 +199,13 @@ class SignVerifyTest(absltest.TestCase):
     def setUp(self) -> None:
         super().setUp()
         self.tweak = _family()
-        self.compress = wots.fips205_compression(
-            self.tweak, _PARAMS, _PK_SEED, _POSITION
-        )
+        self.compress = wots.fips205_compression(self.tweak, _PK_SEED, [_POSITION])
 
     def _pk_gen(self) -> np.ndarray:
         return np.asarray(
             wots.pk_gen(
-                self.tweak, _PARAMS, _PK_SEED, _SK_SEED, _POSITION, self.compress
-            )
+                self.tweak, _PARAMS, _PK_SEED, _SK_SEED, [_POSITION], self.compress
+            )[0]
         )
 
     def _pk_from_sig(self, signature: np.ndarray, message: np.ndarray) -> np.ndarray:
@@ -215,12 +213,12 @@ class SignVerifyTest(absltest.TestCase):
             wots.pk_from_sig(
                 self.tweak,
                 _PARAMS,
-                signature,
-                message,
+                signature[None, ...],
+                message[None, :],
                 _PK_SEED,
-                _POSITION,
+                [_POSITION],
                 self.compress,
-            )
+            )[0]
         )
 
     def test_a_signature_walks_the_rest_of_the_way_to_the_public_key(self) -> None:
@@ -254,9 +252,9 @@ class SignVerifyTest(absltest.TestCase):
                 _PARAMS,
                 _PK_SEED,
                 _SK_SEED,
-                elsewhere,
-                wots.fips205_compression(self.tweak, _PARAMS, _PK_SEED, elsewhere),
-            )
+                [elsewhere],
+                wots.fips205_compression(self.tweak, _PK_SEED, [elsewhere]),
+            )[0]
         )
         self.assertNotEqual(bytes(other), bytes(self._pk_gen()))
 
@@ -267,12 +265,15 @@ class SignVerifyTest(absltest.TestCase):
         ends = wots.chain(
             self.tweak,
             _PK_SEED,
-            wots.secret_values(self.tweak, _PARAMS, _PK_SEED, _SK_SEED, _POSITION),
+            wots.secret_values(self.tweak, _PARAMS, _PK_SEED, _SK_SEED, [_POSITION]),
             np.zeros(_PARAMS.len, dtype=np.uint32),
             np.full(_PARAMS.len, _PARAMS.w - 1, dtype=np.uint32),
-            wots._chain_addresses(_PARAMS, _POSITION),
+            wots._chain_addresses(_PARAMS, [_POSITION]),
         )
-        np.testing.assert_array_equal(np.asarray(self.compress(ends)), self._pk_gen())
+        np.testing.assert_array_equal(
+            np.asarray(self.compress(ends.reshape(1, _PARAMS.len * _N)))[0],
+            self._pk_gen(),
+        )
 
 
 if __name__ == "__main__":
