@@ -279,5 +279,82 @@ class HypertreeTest(absltest.TestCase):
             self._verify(signature[None, :-1, ...], _MESSAGE[None, :], [0], [0])
 
 
+class TwoPublicSeedsTest(absltest.TestCase):
+    """A verification batch spans public keys, so `PK.seed` varies per entry.
+
+    Every hash under the seam is tweaked with `PK.seed`, and the batch a verifier
+    holds carries one per signature. The entries widen unevenly on the way down —
+    a claim becomes `len` WOTS+ chains — so the seed has to widen with them, and a
+    version that lined the wrong seed up with a row would be self-consistent and
+    wrong. Two seeds is the smallest batch that can tell.
+    """
+
+    PARAMS = hypertree.HypertreeParams(layers=2, tree_height=_HEIGHT, wots=_WOTS)
+    SEEDS = (_PK_SEED, _PK_SEED ^ 0xFF)
+    POSITIONS = ((2, 1), (0, 3))
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.tweak = _family()
+        self.roots = np.stack(
+            [
+                np.asarray(
+                    xmss.root(
+                        self.tweak,
+                        _WOTS,
+                        seed,
+                        _SK_SEED,
+                        tree.TreePosition(layer=self.PARAMS.layers - 1, tree=0),
+                        _HEIGHT,
+                    )
+                )
+                for seed in self.SEEDS
+            ]
+        )
+        self.signatures = np.stack(
+            [
+                np.asarray(
+                    hypertree.sign(
+                        self.tweak,
+                        self.PARAMS,
+                        _MESSAGE,
+                        seed,
+                        _SK_SEED,
+                        tree_index,
+                        leaf_index,
+                    )
+                )
+                for seed, (tree_index, leaf_index) in zip(
+                    self.SEEDS, self.POSITIONS, strict=True
+                )
+            ]
+        )
+
+    def _verify(self, seeds: np.ndarray, roots: np.ndarray) -> list[bool]:
+        return [
+            bool(v)
+            for v in np.asarray(
+                hypertree.verify(
+                    self.tweak,
+                    self.PARAMS,
+                    self.signatures,
+                    np.stack([_MESSAGE] * len(self.SEEDS)),
+                    seeds,
+                    [tree_index for tree_index, _ in self.POSITIONS],
+                    [leaf for _, leaf in self.POSITIONS],
+                    roots,
+                )
+            )
+        ]
+
+    def test_each_entry_verifies_under_its_own_seed(self) -> None:
+        self.assertNotEqual(bytes(self.roots[0]), bytes(self.roots[1]))
+        self.assertEqual(self._verify(np.stack(self.SEEDS), self.roots), [True, True])
+
+    def test_swapping_the_seeds_fails_both(self) -> None:
+        swapped = np.stack(self.SEEDS[::-1])
+        self.assertEqual(self._verify(swapped, self.roots), [False, False])
+
+
 if __name__ == "__main__":
     absltest.main()

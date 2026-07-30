@@ -32,7 +32,7 @@ from frx import Array
 from frx.typing import ArrayLike
 
 from sig_frx.hashbased import adrs
-from sig_frx.hashbased.tweakable import TweakableHash
+from sig_frx.hashbased.tweakable import TweakableHash, repeat_per_entry
 
 # The compression a caller supplies: each key pair's chain ends, `[P, len · n]`,
 # compressed to `[P, n]`.
@@ -278,7 +278,8 @@ def pk_from_sig(
     """`wots_pkFromSig` — Algorithm 8, for a batch. `[P, len, n]` -> `[P, n]`.
 
     The operation verification actually runs, so it takes many signatures: each
-    with its own message and its own key pair. A signature that stopped its chains
+    with its own message, its own key pair, and — when the batch spans more than
+    one public key — its own `pk_seed`. A signature that stopped its chains
     anywhere other than its message's digits arrives at a different public key,
     which is what the caller compares against a root it already trusts.
     """
@@ -288,7 +289,9 @@ def pk_from_sig(
     )
     ends = chain(
         tweak,
-        pk_seed,
+        # One key pair is `len` chains, so a per-entry seed repeats `len` times to
+        # match the key-pair-major row order `_chain_addresses` lays out.
+        repeat_per_entry(pk_seed, params.len),
         rows,
         digits,
         (params.w - 1) - digits,

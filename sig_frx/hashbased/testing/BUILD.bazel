@@ -69,6 +69,42 @@ py_test(
 )
 
 py_test(
+    name = "slh_dsa_test",
+    size = "medium",
+    srcs = ["slh_dsa_test.py"],
+    deps = [
+        "//sig_frx/hashbased:fors",
+        "//sig_frx/hashbased:hypertree",
+        "//sig_frx/hashbased:slh_dsa",
+        "//sig_frx/hashbased:tree",
+        "//sig_frx/hashbased:tweakable",
+        "//sig_frx/hashbased:xmss",
+        "@hash_frx//hash_frx:sha256",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The gate on published bytes: reproducing a key NIST published is what confirms
+# every reading the components beneath SLH-DSA were written from. Vectors are
+# fetched and sha256-pinned in //MODULE.bazel rather than committed.
+py_test(
+    name = "slh_dsa_kat_test",
+    size = "medium",
+    srcs = ["slh_dsa_kat_test.py"],
+    data = [
+        "@acvp_slh_dsa_keygen_expected//file",
+        "@acvp_slh_dsa_keygen_prompt//file",
+    ],
+    deps = [
+        "//sig_frx/hashbased:slh_dsa",
+        "//sig_frx/testing:kat",
+        "@rules_python//python/runfiles",
+        requirement("absl_py"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
     name = "xmss_test",
     size = "small",
     srcs = ["xmss_test.py"],

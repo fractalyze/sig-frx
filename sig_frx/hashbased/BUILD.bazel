@@ -92,6 +92,28 @@ py_library(
 )
 
 py_library(
+    name = "slh_dsa",
+    srcs = [
+        "__init__.py",
+        "slh_dsa.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":fors",
+        ":hypertree",
+        ":tree",
+        ":tweakable",
+        ":wots",
+        ":xmss",
+        "//sig_frx:signature",
+        "@hash_frx//hash_frx:byte_hash",
+        "@hash_frx//hash_frx:sha256",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
     name = "hypertree",
     srcs = [
         "__init__.py",

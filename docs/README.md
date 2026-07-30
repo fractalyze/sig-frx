@@ -18,6 +18,7 @@ scheme is held to, **[`schemes/`](schemes)** is one design-notes page per scheme
 | Question                                                | Where                          |
 | --------------------------------------------------------- | ------------------------------ |
 | What a scheme page must answer, and the shared machinery | [`README.md`](schemes/README.md) |
+| Hash-based signatures over a hypertree — parameter sets, batch axis, what leaks | [`slh-dsa.md`](schemes/slh-dsa.md) |
 
 Detailed design, findings, and open decisions live on the issues, not in the
 tree — the epic is
