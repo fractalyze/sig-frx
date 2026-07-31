@@ -195,12 +195,13 @@ def _stages(name: str, batch: int) -> None:
 
     measured.reset()
     start = time.perf_counter()
-    positions = [
-        fors.ForsPosition(tree=t, key_pair=leaf)
-        for t, leaf in zip(tree_indices, leaf_indices, strict=True)
-    ]
     fors_keys = fors.pk_from_sig(
-        scheme._tweak, params.fors_params, fors_signatures, md, pk_seeds, positions
+        scheme._tweak,
+        params.fors_params,
+        fors_signatures,
+        md,
+        pk_seeds,
+        fors.ForsPosition(tree=tree_indices, key_pair=leaf_indices),
     )
     _blocked(fors_keys)
     record("FORS reconstruction", start)

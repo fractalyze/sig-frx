@@ -264,6 +264,28 @@ def _prepend(prefix: np.ndarray, messages: ArrayLike) -> Array:
     )
 
 
+def _to_int(values: np.ndarray, bits: int) -> np.ndarray:
+    """`toInt` over a batch of byte strings, reduced to `bits` — §4.1, Algorithm 3.
+
+    `[B, w]` -> `[B]`: each row read big-endian, one column out. The rows are
+    padded up to the eight bytes a uint64 carries and read as one, rather than a
+    row at a time — an index is one per signature, and a Python loop over
+    signatures is what the batch axis exists to remove.
+
+    Every index slice a parameter set defines fits: the tallest hypertree
+    addresses 64 bits, so `w` is at most 8 and `bits` at most 64.
+
+    The reduction is a mask because the modulus is a power of two — the same
+    value, without leaving uint64 arithmetic.
+    """
+    rows, width = values.shape
+    padded = np.zeros((rows, 8), dtype=np.uint8)
+    padded[:, 8 - width :] = values
+    return padded.view(">u8").reshape(rows).astype(np.uint64) & np.uint64(
+        (1 << bits) - 1
+    )
+
+
 class SlhDsa:
     """SLH-DSA over an injected tweakable hash family — FIPS 205 §9 and §10.
 
@@ -402,7 +424,10 @@ class SlhDsa:
             randomizer, key.pk_seed, key.pk_root, body
         )
         # Lines 11 to 13: the digest picks the FORS key, by tree and by key pair.
-        position = fors.ForsPosition(tree=tree_indices[0], key_pair=leaf_indices[0])
+        # Signing is one signature, so the batch's two columns are read back as the
+        # single indices every component below takes.
+        tree_index, leaf_index = int(tree_indices[0]), int(leaf_indices[0])
+        position = fors.ForsPosition(tree=tree_index, key_pair=leaf_index)
         fors_signature = fors.sign(
             self._tweak,
             self.params.fors_params,
@@ -419,7 +444,7 @@ class SlhDsa:
             fnp.asarray(fors_signature)[None, ...],
             md,
             key.pk_seed,
-            [position],
+            position,
         )[0]
         hypertree_signature = hypertree.sign(
             self._tweak,
@@ -427,8 +452,8 @@ class SlhDsa:
             fors_key,
             key.pk_seed,
             key.seed,
-            tree_indices[0],
-            leaf_indices[0],
+            tree_index,
+            leaf_index,
         )
         return fnp.concatenate(
             [
@@ -543,10 +568,6 @@ class SlhDsa:
         md, tree_indices, leaf_indices = self._split_digest(
             randomizers, pk_seeds, pk_roots, messages
         )
-        positions = [
-            fors.ForsPosition(tree=tree_index, key_pair=leaf_index)
-            for tree_index, leaf_index in zip(tree_indices, leaf_indices, strict=True)
-        ]
         # A candidate FORS public key per entry, then one hypertree walk that
         # accepts an entry only if its candidate climbs to that entry's own root.
         fors_keys = fors.pk_from_sig(
@@ -555,7 +576,7 @@ class SlhDsa:
             fors_signatures,
             md,
             pk_seeds,
-            positions,
+            fors.ForsPosition(tree=tree_indices, key_pair=leaf_indices),
         )
         return hypertree.verify(
             self._tweak,
@@ -622,12 +643,13 @@ class SlhDsa:
         pk_seeds: ArrayLike,
         pk_roots: ArrayLike,
         messages: ArrayLike,
-    ) -> tuple[Array, list[int], list[int]]:
+    ) -> tuple[Array, np.ndarray, np.ndarray]:
         """Algorithm 19 lines 5 to 10 — the same lines as Algorithm 20's 8 to 13.
 
         One `H_msg` over the whole batch, then the split: `md` as
-        `[B, ceil(k·a/8)]`, and the tree and leaf indices as host integers, since
-        an index is what addresses a node and every address is built on the host.
+        `[B, ceil(k·a/8)]`, and the tree and leaf indices as `[B]` columns of host
+        integers, since an index is what addresses a node and every address is
+        built on the host.
 
         `toInt` reads big-endian and the reduction is what keeps `idx_tree` inside
         the hypertree — the slice is byte-rounded, so it carries up to seven bits
@@ -641,15 +663,10 @@ class SlhDsa:
         leaf_end = tree_end + params.leaf_index_bytes
         return (
             fnp.asarray(digest[:, : params.md_bytes], dtype=fnp.uint8),
-            [
-                int.from_bytes(bytes(row), "big")
-                % (1 << (params.h - params.tree_height))
-                for row in digest[:, params.md_bytes : tree_end]
-            ],
-            [
-                int.from_bytes(bytes(row), "big") % (1 << params.tree_height)
-                for row in digest[:, tree_end:leaf_end]
-            ],
+            _to_int(
+                digest[:, params.md_bytes : tree_end], params.h - params.tree_height
+            ),
+            _to_int(digest[:, tree_end:leaf_end], params.tree_height),
         )
 
 

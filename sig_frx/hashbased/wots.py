@@ -31,12 +31,14 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hashbased import adrs
+from sig_frx.hashbased import adrs, adrs_encoding
 from sig_frx.hashbased.tweakable import ChainHash, TweakableHash, repeat_per_entry
 
 # The compression a caller supplies: each key pair's chain ends, `[P, len · n]`,
 # compressed to `[P, n]`.
 Compress = Callable[[Array], Array]
+
+Field = adrs.Field
 
 
 @dataclass(frozen=True)
@@ -65,11 +67,24 @@ class WotsParams:
 
 @dataclass(frozen=True)
 class WotsPosition:
-    """Which WOTS+ key pair this is — the address prefix every call tweaks with."""
+    """Which WOTS+ key pair this is — the address prefix every call tweaks with.
 
-    layer: int
-    tree: int
-    key_pair: int
+    One key pair, or a batch of them: every field is an integer or one per key
+    pair, and the fields broadcast against each other the way an address's do. A
+    batch is what both callers hold — an XMSS tree's `2^h'` key pairs share a
+    layer and a tree while their key pair numbers run, and a verifier's `B` claims
+    each sit in their own tree — so a key pair is a row of three columns rather
+    than an object, and adding one costs no Python.
+    """
+
+    layer: Field
+    tree: Field
+    key_pair: Field
+
+    @property
+    def count(self) -> int:
+        """How many key pairs this is — one, or the length the fields broadcast to."""
+        return adrs_encoding.rows((self.layer, self.tree, self.key_pair))
 
 
 def base_2b(data: ArrayLike, b: int, out_len: int) -> Array:
@@ -164,34 +179,33 @@ def chain(
 
 
 def _position_columns(
-    positions: Sequence[WotsPosition], per_position: int
+    position: WotsPosition, per_position: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Each key pair's address prefix, repeated once per row it owns.
+    """The key pairs' address prefix, each repeated once per row it owns.
 
     The rows are key-pair-major, which is the layout every batch here uses: key
     pair 0's `len` chains, then key pair 1's. Building the prefix as three columns
     once is what keeps the cost of an address batch independent of how many
     addresses are in it.
     """
+    table = adrs_encoding.columns((position.layer, position.tree, position.key_pair))
     return (
-        np.repeat([position.layer for position in positions], per_position),
-        np.repeat([position.tree for position in positions], per_position),
-        np.repeat([position.key_pair for position in positions], per_position),
+        np.repeat(table[:, 0], per_position),
+        np.repeat(table[:, 1], per_position),
+        np.repeat(table[:, 2], per_position),
     )
 
 
-def _chain_addresses(
-    params: WotsParams, positions: Sequence[WotsPosition]
-) -> list[np.ndarray]:
+def _chain_addresses(params: WotsParams, position: WotsPosition) -> list[np.ndarray]:
     """Every chain's address at every step, for every key pair.
 
-    `w − 1` batches of `len(positions) · len` addresses, laid out key pair by key
+    `w − 1` batches of `position.count · len` addresses, laid out key pair by key
     pair. That layout is what lets an XMSS tree walk all of its WOTS+ keys in one
     call: 2^h' key pairs of `len` chains are one batch, so a tree's leaves cost
     `w − 1` hashes rather than `2^h' · (w − 1)`.
     """
-    layers, trees, key_pairs = _position_columns(positions, params.len)
-    chains = np.tile(np.arange(params.len), len(positions))
+    layers, trees, key_pairs = _position_columns(position, params.len)
+    chains = np.tile(np.arange(params.len), position.count)
     return [
         adrs.encode_batch(
             adrs.wots_hash(
@@ -212,20 +226,20 @@ def secret_values(
     params: WotsParams,
     pk_seed: ArrayLike,
     sk_seed: ArrayLike,
-    positions: Sequence[WotsPosition],
+    position: WotsPosition,
 ) -> Array:
     """Every key pair's `len` chain starting points — Algorithm 6 lines 1 to 6.
 
-    `[len(positions) · len, n]`, in the same key-pair-major order as
+    `[position.count · len, n]`, in the same key-pair-major order as
     `_chain_addresses`.
     """
-    layers, trees, key_pairs = _position_columns(positions, params.len)
+    layers, trees, key_pairs = _position_columns(position, params.len)
     addresses = adrs.encode_batch(
         adrs.wots_prf(
             layer=layers,
             tree=trees,
             key_pair=key_pairs,
-            chain=np.tile(np.arange(params.len), len(positions)),
+            chain=np.tile(np.arange(params.len), position.count),
         ),
         compressed=True,
     )
@@ -237,7 +251,7 @@ def pk_gen(
     params: WotsParams,
     pk_seed: ArrayLike,
     sk_seed: ArrayLike,
-    positions: Sequence[WotsPosition],
+    position: WotsPosition,
     compress: Compress,
 ) -> Array:
     """`wots_pkGen` — Algorithm 6, for every key pair at once. `[P, n]`.
@@ -245,16 +259,17 @@ def pk_gen(
     Every chain of every key pair walks to its end in the same `w − 1` batched
     hashes, because none of them depend on each other.
     """
-    rows = len(positions) * params.len
+    keys = position.count
+    rows = keys * params.len
     ends = chain(
         tweak,
         pk_seed,
-        secret_values(tweak, params, pk_seed, sk_seed, positions),
+        secret_values(tweak, params, pk_seed, sk_seed, position),
         fnp.zeros(rows, dtype=fnp.uint32),
         fnp.full(rows, params.w - 1, dtype=fnp.uint32),
-        _chain_addresses(params, positions),
+        _chain_addresses(params, position),
     )
-    return compress(ends.reshape(len(positions), params.len * params.n))
+    return compress(ends.reshape(keys, params.len * params.n))
 
 
 def sign(
@@ -274,10 +289,10 @@ def sign(
     return chain(
         tweak,
         pk_seed,
-        secret_values(tweak, params, pk_seed, sk_seed, [position]),
+        secret_values(tweak, params, pk_seed, sk_seed, position),
         fnp.zeros(params.len, dtype=fnp.uint32),
         digits,
-        _chain_addresses(params, [position]),
+        _chain_addresses(params, position),
     )
 
 
@@ -287,7 +302,7 @@ def pk_from_sig(
     signatures: ArrayLike,
     messages: ArrayLike,
     pk_seed: ArrayLike,
-    positions: Sequence[WotsPosition],
+    position: WotsPosition,
     compress: Compress,
 ) -> Array:
     """`wots_pkFromSig` — Algorithm 8, for a batch. `[P, len, n]` -> `[P, n]`.
@@ -298,10 +313,9 @@ def pk_from_sig(
     anywhere other than its message's digits arrives at a different public key,
     which is what the caller compares against a root it already trusts.
     """
+    keys = position.count
     digits = message_digits(params, messages).reshape(-1)
-    rows = fnp.asarray(signatures, dtype=fnp.uint8).reshape(
-        len(positions) * params.len, params.n
-    )
+    rows = fnp.asarray(signatures, dtype=fnp.uint8).reshape(keys * params.len, params.n)
     ends = chain(
         tweak,
         # One key pair is `len` chains, so a per-entry seed repeats `len` times to
@@ -310,20 +324,20 @@ def pk_from_sig(
         rows,
         digits,
         (params.w - 1) - digits,
-        _chain_addresses(params, positions),
+        _chain_addresses(params, position),
     )
-    return compress(ends.reshape(len(positions), params.len * params.n))
+    return compress(ends.reshape(keys, params.len * params.n))
 
 
 def fips205_compression(
-    tweak: TweakableHash, pk_seed: ArrayLike, positions: Sequence[WotsPosition]
+    tweak: TweakableHash, pk_seed: ArrayLike, position: WotsPosition
 ) -> Compress:
     """FIPS 205's public-key compression: one `T_len` over each key pair's ends.
 
     RFC 8391 compresses with an L-tree instead, which is why this is a value a
     caller passes rather than something WOTS+ decides for itself.
     """
-    layers, trees, key_pairs = _position_columns(positions, 1)
+    layers, trees, key_pairs = _position_columns(position, 1)
     addresses = adrs.encode_batch(
         adrs.wots_pk(layers, trees, key_pairs), compressed=True
     )

@@ -56,8 +56,8 @@ class XmssLeafTest(absltest.TestCase):
                     _WOTS,
                     _PK_SEED,
                     _SK_SEED,
-                    [position],
-                    wots.fips205_compression(tweak, _PK_SEED, [position]),
+                    position,
+                    wots.fips205_compression(tweak, _PK_SEED, position),
                 )
             )[0]
             self.assertEqual(bytes(got[index]), bytes(expected), f"key pair {index}")
@@ -82,7 +82,7 @@ class XmssSignatureTest(absltest.TestCase):
                     signature[None, ...],
                     message[None, :],
                     _PK_SEED,
-                    [_POSITION],
+                    _POSITION,
                     [leaf],
                 )
             )[0]
@@ -155,7 +155,9 @@ class XmssSignatureTest(absltest.TestCase):
                 signatures,
                 messages,
                 _PK_SEED,
-                [_POSITION] * len(leaves),
+                tree.TreePosition(
+                    layer=_POSITION.layer, tree=np.full(len(leaves), _POSITION.tree)
+                ),
                 leaves,
             )
         )

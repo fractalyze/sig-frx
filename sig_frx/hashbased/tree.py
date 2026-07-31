@@ -41,7 +41,7 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hashbased import adrs
+from sig_frx.hashbased import adrs, adrs_encoding
 from sig_frx.hashbased.tweakable import NodeHash
 
 # Builds the addresses of the given nodes at one height: `(height, indices)`.
@@ -50,10 +50,21 @@ NodeAddresses = Callable[[int, np.ndarray], np.ndarray]
 
 @dataclass(frozen=True)
 class TreePosition:
-    """Which XMSS tree this is — the address prefix every node in it tweaks with."""
+    """Which XMSS tree this is — the address prefix every node in it tweaks with.
 
-    layer: int
-    tree: int
+    One tree, or a batch of them: both fields are an integer or one per tree, and
+    they broadcast against each other the way an address's fields do. The batch is
+    what a hypertree layer holds — `B` claims that each climb their own tree — so
+    the layer carries three columns rather than `B` objects.
+    """
+
+    layer: adrs.Field
+    tree: adrs.Field
+
+    @property
+    def count(self) -> int:
+        """How many trees this is — one, or the length the fields broadcast to."""
+        return adrs_encoding.rows((self.layer, self.tree))
 
 
 def xmss_node_addresses(position: TreePosition) -> NodeAddresses:

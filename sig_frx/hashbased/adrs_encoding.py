@@ -16,6 +16,10 @@ arithmetic, and is what every component actually calls — a single verification
 addresses hundreds of thousands of positions, so an address has to cost no Python
 of its own.
 
+`rows` and `columns` are that batch rule made available to the components above,
+which carry their own positions as columns and have to agree with the encoding
+about what a batch is before they build one.
+
 A field too wide for its slot raises rather than being cut down. Silently dropping
 its high bytes would tweak two different positions identically, which is the one
 failure an address exists to prevent.
@@ -49,6 +53,55 @@ def size(slots: Sequence[Slot]) -> int:
     return sum(width for _, width in slots)
 
 
+def rows(values: Sequence[Field]) -> int:
+    """How many addresses these fields describe — one, or the length they broadcast to.
+
+    The batch a caller is addressing, asked before any address is built. A caller
+    that carries its position as columns needs it to lay out the rows hanging off
+    each one — a WOTS+ key pair owns `len` chains, so it has to know how many key
+    pairs it has before it can tile the chain numbers under them.
+
+    The same broadcast `columns` performs, so the two cannot disagree about what a
+    batch is.
+    """
+    shape = np.broadcast_shapes(*(np.shape(value) for value in values))
+    if len(shape) > 1:
+        raise ValueError(
+            f"address fields broadcast to one value per row, got shape {shape}"
+        )
+    return shape[0] if shape else 1
+
+
+def columns(values: Sequence[Field]) -> np.ndarray:
+    """The fields as one `[rows, len(values)]` unsigned table, broadcast together.
+
+    Each field is cast to uint64 before the stack rather than after. Stacking a
+    signed field beside an unsigned one promotes the pair to float64, which
+    silently rounds any value above 2^53 — and a tree address reaches 2^63. That
+    is the failure the width check below cannot see, because the rounding has
+    already happened by the time there is a table to check.
+    """
+    arrays = []
+    for value in values:
+        array = np.asarray(value)
+        if array.dtype.kind not in "iu":
+            raise ValueError(
+                f"address fields are integers, got dtype {array.dtype}; a field "
+                f"wider than 64 bits needs `encode`, which is not width-bounded"
+            )
+        if array.dtype.kind == "i" and array.min() < 0:
+            raise ValueError(f"address fields are unsigned, got {array.min()}")
+        arrays.append(array)
+    rows(values)
+    return np.stack(
+        [
+            np.atleast_1d(value).astype(np.uint64)
+            for value in np.broadcast_arrays(*arrays)
+        ],
+        axis=-1,
+    )
+
+
 def encode(values: Sequence[Field], slots: tuple[Slot, ...]) -> bytes:
     """One address as bytes, field by field, the way its standard writes it.
 
@@ -72,7 +125,7 @@ def encode_batch(values: Sequence[Field], slots: tuple[Slot, ...]) -> np.ndarray
     across the batch, which is the common shape: a fixed layer and type against a
     column of node indices.
     """
-    table = _columns(values)
+    table = columns(values)
     _reject_overflow(table, slots)
     positions, sources = _byte_plan(slots)
     encoded = np.zeros((table.shape[0], size(slots)), dtype=np.uint8)
@@ -91,29 +144,6 @@ def _to_byte(value: int, length: int) -> bytes:
         return value.to_bytes(length, "big")
     except OverflowError as exc:
         raise ValueError(f"{value} does not fit in {length} bytes") from exc
-
-
-def _columns(values: Sequence[Field]) -> np.ndarray:
-    """The fields as one `[rows, len(values)]` unsigned table, broadcast together."""
-    arrays = []
-    for value in values:
-        array = np.asarray(value)
-        if array.dtype.kind not in "iu":
-            raise ValueError(
-                f"address fields are integers, got dtype {array.dtype}; a field "
-                f"wider than 64 bits needs `encode`, which is not width-bounded"
-            )
-        arrays.append(array)
-    broadcast = [np.atleast_1d(value) for value in np.broadcast_arrays(*arrays)]
-    if broadcast[0].ndim != 1:
-        raise ValueError(
-            f"address fields broadcast to one value per row, got shape "
-            f"{broadcast[0].shape}"
-        )
-    table = np.stack(broadcast, axis=-1)
-    if table.dtype.kind == "i" and table.min() < 0:
-        raise ValueError(f"address fields are unsigned, got {table.min()}")
-    return table.astype(np.uint64)
 
 
 @lru_cache(maxsize=None)

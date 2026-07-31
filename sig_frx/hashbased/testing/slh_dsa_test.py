@@ -28,6 +28,8 @@ import hashlib
 
 import numpy as np
 from absl.testing import absltest
+from frx import Array
+from frx.typing import ArrayLike
 from hash_frx.sha256 import Sha256
 
 from sig_frx.hashbased import fors, hypertree, slh_dsa, tree, xmss
@@ -62,6 +64,24 @@ def _family() -> Sha2TweakableHash:
 
 def _scheme(*, deterministic: bool = True) -> slh_dsa.SlhDsa:
     return slh_dsa.SlhDsa(_family(), _PARAMS, deterministic=deterministic)
+
+
+class _CountingHash:
+    """A `ByteHash` that counts its calls.
+
+    The seam is dependency-injected, so the scheme reaches every hash through
+    this and the count is exact rather than inferred.
+    """
+
+    def __init__(self) -> None:
+        self._inner = Sha256()
+        self.digest_size = self._inner.digest_size
+        self.has_dedicated_fusion = self._inner.has_dedicated_fusion
+        self.calls = 0
+
+    def digest(self, msg: ArrayLike) -> Array:
+        self.calls += 1
+        return self._inner.digest(msg)
 
 
 def _pure_message(message: bytes, context: bytes = b"") -> bytes:
@@ -127,7 +147,7 @@ def _spec_sign(secret_key: np.ndarray, message: bytes, opt_rand: np.ndarray) -> 
             fors_signature[None, ...],
             md_array[None, :],
             pk_seed,
-            [position],
+            position,
         )
     )[0]
     hypertree_signature = np.asarray(
@@ -399,12 +419,66 @@ class DigestSplitTest(absltest.TestCase):
             )
             with self.subTest(index):
                 self.assertEqual(bytes(np.asarray(got_md)[0]), md)
-                self.assertEqual(got_trees, [idx_tree])
-                self.assertEqual(got_leaves, [idx_leaf])
+                self.assertEqual(got_trees.tolist(), [idx_tree])
+                self.assertEqual(got_leaves.tolist(), [idx_leaf])
                 # The reduction is what keeps a byte-rounded slice inside the
                 # hypertree it indexes into.
                 self.assertLess(idx_tree, 1 << (_PARAMS.h - _PARAMS.tree_height))
                 self.assertLess(idx_leaf, 1 << _PARAMS.tree_height)
+
+    def test_the_indices_come_back_as_one_column_each(self) -> None:
+        # An index per signature, read out of the batch at once rather than a row
+        # at a time — a Python loop over signatures is what the batch axis removes.
+        scheme = _scheme()
+        public_key, secret_key = (np.asarray(part) for part in scheme.keygen(_SEED))
+        batch = 3
+        messages = np.stack(
+            [
+                np.frombuffer(
+                    _pure_message(bytes(_MESSAGE) + index.to_bytes(2, "big")),
+                    dtype=np.uint8,
+                )
+                for index in range(batch)
+            ]
+        )
+        randomizers = np.stack(
+            [
+                np.asarray(scheme._tweak.prf_msg(secret_key[16:32], public_key[:16], m))
+                for m in messages
+            ]
+        )
+        _, trees, leaves = scheme._split_digest(
+            randomizers,
+            np.stack([public_key[:16]] * batch),
+            np.stack([public_key[16:]] * batch),
+            messages,
+        )
+        for column in (trees, leaves):
+            self.assertIsInstance(column, np.ndarray)
+            self.assertEqual(column.shape, (batch,))
+
+    def test_to_int_reads_every_parameter_sets_index_slice(self) -> None:
+        # The small parameters above never reach the widths a real set uses: an
+        # eight-byte tree slice reduced to 63 or 64 bits, which is where a uint64
+        # column would round if it were carried as anything wider.
+        rng = np.random.default_rng(0)
+        for name, params in slh_dsa.SHA2_PARAMETER_SETS.items():
+            digest = rng.integers(0, 256, size=(4, params.m), dtype=np.uint8)
+            tree_end = params.md_bytes + params.tree_index_bytes
+            leaf_end = tree_end + params.leaf_index_bytes
+            slices = (
+                (digest[:, params.md_bytes : tree_end], params.h - params.tree_height),
+                (digest[:, tree_end:leaf_end], params.tree_height),
+            )
+            for block, bits in slices:
+                with self.subTest(name, width=block.shape[1], bits=bits):
+                    self.assertEqual(
+                        slh_dsa._to_int(block, bits).tolist(),
+                        [
+                            int.from_bytes(bytes(row), "big") % (1 << bits)
+                            for row in block
+                        ],
+                    )
 
 
 class VerifyTest(absltest.TestCase):
@@ -474,6 +548,34 @@ class VerifyTest(absltest.TestCase):
                         self.signature[None, :],
                     )[0]
                 )
+
+    def test_the_hash_call_count_does_not_depend_on_the_batch_size(self) -> None:
+        # The batch-parallel claim, stated where it can fail. A Python loop over
+        # signatures anywhere in the path — building one position per entry,
+        # reading one index per entry — shows up here as a call count that grows
+        # with `B`. It does not: `B` only widens the rows each call carries.
+        counted = _CountingHash()
+        scheme = slh_dsa.SlhDsa(
+            Sha2TweakableHash(counted, n=_PARAMS.n, m=_PARAMS.m),
+            _PARAMS,
+            deterministic=True,
+        )
+        public_key, secret_key = (np.asarray(part) for part in scheme.keygen(_SEED))
+        signature = np.asarray(scheme.sign(secret_key, _MESSAGE))
+        calls = {}
+        for batch in (1, 2, 5):
+            counted.calls = 0
+            verdicts = np.asarray(
+                scheme.verify(
+                    np.stack([public_key] * batch),
+                    np.stack([_MESSAGE] * batch),
+                    np.stack([signature] * batch),
+                )
+            )
+            self.assertEqual(verdicts.tolist(), [True] * batch)
+            calls[batch] = counted.calls
+        self.assertEqual(calls[2], calls[1], calls)
+        self.assertEqual(calls[5], calls[1], calls)
 
     def test_another_context_is_rejected(self) -> None:
         signed = np.asarray(
