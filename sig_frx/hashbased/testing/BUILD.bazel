@@ -93,6 +93,22 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# The multi-tree half: the per-layer index split, keygen over the top tree only,
+# and the wider signature. Single-tree is the `d = 1` case of the same class and
+# is gated by `rfc8391_xmss_test`.
+py_test(
+    name = "rfc8391_xmssmt_test",
+    size = "medium",
+    srcs = ["rfc8391_xmssmt_test.py"],
+    deps = [
+        ":rfc8391_vectors",
+        "//sig_frx/hashbased:rfc8391_params",
+        "//sig_frx/hashbased:rfc8391_xmss",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 py_test(
     name = "tweakable_test",
     size = "small",

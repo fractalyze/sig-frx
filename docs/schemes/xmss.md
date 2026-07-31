@@ -1,4 +1,4 @@
-# XMSS (RFC 8391)
+# XMSS and XMSS-MT (RFC 8391)
 
 Stateful hash-based signatures: a Merkle tree over WOTS+ one-time keys, where the
 signing key carries the index of the next unused one. The public key is the root.
@@ -9,6 +9,19 @@ Implementation:
 [`sig_frx/hashbased/rfc8391_xmss.py`](../../sig_frx/hashbased/rfc8391_xmss.py),
 over the RFC 8391 substrate in the same package — the address encoding, the hash
 family, the parameter sets, WOTS+ and its L-tree compression.
+
+**One class, both variants.** RFC 8391 makes XMSS the `d = 1` case of XMSS-MT and
+its own reference implementation says so structurally — `xmss_core_sign` and
+`xmss_core_sign_open` are one-line forwards to the multi-tree routines. So the
+layer walk runs once for XMSS and `d` times for XMSS-MT, and `sha2(oid)` and
+`mt_sha2(oid)` differ only in which parameter table they read. They must be
+separate lookups: the OID spaces are per-variant, and OID 2 names
+`XMSS-SHA2_16_256` in one and `XMSSMT-SHA2_20/4_256` in the other.
+
+The multi-tree variant is what makes a key's lifetime usable. Keygen builds only
+the **top** layer, so `XMSSMT-SHA2_20/4_256` reaches 2^20 signatures for the cost
+of one tree of 32 leaves, where the single-tree set of the same height would build
+2^20 WOTS+ key pairs.
 
 ## The state is the risk, and where it is written down is yours
 
@@ -78,10 +91,15 @@ What this implementation chooses:
   lifts an unpaired node to the next level unhashed, where `tree.reduce_levels`
   refuses an odd count on purpose. A pull-up and a refusal behind one name would
   be two behaviours with one signature.
-- **A parameter set is a table row keyed by OID.** All 21 registered rows are
-  present; the SHAKE sets and the `n = 64` SHA-2 sets are not constructible until
-  hash-frx has Keccak and SHA-512, and building one refuses rather than silently
-  using SHA-256.
+- **A parameter set is a table row keyed by OID.** All 21 XMSS rows and all 56
+  XMSS-MT rows are present; the SHAKE sets and the `n = 64` SHA-2 sets are not
+  constructible until hash-frx has Keccak and SHA-512, and building one refuses
+  rather than silently using SHA-256.
+- **`hypertree.py` is not reused for the layer walk.** It implements the same idea
+  for FIPS 205, but every step of it calls FIPS 205's XMSS layer, so sharing it
+  would mean injecting both layer operations as callables — and the walk is a
+  dozen lines that `sign` and `verify` have to contain anyway for `d = 1`. There
+  would be nothing left at the call site but the closures.
 - **RFC 8391 has no application context**, so `sign` and `verify` take an empty
   one and raise on anything else rather than accepting and ignoring it.
 
@@ -95,16 +113,23 @@ and its own authentication path, and a batch shares nothing.
 | Stage | Calls | Width |
 | ----- | ----- | ----- |
 | `H_msg` over the batch | 1 | `B` |
-| WOTS+ chains from the signature | `w − 1` | `B · len` |
-| L-tree compression | `⌈log2 len⌉` | `B · len/2`, halving |
-| Merkle path to the root | `h` | `B` |
+| WOTS+ chains from the signature, per layer | `d · (w − 1)` | `B · len` |
+| L-tree compression, per layer | `d · ⌈log2 len⌉` | `B · len/2`, halving |
+| Merkle path to the layer's root | `d · h'` | `B` |
 
-`keygen` and `sign` take one key and one message, and both build the whole tree:
-`2^h` WOTS+ key pairs, walked as one batch of `2^h · len` chains rather than
-`2^h` separate walks. At the gated sets that is 1024 leaves — the reference's own
-generator samples only `h = 10`, which is why the vectors are runnable at all.
-There is no state-management scheme here (BDS traversal, cached authentication
-paths); signing recomputes, because signing exists to reproduce vectors.
+The layers are a loop and the batch is inside it: at each layer every entry sits
+in its own tree at its own leaf, so a layer is one batched `XMSS_rootFromSig`
+rather than `B` of them. `d` layers deep, that is `d` batched passes instead of
+`B · d` sequential ones, and the per-entry verdict survives because a claim that
+reaches the wrong root at any layer reaches the wrong root at the top.
+
+`keygen` and `sign` take one key and one message. Both build whole trees — `2^h'`
+WOTS+ key pairs, walked as one batch of `2^h' · len` chains rather than `2^h'`
+separate walks — keygen for the top layer only, signing for one tree per layer.
+At the gated sets that is 1024 leaves for XMSS `h = 10` and 32 per layer for
+XMSS-MT `20/4`. There is no state-management scheme here (BDS traversal, cached
+authentication paths); signing recomputes, because signing exists to reproduce
+vectors.
 
 ## What leaks
 

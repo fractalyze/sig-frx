@@ -1,9 +1,30 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""Single-tree XMSS — RFC 8391 §4.1.
+"""XMSS and XMSS-MT — RFC 8391 §4.1 and §4.2.
 
 A Merkle tree of L-tree-compressed WOTS+ public keys. The public key is the root;
 a signature is the index of the one-time key that made it, a randomizer, the WOTS+
 signature, and the authentication path from that key's leaf.
+
+**One class covers both variants, because RFC 8391 makes XMSS the `d = 1` case of
+XMSS-MT.** Its own reference implementation says so structurally — `xmss_core_sign`
+and `xmss_core_sign_open` are one-line forwards to the multi-tree routines — and
+the two published signature formats agree once `d = 1`: a `d`-layer signature is
+`d` blocks of `WOTS+ signature ‖ auth path`, and one block is what §4.1.8 defines.
+So the layer walk below runs once for XMSS and `d` times for XMSS-MT, and there is
+no second scheme to keep in step. The one place the two do not collapse is the
+index width, which §4.1.8 fixes at four bytes while §4.2.2 rounds `h` up to a
+byte; that lives on the parameter set (`rfc8391_params`).
+
+The multi-tree variant is what makes an XMSS key's lifetime usable: keygen builds
+only the **top** layer, so `XMSSMT-SHA2_20/4_256` reaches 2^20 signatures for the
+cost of one tree of 32 leaves, where the single-tree set of the same height would
+build 2^20 WOTS+ key pairs.
+
+`hypertree.py` implements this same layer walk for FIPS 205 and is deliberately not
+reused. It calls FIPS 205's XMSS layer at every step, so sharing it would mean
+injecting both layer operations as callables — and the walk is a dozen lines that
+`sign` and `verify` here have to contain anyway for `d = 1`. There would be
+nothing left at the call site but the closures.
 
 **The index is the whole risk, and it is a value that crosses the API.** Signing
 twice at one index leaks the WOTS+ secret — not a degradation, a total break — so
@@ -51,15 +72,14 @@ from hash_frx.sha256 import Sha256
 
 from sig_frx.hashbased import rfc8391_adrs, rfc8391_wots, tree, wots
 from sig_frx.hashbased.rfc8391_hashes import Rfc8391Hashes, sha2_hashes
-from sig_frx.hashbased.rfc8391_params import XMSS_PARAMETER_SETS, XmssParams
-
-# §4.1.11: an XMSS signature carries its index in four bytes whatever `h` is.
-# XMSS-MT rounds `h` up to a byte instead, which is why this is named here rather
-# than derived — the two are the same field with different widths.
-INDEX_BYTES = 4
+from sig_frx.hashbased.rfc8391_params import (
+    XMSS_PARAMETER_SETS,
+    XMSSMT_PARAMETER_SETS,
+    XmssParams,
+)
 
 # `PRF`'s input is 32 bytes, so the index the randomizer is derived from is
-# encoded to that width rather than to `INDEX_BYTES` — §4.1.9.
+# encoded to that width rather than to the signature's own index width — §4.1.9.
 _PRF_INDEX_BYTES = 32
 
 
@@ -188,6 +208,62 @@ def root(
     )
 
 
+def locate(params: XmssParams, index: int) -> list[tuple[tree.TreePosition, int]]:
+    """Where a signature index sits at every layer: which tree, and which leaf.
+
+    §4.2.3 lines 6-7, which §4.1.9 lines 8-9 are the `d = 1` case of: the low `h'`
+    bits of what remains name the leaf, and the rest name the tree — and that
+    remainder is what the layer above has left to consume. So the walk consumes the
+    index `h'` bits at a time, bottom layer first, which is the order a signature's
+    per-layer blocks are laid out in.
+
+    An index past the whole structure leaves a non-zero remainder at the top, which
+    addresses a tree that does not exist rather than wrapping onto a leaf that does
+    — and that is how an over-large index a signature claims gets rejected instead
+    of verifying against the wrong leaf.
+    """
+    walk = []
+    remaining = index
+    for layer in range(params.layers):
+        leaf = remaining & ((1 << params.tree_height) - 1)
+        remaining >>= params.tree_height
+        walk.append((tree.TreePosition(layer=layer, tree=remaining), leaf))
+    return walk
+
+
+def sign_layer(
+    hashes: Rfc8391Hashes,
+    params: wots.WotsParams,
+    message: ArrayLike,
+    pub_seed: ArrayLike,
+    sk_seed: ArrayLike,
+    position: tree.TreePosition,
+    height: int,
+    leaf_index: int,
+) -> Array:
+    """§4.1.9's `treeSig` — one tree's contribution. `[len + height, n]`.
+
+    The WOTS+ signature over `message` at `leaf_index`, then the authentication
+    path from that leaf. XMSS-MT calls this once per layer, over the root of the
+    tree below rather than over a message digest; the operation is the same either
+    way, which is why the layer above supplies what gets signed.
+    """
+    forest = leaves(hashes, params, pub_seed, sk_seed, position, height)
+    ots_position, _ = _leaf_positions(position, [leaf_index])
+    signature = rfc8391_wots.sign(
+        hashes, params, message, pub_seed, sk_seed, ots_position[0]
+    )
+    path = tree.auth_path(
+        hashes, pub_seed, forest, [leaf_index], height, node_addresses(position)
+    )[0]
+    return fnp.concatenate(
+        [
+            fnp.asarray(signature, dtype=fnp.uint8),
+            fnp.asarray(path, dtype=fnp.uint8),
+        ]
+    )
+
+
 def pk_from_sig(
     hashes: Rfc8391Hashes,
     params: wots.WotsParams,
@@ -274,9 +350,14 @@ class Xmss:
         # key signs one message one way — there is no hedged variant to select.
         self.deterministic = True
         self.public_key_size = 2 * params.n
-        self.secret_key_size = INDEX_BYTES + 4 * params.n
+        self.secret_key_size = params.index_bytes + 4 * params.n
+        # `index ‖ r ‖ (WOTS+ signature ‖ auth path) × d` — §4.1.8 and §4.2.2. The
+        # `d` per-layer blocks are each `len + h'` values, so the total is
+        # `h · n` of authentication path however the height is split.
         self.signature_max_size = (
-            INDEX_BYTES + params.n + (params.wots.len + params.height) * params.n
+            params.index_bytes
+            + params.n
+            + params.layers * self._layer_values * params.n
         )
 
     def __eq__(self, other: object) -> bool:
@@ -286,6 +367,11 @@ class Xmss:
 
     def __hash__(self) -> int:
         return hash((type(self), self._hashes, self.params))
+
+    @property
+    def _layer_values(self) -> int:
+        """`n`-byte values in one layer's contribution to a signature."""
+        return self.params.wots.len + self.params.tree_height
 
     @property
     def signatures_per_key(self) -> int:
@@ -304,6 +390,12 @@ class Xmss:
 
         The public key is `root ‖ SEED` — the root *first*, which is the opposite
         of FIPS 205's `PK.seed ‖ PK.root`.
+
+        **Only the top layer is built**, which is the whole point of the multi-tree
+        variant: `XMSSMT-SHA2_20/4_256` reaches 2^20 signatures while keygen builds
+        one tree of 32 leaves, where the single-tree set of the same height would
+        build 2^20 WOTS+ key pairs. For `d = 1` the top layer is the only layer, so
+        this is the same code path.
         """
         values = fnp.asarray(seed, dtype=fnp.uint8)
         n = self.params.n
@@ -318,8 +410,8 @@ class Xmss:
             self.params.wots,
             pub_seed,
             sk_seed,
-            tree.TreePosition(layer=0, tree=0),
-            self.params.height,
+            tree.TreePosition(layer=self.params.layers - 1, tree=0),
+            self.params.tree_height,
         )
         return (
             fnp.concatenate([pk_root, pub_seed]),
@@ -360,39 +452,50 @@ class Xmss:
             raise ValueError(f"sign takes one message, got shape {tuple(body.shape)}")
 
         randomizer = self._hashes.prf(key.prf, _to_byte(key.index, _PRF_INDEX_BYTES))[0]
-        digest = self._hashes.hash_message(randomizer, key.root, key.index, body)[0]
-
-        position, leaf_index = self._locate(key.index)
-        ots_position, _ = _leaf_positions(position, [leaf_index])
-        wots_signature = rfc8391_wots.sign(
-            self._hashes,
-            self.params.wots,
-            digest,
-            key.pub_seed,
-            key.seed,
-            ots_position[0],
+        signed = np.asarray(
+            self._hashes.hash_message(randomizer, key.root, key.index, body)[0]
         )
-        path = tree.auth_path(
-            self._hashes,
-            key.pub_seed,
-            leaves(
-                self._hashes,
-                self.params.wots,
-                key.pub_seed,
-                key.seed,
-                position,
-                self.params.height,
-            ),
-            [leaf_index],
-            self.params.height,
-            node_addresses(position),
-        )[0]
+
+        # Each layer signs the root of the tree below it, so the layers are
+        # sequential by construction — this is the signing path, which is not
+        # what this repo batches.
+        parts = []
+        walk = locate(self.params, key.index)
+        for layer, (position, leaf_index) in enumerate(walk):
+            parts.append(
+                sign_layer(
+                    self._hashes,
+                    self.params.wots,
+                    signed,
+                    key.pub_seed,
+                    key.seed,
+                    position,
+                    self.params.tree_height,
+                    leaf_index,
+                )
+            )
+            if layer + 1 < len(walk):
+                # The next layer signs *this* tree's root, which the verifier
+                # recomputes from the signature rather than being handed.
+                signed = np.asarray(
+                    pk_from_sig(
+                        self._hashes,
+                        self.params.wots,
+                        fnp.asarray(parts[-1])[None, ...],
+                        signed[None, :],
+                        key.pub_seed,
+                        [position],
+                        [leaf_index],
+                    )
+                )[0]
+
         signature = fnp.concatenate(
             [
-                fnp.asarray(_to_byte(key.index, INDEX_BYTES), dtype=fnp.uint8),
+                fnp.asarray(
+                    _to_byte(key.index, self.params.index_bytes), dtype=fnp.uint8
+                ),
                 fnp.asarray(randomizer, dtype=fnp.uint8),
-                fnp.asarray(wots_signature, dtype=fnp.uint8).reshape(-1),
-                fnp.asarray(path, dtype=fnp.uint8).reshape(-1),
+                *[fnp.asarray(part, dtype=fnp.uint8).reshape(-1) for part in parts],
             ]
         )
         advanced = self._encode_secret_key(
@@ -445,39 +548,35 @@ class Xmss:
 
         roots, pub_seeds = keys[:, : params.n], keys[:, params.n :]
         indices, randomizers, bodies = self._parse_signature(signatures)
-        digests = self._hashes.hash_message(randomizers, roots, indices, messages)
-        located = [self._locate(index) for index in indices]
-        computed = pk_from_sig(
-            self._hashes,
-            params.wots,
-            bodies,
-            digests,
-            pub_seeds,
-            [position for position, _ in located],
-            [leaf for _, leaf in located],
-        )
+        computed = self._hashes.hash_message(randomizers, roots, indices, messages)
+
+        # Layer by layer, batched across signatures: at each layer every entry
+        # sits in its own tree at its own leaf, so a layer is one batched
+        # `XMSS_rootFromSig` rather than `B` of them. `d` layers deep, that is `d`
+        # batched passes instead of `B · d` sequential ones, and the per-entry
+        # verdict survives — a claim that reaches the wrong root at any layer
+        # reaches the wrong root at the top.
+        walks = [locate(params, index) for index in indices]
+        for layer in range(params.layers):
+            computed = pk_from_sig(
+                self._hashes,
+                params.wots,
+                bodies[:, layer, :, :],
+                computed,
+                pub_seeds,
+                [walk[layer][0] for walk in walks],
+                [walk[layer][1] for walk in walks],
+            )
         return fnp.all(computed == roots, axis=-1)
 
     # -- encodings ---------------------------------------------------------
 
-    def _locate(self, index: int) -> tuple[tree.TreePosition, int]:
-        """Which tree an index sits in, and which leaf of it — §4.1.9 lines 8-9.
-
-        Single-tree XMSS has one tree, so a well-formed index leaves the tree
-        address zero. An index past the tree addresses a tree that does not exist,
-        which is how an over-large index a signature claims is rejected rather than
-        wrapping around onto a leaf that does exist.
-        """
-        height = self.params.height
-        return (
-            tree.TreePosition(layer=0, tree=index >> height),
-            index & ((1 << height) - 1),
-        )
-
     def _encode_secret_key(self, key: _SecretKey) -> Array:
         return fnp.concatenate(
             [
-                fnp.asarray(_to_byte(key.index, INDEX_BYTES), dtype=fnp.uint8),
+                fnp.asarray(
+                    _to_byte(key.index, self.params.index_bytes), dtype=fnp.uint8
+                ),
                 fnp.asarray(key.seed, dtype=fnp.uint8),
                 fnp.asarray(key.prf, dtype=fnp.uint8),
                 fnp.asarray(key.root, dtype=fnp.uint8),
@@ -493,33 +592,32 @@ class Xmss:
                 f"{tuple(values.shape)}"
             )
         n = self.params.n
-        fields = [
-            values[INDEX_BYTES + step * n : INDEX_BYTES + (step + 1) * n]
-            for step in range(4)
-        ]
+        head = self.params.index_bytes
+        fields = [values[head + step * n : head + (step + 1) * n] for step in range(4)]
         return _SecretKey(
-            int.from_bytes(bytes(np.asarray(values[:INDEX_BYTES])), "big"), *fields
+            int.from_bytes(bytes(np.asarray(values[:head])), "big"), *fields
         )
 
     def _parse_signature(self, signatures: Array) -> tuple[list[int], Array, Array]:
-        """`idx ‖ r ‖ WOTS+ signature ‖ auth path` — §4.1.8.
+        """`idx ‖ r ‖ (WOTS+ signature ‖ auth path) × d` — §4.1.8 and §4.2.2.
 
-        The WOTS+ signature and the path come back as one `[B, len + h, n]` block
-        because that is what `pk_from_sig` consumes: it splits them itself, and
-        cutting them apart twice is a chance for the two splits to disagree.
+        The body comes back as `[B, d, len + h', n]`: one block per layer, each of
+        which `pk_from_sig` splits into its WOTS+ half and its path itself. Cutting
+        them apart twice is a chance for the two splits to disagree.
         """
         params = self.params
+        head = params.index_bytes
         indices = [
             int.from_bytes(bytes(row), "big")
-            for row in np.asarray(signatures[:, :INDEX_BYTES])
+            for row in np.asarray(signatures[:, :head])
         ]
-        randomizers = signatures[:, INDEX_BYTES : INDEX_BYTES + params.n]
-        body = signatures[:, INDEX_BYTES + params.n :]
+        randomizers = signatures[:, head : head + params.n]
+        body = signatures[:, head + params.n :]
         return (
             indices,
             randomizers,
             body.reshape(
-                signatures.shape[0], params.wots.len + params.height, params.n
+                signatures.shape[0], params.layers, self._layer_values, params.n
             ),
         )
 
@@ -552,10 +650,24 @@ def sha2(oid: int) -> Xmss:
     here: they need Keccak and a SHA-512 `ByteHash` respectively, and `sha2_hashes`
     refuses them rather than building the wrong family.
     """
-    if oid not in XMSS_PARAMETER_SETS:
+    return _build("XMSS", XMSS_PARAMETER_SETS, oid)
+
+
+def mt_sha2(oid: int) -> Xmss:
+    """The `XMSSMT-SHA2_*` parameter set registered at `oid`.
+
+    A separate lookup rather than a flag, because the OID space is: OID 2 names
+    `XMSS-SHA2_16_256` to `sha2` and `XMSSMT-SHA2_20/4_256` here, and resolving one
+    through the other's table would build a different scheme without failing.
+    """
+    return _build("XMSS-MT", XMSSMT_PARAMETER_SETS, oid)
+
+
+def _build(variant: str, table: dict[int, XmssParams], oid: int) -> Xmss:
+    if oid not in table:
         raise ValueError(
-            f"no XMSS parameter set has OID {oid}; registered OIDs are "
-            f"{min(XMSS_PARAMETER_SETS)} to {max(XMSS_PARAMETER_SETS)}"
+            f"no {variant} parameter set has OID {oid}; registered OIDs are "
+            f"{min(table)} to {max(table)}"
         )
-    params = XMSS_PARAMETER_SETS[oid]
+    params = table[oid]
     return Xmss(sha2_hashes(params, Sha256()), params)

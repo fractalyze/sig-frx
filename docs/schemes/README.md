@@ -8,7 +8,7 @@ readable.
 | Scheme | Where |
 | ------ | ----- |
 | SLH-DSA (FIPS 205) | [`slh-dsa.md`](slh-dsa.md) |
-| XMSS (RFC 8391) | [`xmss.md`](xmss.md) |
+| XMSS and XMSS-MT (RFC 8391) | [`xmss.md`](xmss.md) |
 
 The three questions every page answers — what the standard fixes versus what this
 implementation chooses, where the batch axis is, and what leaks — are specified
