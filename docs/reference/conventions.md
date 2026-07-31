@@ -88,6 +88,29 @@ An exhaustive sweep — every parameter set against every published vector — i
 tagged `slow_kat`, which drops it from the per-PR run and keeps it in the
 scheduled one.
 
+### A standard that publishes no vectors still gets gated
+
+Not every standard ships known-answer tests, and the validation program does not
+cover every scheme it approves. That lowers nothing: it changes what the authority
+is, and the authority has to be named rather than assumed.
+
+The order to look, and to stop at the first that exists: the standard's own
+vectors; the validation program's; then **the reference implementation the
+standard points at**, which is what a standard means when it says testing is done
+against one. Shipping self-gated is not on the list — a scheme that only verifies
+its own signatures has demonstrated nothing.
+
+Gating on an implementation costs more provenance than gating on a file, so all of
+it is recorded where the values live: the upstream commit, the fixture, the exact
+call each value came from, and the program that regenerates them. Prefer the
+values that implementation's own generator publishes over ones invented here —
+they are what other implementations compare against — and pin the intermediates
+beneath them too, because a digest of a final artifact says only *that* something
+is wrong.
+
+Values obtained this way are transcribed constants rather than a fetched file:
+there is nothing to fetch, so the rule below does not apply to them.
+
 ### Vectors are fetched and pinned, never committed
 
 A vector set is declared as an `http_file` in [`MODULE.bazel`](../../MODULE.bazel)
