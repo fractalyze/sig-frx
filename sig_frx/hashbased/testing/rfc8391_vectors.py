@@ -16,12 +16,12 @@ primitives. **Those addresses are deliberately garbage** — every word is non-z
 including the type word, which is why they pin the no-normalization rule
 `rfc8391_adrs` is built around.
 
-`WOTS_PK`, `WOTS_SIG` and `LTREE_LEAF` are `SHAKE128(artifact, 10)`, the framing
-`test/vectors.c` prints, and their values are the WOTS+ rows for OIDs 1 and 13 in
-the table on fractalyze/sig-frx#16. Everything else is the artifact in full,
-because those are small and a full-byte comparison localizes a failure that a
-digest only detects. The program that produces all of it is on
-fractalyze/sig-frx#57.
+Every `digest_*` field is `SHAKE128(artifact, 10)`, the framing `test/vectors.c`
+prints, and their values are the WOTS+ and XMSS rows for OIDs 1 and 13 in the
+table on fractalyze/sig-frx#16. Everything else is the artifact in full, because
+those are small and a full-byte comparison localizes a failure that a digest only
+detects. The programs that produce all of it are on fractalyze/sig-frx#57 (the
+substrate) and fractalyze/sig-frx#58 (the scheme).
 
 Two traps this file exists to record, both of which cost a session's worth of
 debugging when they were guessed at instead:
@@ -90,6 +90,76 @@ def fixture_bytes(length: int, start: int = 0, step: int = 1) -> np.ndarray:
 # the 64-bit value the reference passes.
 HASH_MESSAGE_INDEX = 0x0102030405060708
 HASH_MESSAGE_BODY = bytes.fromhex("aabbcc")
+
+# The scheme-level fixture, from `vectors_xmss`: a key seeded with `seed[i] = i`
+# over `3n` bytes, signing the one-byte message `{37}`. The generator then
+# overwrites the key's index with `2^(h-1)` before signing, so the published
+# signature is made at a **non-zero** index — which is the only reason the
+# vectors say anything about index handling at all. Every sampled OID lands on
+# `h = 10`, so keygen is 1024 leaves rather than 2^20.
+XMSS_MESSAGE = bytes([37])
+
+
+def xmss_signing_index(height: int) -> int:
+    """`1 << (h - 1)` — the index `vectors_xmss` forces before signing."""
+    return 1 << (height - 1)
+
+
+@dataclass(frozen=True)
+class XmssReferenceVectors:
+    """What §4.1's keygen and sign produce for one parameter set at that fixture.
+
+    The two digests are the published rows; the rest are intermediates, in the
+    order a failure should be read in — a wrong `root` fails everything after it,
+    and a wrong `randomizer` fails the digest and the signature but not the key.
+    """
+
+    oid: int
+    root: bytes
+    randomizer: bytes
+    message_digest: bytes
+    leaf_at_index: bytes
+    auth_path_head: bytes
+    digest_public_key: bytes
+    digest_signature: bytes
+
+
+XMSS_REFERENCE: dict[int, XmssReferenceVectors] = {
+    0x01: XmssReferenceVectors(
+        oid=0x01,
+        root=bytes.fromhex(
+            "9d898033e37af48e6a116f8b15651cc26773467007ad19375d38c23c690c3483"
+        ),
+        randomizer=bytes.fromhex(
+            "8ff0300be485dea7e5ae2c56080302febc91b41318c504f895baab0b068968f2"
+        ),
+        message_digest=bytes.fromhex(
+            "d73cf83f1db89ba0df0864cd24fe25badfabe9f27c3d030ec012e83dbdf054b3"
+        ),
+        leaf_at_index=bytes.fromhex(
+            "e0d82ae8c037c54d8db0505b5b176c29b9af90a403848d2511f39608f0024d55"
+        ),
+        auth_path_head=bytes.fromhex(
+            "5f132f059c3abc25868bd9b75d80b95eef2f315667d7d6e26045ccf487780552"
+        ),
+        digest_public_key=bytes.fromhex("7de72d192121f414d4bb"),
+        digest_signature=bytes.fromhex("8b6cb278d50a3694ca38"),
+    ),
+    0x0D: XmssReferenceVectors(
+        oid=0x0D,
+        root=bytes.fromhex("b8e84793033b07d3e37a24cdff2b9636d47e85b35e074ec1"),
+        randomizer=bytes.fromhex("6f8271912413dcdda00fad02e64de5b1fad321039e6e2136"),
+        message_digest=bytes.fromhex(
+            "051f9c869289cf99ba650f0d4b051245b26057a3d8c1674d"
+        ),
+        leaf_at_index=bytes.fromhex("39e0b2bc6a59baf24b1d8e611edf453e897e51585d3bbc7a"),
+        auth_path_head=bytes.fromhex(
+            "43ca75aa6c44e58e33fb5b697105df28439efeaecb929935"
+        ),
+        digest_public_key=bytes.fromhex("5933d4b1e696804718c7"),
+        digest_signature=bytes.fromhex("6ec9da2e05da544d9c5d"),
+    ),
+}
 
 
 REFERENCE: dict[int, ReferenceVectors] = {

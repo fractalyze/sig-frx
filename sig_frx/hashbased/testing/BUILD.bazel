@@ -73,6 +73,26 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# The scheme gate: the reference's XMSS public key and signature digests, made at
+# a non-zero index, plus the rejection cases a round trip cannot show.
+py_test(
+    name = "rfc8391_xmss_test",
+    size = "large",
+    srcs = ["rfc8391_xmss_test.py"],
+    deps = [
+        ":rfc8391_vectors",
+        "//sig_frx/hashbased:rfc8391_adrs",
+        "//sig_frx/hashbased:rfc8391_hashes",
+        "//sig_frx/hashbased:rfc8391_params",
+        "//sig_frx/hashbased:rfc8391_wots",
+        "//sig_frx/hashbased:rfc8391_xmss",
+        "//sig_frx/hashbased:tree",
+        "@hash_frx//hash_frx:sha256",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 py_test(
     name = "tweakable_test",
     size = "small",
