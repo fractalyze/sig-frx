@@ -1,8 +1,18 @@
 load("@rules_python//python:defs.bzl", "py_library")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 
-# Addresses are host-side and hash-free: every SLH-DSA component builds them
-# before any hashing starts, so this depends on neither frx nor hash-frx.
+# Addresses are host-side and hash-free: every component builds them before any
+# hashing starts, so these depend on neither frx nor hash-frx.
+py_library(
+    name = "adrs_encoding",
+    srcs = [
+        "__init__.py",
+        "adrs_encoding.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [requirement("numpy")],
+)
+
 py_library(
     name = "adrs",
     srcs = [
@@ -10,7 +20,23 @@ py_library(
         "adrs.py",
     ],
     visibility = ["//visibility:public"],
-    deps = [requirement("numpy")],
+    deps = [
+        ":adrs_encoding",
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "rfc8391_adrs",
+    srcs = [
+        "__init__.py",
+        "rfc8391_adrs.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs_encoding",
+        requirement("numpy"),
+    ],
 )
 
 py_library(
@@ -108,6 +134,52 @@ py_library(
         "//sig_frx:signature",
         "@hash_frx//hash_frx:byte_hash",
         "@hash_frx//hash_frx:sha256",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+# The RFC 8391 side. It shares `wots.chain` and the tree walk with FIPS 205 and
+# nothing else: the addresses, the hash family and the public-key compression all
+# differ, which is what these targets carry.
+py_library(
+    name = "rfc8391_params",
+    srcs = [
+        "__init__.py",
+        "rfc8391_params.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [":wots"],
+)
+
+py_library(
+    name = "rfc8391_hashes",
+    srcs = [
+        "__init__.py",
+        "rfc8391_hashes.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":rfc8391_adrs",
+        ":rfc8391_params",
+        "@hash_frx//hash_frx:byte_hash",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "rfc8391_wots",
+    srcs = [
+        "__init__.py",
+        "rfc8391_wots.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":rfc8391_adrs",
+        ":rfc8391_hashes",
+        ":tweakable",
+        ":wots",
         requirement("frx"),
         requirement("numpy"),
     ],

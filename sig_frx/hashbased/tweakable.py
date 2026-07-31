@@ -6,6 +6,13 @@ one-way function `F`, the fixed-length hash `H`, and the variable-length `T_l`.
 Each is tweaked by an address (`adrs`), so the same input hashed at two positions
 in the hypertree gives two unrelated outputs.
 
+`F` and `H` also carry their own protocols here, because the components that use
+only one of them — `wots.chain` and all of `tree.py` — are shared with RFC 8391,
+whose family (`rfc8391_hashes`) is not this one: it has no `T_l`, tweaks with a
+key and a bitmask rather than a prefix, and derives its message digest from a
+different set of operands. Asking those components for the whole family would make
+the sharing a lie the type checker happens not to catch.
+
 A parameter-set family is a `ByteHash` from hash-frx plus the sizes — which is
 what makes the SHA-2 and SHAKE sets one implementation rather than two, and is
 the reason that seam exists. `Sha2TweakableHash` is the SHA-2 instantiation
@@ -37,8 +44,39 @@ from hash_frx.byte_hash import ByteHash
 
 
 @runtime_checkable
-class TweakableHash(Protocol):
+class ChainHash(Protocol):
+    """`F` alone — what a WOTS+ chain step needs and all it needs.
+
+    Narrower than `TweakableHash` because `wots.chain` is shared with RFC 8391,
+    whose family (`rfc8391_hashes`) has no `T_l` and no compressed address and
+    computes its message digest from different operands. `F` is the one function
+    the two standards agree on the shape of, so it is the one this asks for.
+    """
+
     n: int  # security parameter and output length, in bytes
+
+    def f(self, pk_seed: ArrayLike, adrs: ArrayLike, m1: ArrayLike) -> Array:
+        """One-way function on one n-byte block: -> uint8 `[B, n]`."""
+        ...
+
+
+@runtime_checkable
+class NodeHash(Protocol):
+    """`H` alone — what a Merkle level needs, and what `tree.py` is written to.
+
+    The same reasoning as `ChainHash`: a hash tree is the same walk under either
+    standard, so it asks for the parent hash rather than for a whole family.
+    """
+
+    n: int
+
+    def h(self, pk_seed: ArrayLike, adrs: ArrayLike, m2: ArrayLike) -> Array:
+        """Hash of two n-byte blocks — a Merkle parent: -> uint8 `[B, n]`."""
+        ...
+
+
+@runtime_checkable
+class TweakableHash(ChainHash, NodeHash, Protocol):
     m: int  # message-digest length `h_msg` produces, in bytes
     # Which address encoding this family tweaks with: the SHA-2 sets compress to
     # 22 bytes, the SHAKE sets use the full 32. A caller reads it to build its
@@ -63,14 +101,6 @@ class TweakableHash(Protocol):
         message: ArrayLike,
     ) -> Array:
         """The message digest a signature is over: -> uint8 `[B, m]`."""
-        ...
-
-    def f(self, pk_seed: ArrayLike, adrs: ArrayLike, m1: ArrayLike) -> Array:
-        """One-way function on one n-byte block: -> uint8 `[B, n]`."""
-        ...
-
-    def h(self, pk_seed: ArrayLike, adrs: ArrayLike, m2: ArrayLike) -> Array:
-        """Hash of two n-byte blocks — a Merkle parent: -> uint8 `[B, n]`."""
         ...
 
     def t(self, pk_seed: ArrayLike, adrs: ArrayLike, messages: ArrayLike) -> Array:

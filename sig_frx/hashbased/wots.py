@@ -32,7 +32,7 @@ from frx import Array
 from frx.typing import ArrayLike
 
 from sig_frx.hashbased import adrs
-from sig_frx.hashbased.tweakable import TweakableHash, repeat_per_entry
+from sig_frx.hashbased.tweakable import ChainHash, TweakableHash, repeat_per_entry
 
 # The compression a caller supplies: each key pair's chain ends, `[P, len · n]`,
 # compressed to `[P, n]`.
@@ -131,7 +131,7 @@ def message_digits(params: WotsParams, message: ArrayLike) -> Array:
 
 
 def chain(
-    tweak: TweakableHash,
+    tweak: ChainHash,
     pk_seed: ArrayLike,
     values: ArrayLike,
     start: ArrayLike,
@@ -139,6 +139,9 @@ def chain(
     step_addresses: Sequence[ArrayLike],
 ) -> Array:
     """`chain` — FIPS 205 §5, Algorithm 5, for a whole batch of chains at once.
+
+    Also RFC 8391 §3.1.2's `chain`, which is the same walk under a different `F`:
+    the standards agree here, and `ChainHash` is what lets both supply theirs.
 
     Entry `k` iterates `F` on `values[k]` for `steps[k]` applications beginning at
     index `start[k]`. `step_addresses[j]` holds every entry's address for step
