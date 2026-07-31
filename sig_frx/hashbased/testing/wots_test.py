@@ -20,7 +20,7 @@ import numpy as np
 from absl.testing import absltest
 from hash_frx.sha256 import Sha256
 
-from sig_frx.hashbased import adrs, wots
+from sig_frx.hashbased import adrs, slh_dsa, wots
 from sig_frx.hashbased.tweakable import Sha2TweakableHash
 
 _N = 16
@@ -97,6 +97,14 @@ class ParameterTest(absltest.TestCase):
 
 
 class Base2bTest(absltest.TestCase):
+    """The gather against Algorithm 4's loop, which is the reference.
+
+    The two disagree only if the claim underneath the gather is wrong — that
+    digit `j` is bits `[j·b, (j+1)·b)` of the big-endian stream — so the loop is
+    what pins it, at every `(b, out_len)` a defined parameter set asks for and at
+    the byte alignments in between.
+    """
+
     def test_it_matches_the_standards_loop(self) -> None:
         data = bytes((i * 53 + 7) % 256 for i in range(32))
         for b, out_len in ((4, 32), (6, 14), (8, 10), (9, 7), (12, 5), (14, 4)):
@@ -105,9 +113,53 @@ class Base2bTest(absltest.TestCase):
             )
             self.assertEqual(list(got[0]), _spec_base_2b(data, b, out_len), f"b={b}")
 
+    def test_it_matches_the_loop_at_every_defined_parameter_set(self) -> None:
+        # What the schemes actually call it with: WOTS+ asks for `len1` and
+        # `len2` digits of `lg_w` bits, and FORS for `k` of `a`. The cases above
+        # are alignments; these are the widths that ship.
+        asked = set()
+        for params in slh_dsa.SHA2_PARAMETER_SETS.values():
+            asked.add((params.lg_w, params.wots_params.len1))
+            asked.add((params.lg_w, params.wots_params.len2))
+            asked.add((params.a, params.k))
+        data = bytes((i * 29 + 13) % 256 for i in range(256))
+        for b, out_len in sorted(asked):
+            with self.subTest(b=b, out_len=out_len):
+                got = np.asarray(
+                    wots.base_2b(np.frombuffer(data, dtype=np.uint8), b, out_len)
+                )
+                self.assertEqual(list(got[0]), _spec_base_2b(data, b, out_len))
+
+    def test_a_batch_gives_each_row_its_own_digits(self) -> None:
+        rows = [bytes((i * 53 + 7 * r) % 256 for i in range(32)) for r in range(4)]
+        batch = np.stack([np.frombuffer(row, dtype=np.uint8) for row in rows])
+        for b, out_len in ((4, 32), (9, 7), (14, 4)):
+            got = np.asarray(wots.base_2b(batch, b, out_len))
+            self.assertEqual(got.shape, (len(rows), out_len))
+            for index, row in enumerate(rows):
+                self.assertEqual(
+                    list(got[index]), _spec_base_2b(row, b, out_len), f"b={b} row"
+                )
+
+    def test_a_digit_inside_one_byte_needs_no_window(self) -> None:
+        # The `lg_w = 4` case every parameter set uses, and the reason the
+        # assembly is worth skipping rather than always paying for: no digit
+        # crosses a byte, so a digit is a shift and a mask on the byte itself.
+        _, _, span = wots._digit_plan(4, 32)
+        self.assertEqual(span, 1)
+        for b, out_len, expected in ((8, 10, 1), (6, 14, 2), (9, 7, 2), (14, 4, 3)):
+            with self.subTest(b=b):
+                self.assertEqual(wots._digit_plan(b, out_len)[2], expected)
+
     def test_too_little_input_is_an_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least"):
             wots.base_2b(np.zeros(2, dtype=np.uint8), 4, 32)
+
+    def test_a_digit_too_wide_for_the_window_is_an_error(self) -> None:
+        # Refused rather than silently truncated: no defined parameter set comes
+        # near it, so asking is a caller that computed the wrong width.
+        with self.assertRaisesRegex(ValueError, "does not fit"):
+            wots.base_2b(np.zeros(64, dtype=np.uint8), 26, 4)
 
 
 class DigitsTest(absltest.TestCase):
