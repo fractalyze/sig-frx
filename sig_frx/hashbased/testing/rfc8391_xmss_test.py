@@ -13,6 +13,13 @@ unconditionally passes every positive case above, so the corruptions below pin
 what rejection means: a tampered message, a tampered signature, the wrong public
 key, and — the one specific to a stateful scheme — a signature re-labelled with
 another index.
+
+**This module is the gate, rather than `sig_frx.testing.kat`.** There is no vector
+file to normalize — the values are transcribed constants with their provenance in
+`rfc8391_vectors` — and a stateful scheme has no seam-shaped `sign` for that
+harness to drive. So the negative cases it would have generated are written out
+here in full, plus the rejections that need to know what an XMSS signature is.
+`docs/reference/conventions.md` states the rule this is the exception to.
 """
 
 from __future__ import annotations

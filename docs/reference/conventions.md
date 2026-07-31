@@ -101,6 +101,31 @@ gated on, and the repository cache makes every build after the first offline.
 Pin the URL to a commit, never a branch: NIST regenerates these files in place,
 and a moving URL turns an upstream regeneration into a mystery failure here.
 
+### Not every scheme is driven by the shared harness
+
+[`kat.py`](../../sig_frx/testing/kat.py) normalizes published *formats* into one
+record so one driver gates every scheme. A scheme belongs behind it when there is
+a format to normalize and the scheme implements `Signature`. Where neither holds,
+the scheme's own test is the gate and says so in its docstring — which is a
+narrower exception than it sounds, and it earns its place only by naming both
+halves:
+
+- **No format.** A standard with no published vector file leaves a handful of
+  values transcribed from whatever authority replaces it, with the provenance in
+  the module that holds them. There is nothing for a loader to parse, so routing
+  them through one would add a hop and normalize nothing.
+- **Not on the seam.** A stateful scheme has no seam-shaped `sign` (see
+  [`signature.py`](../../sig_frx/signature.py)), and the harness signs through
+  `Signature`. An adapter could satisfy the Protocol by discarding the advanced
+  key — but that is not a different operation the way the internal and pre-hash
+  interfaces are, it is the operation with the property that makes it safe
+  removed, and it would sit in the tree one import away from a caller who wanted
+  a simpler `sign`.
+
+What such a scheme owes instead is the rest of this section in full: the negative
+cases, and every rejection its own structure makes possible that a generic bit
+flip would not reach.
+
 ### A vector the harness cannot run is an error, not a skip
 
 A standard's vector set covers every mode of its interface — FIPS 204 publishes

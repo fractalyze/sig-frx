@@ -62,6 +62,14 @@ reference implementation §7 points at, digested as its own generator prints —
 decision, its alternatives and the provenance are on
 [fractalyze/sig-frx#16](https://github.com/fractalyze/sig-frx/issues/16).
 
+**The gate is this scheme's own tests, not the shared KAT harness**, for the two
+reasons [`../reference/conventions.md`](../reference/conventions.md#not-every-scheme-is-driven-by-the-shared-harness)
+sets out: there is no vector file to normalize, and a stateful scheme has no
+seam-shaped `sign` for the harness to drive. What that buys back is rejection
+cases a generic bit flip cannot reach — a signature relabelled with another index,
+an index past the structure, a corruption confined to one layer — each of which
+depends on knowing what an XMSS signature *is*.
+
 Two details of the standard are worth stating here because they are what an
 implementation gets wrong:
 
