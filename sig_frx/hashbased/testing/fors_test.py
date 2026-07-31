@@ -146,7 +146,7 @@ class SignVerifyTest(absltest.TestCase):
                     signature[None, ...],
                     digest[None, :],
                     _PK_SEED,
-                    [_POSITION],
+                    _POSITION,
                 )
             )[0]
         )
@@ -226,6 +226,14 @@ class BatchedReconstructionTest(absltest.TestCase):
         ),
     )
 
+    @classmethod
+    def _batched_position(cls) -> fors.ForsPosition:
+        """The entries' keys as the one position `pk_from_sig` takes."""
+        return fors.ForsPosition(
+            tree=np.array([position.tree for position, _, _ in cls.ENTRIES]),
+            key_pair=np.array([position.key_pair for position, _, _ in cls.ENTRIES]),
+        )
+
     def test_each_entry_reconstructs_its_own_key_under_its_own_seed(self) -> None:
         tweak = _family()
         expected = [
@@ -247,7 +255,7 @@ class BatchedReconstructionTest(absltest.TestCase):
                 signatures,
                 np.stack([digest for _, digest, _ in self.ENTRIES]),
                 np.stack([pk_seed for _, _, pk_seed in self.ENTRIES]),
-                [position for position, _, _ in self.ENTRIES],
+                self._batched_position(),
             )
         )
         for index, key in enumerate(expected):
@@ -274,7 +282,7 @@ class BatchedReconstructionTest(absltest.TestCase):
                 signatures,
                 np.stack([digest for _, digest, _ in self.ENTRIES]),
                 np.stack([pk_seed for _, _, pk_seed in self.ENTRIES]),
-                [position for position, _, _ in self.ENTRIES],
+                self._batched_position(),
             )
         )
         keys = [
@@ -284,19 +292,22 @@ class BatchedReconstructionTest(absltest.TestCase):
         self.assertNotEqual(bytes(got[0]), keys[0])
         self.assertEqual(bytes(got[1]), keys[1])
 
-    def test_one_digest_per_position_is_required(self) -> None:
+    def test_one_digest_per_key_is_required(self) -> None:
         tweak = _family()
         signature = np.asarray(
             fors.sign(tweak, _PARAMS, _DIGEST, _PK_SEED, _SK_SEED, _POSITION)
         )
-        with self.assertRaisesRegex(ValueError, "one digest per position"):
+        with self.assertRaisesRegex(ValueError, "one digest per FORS key"):
             fors.pk_from_sig(
                 tweak,
                 _PARAMS,
                 np.stack([signature, signature]),
                 _DIGEST[None, :],
                 _PK_SEED,
-                [_POSITION, _POSITION],
+                fors.ForsPosition(
+                    tree=np.full(2, _POSITION.tree),
+                    key_pair=np.full(2, _POSITION.key_pair),
+                ),
             )
 
 

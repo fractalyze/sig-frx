@@ -18,8 +18,6 @@ holds: `d` layers of the hypertree, each layer a batch of independent claims.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
@@ -28,12 +26,16 @@ from sig_frx.hashbased import adrs, tree, wots
 from sig_frx.hashbased.tweakable import TweakableHash
 
 
-def key_pairs(position: tree.TreePosition, height: int) -> list[wots.WotsPosition]:
-    """Every WOTS+ key pair under one XMSS tree, leaf order."""
-    return [
-        wots.WotsPosition(layer=position.layer, tree=position.tree, key_pair=index)
-        for index in range(1 << height)
-    ]
+def key_pairs(position: tree.TreePosition, height: int) -> wots.WotsPosition:
+    """Every WOTS+ key pair under one XMSS tree, leaf order.
+
+    One position whose key pair number runs over the tree, not `2^height` of them:
+    the layer and the tree are shared, so the batch is a column of leaf numbers
+    against two constants.
+    """
+    return wots.WotsPosition(
+        layer=position.layer, tree=position.tree, key_pair=np.arange(1 << height)
+    )
 
 
 def leaves(
@@ -45,14 +47,14 @@ def leaves(
     height: int,
 ) -> Array:
     """Every leaf of one XMSS tree — `[2^height, n]`, one batched WOTS+ walk."""
-    positions = key_pairs(position, height)
+    under = key_pairs(position, height)
     return wots.pk_gen(
         tweak,
         params,
         pk_seed,
         sk_seed,
-        positions,
-        wots.fips205_compression(tweak, pk_seed, positions),
+        under,
+        wots.fips205_compression(tweak, pk_seed, under),
     )
 
 
@@ -105,29 +107,27 @@ def sign(
     return np.concatenate([np.asarray(signature), np.asarray(path)])
 
 
-def node_addresses(positions: Sequence[tree.TreePosition]) -> tree.NodeAddresses:
+def node_addresses(position: tree.TreePosition) -> tree.NodeAddresses:
     """Node addresses for a batch whose entries sit in *different* trees.
 
-    Entry `k`'s node is addressed in `positions[k]`'s tree. Only usable where the
-    batch keeps one entry per position at every level — `root_from_path`, where a
-    signature walks its own path — and not in a whole-tree reduction, where the
-    node count halves each level and the correspondence would not hold.
-
-    The prefix columns are built once rather than per level, since every level of a
-    path addresses the same trees.
+    Entry `k`'s node is addressed in the tree `position`'s columns name for row
+    `k`. Only usable where the batch keeps one entry per tree at every level —
+    `root_from_path`, where a signature walks its own path — and not in a
+    whole-tree reduction, where the node count halves each level and the
+    correspondence would not hold.
     """
-    layers = np.array([position.layer for position in positions])
-    trees = np.array([position.tree for position in positions])
+    count = position.count
 
     def build(height: int, indices: np.ndarray) -> np.ndarray:
         flat = np.asarray(indices).reshape(-1)
-        if flat.shape[0] != len(positions):
+        if flat.shape[0] != count:
             raise ValueError(
-                f"one node per position: got {len(positions)} positions and "
-                f"{flat.shape[0]} indices"
+                f"one node per tree: got {count} trees and {flat.shape[0]} indices"
             )
         return adrs.encode_batch(
-            adrs.hash_tree(layer=layers, tree=trees, height=height, index=flat),
+            adrs.hash_tree(
+                layer=position.layer, tree=position.tree, height=height, index=flat
+            ),
             compressed=True,
         )
 
@@ -140,7 +140,7 @@ def pk_from_sig(
     signatures: ArrayLike,
     messages: ArrayLike,
     pk_seed: ArrayLike,
-    positions: Sequence[tree.TreePosition],
+    position: tree.TreePosition,
     leaf_indices: ArrayLike,
 ) -> Array:
     """`xmss_pkFromSig` — Algorithm 11, for a batch. `[B, len + height, n]` -> `[B, n]`.
@@ -150,24 +150,24 @@ def pk_from_sig(
     root.
     """
     parts = np.asarray(signatures)
-    if parts.ndim != 3 or parts.shape[0] != len(positions):
+    count = position.count
+    if parts.ndim != 3 or parts.shape[0] != count:
         raise ValueError(
-            f"one signature per position: got shape {tuple(parts.shape)} for "
-            f"{len(positions)} positions"
+            f"one signature per tree: got shape {tuple(parts.shape)} for "
+            f"{count} trees"
         )
     indices = np.asarray(leaf_indices, dtype=np.int64).reshape(-1)
-    wots_positions = [
-        wots.WotsPosition(position.layer, position.tree, int(index))
-        for position, index in zip(positions, indices, strict=True)
-    ]
+    # The leaf index is which key pair of that tree signed, so it is the batch's
+    # key pair column against the tree's own layer and tree columns.
+    signing_keys = wots.WotsPosition(position.layer, position.tree, indices)
     computed = wots.pk_from_sig(
         tweak,
         params,
         parts[:, : params.len, :],
         messages,
         pk_seed,
-        wots_positions,
-        wots.fips205_compression(tweak, pk_seed, wots_positions),
+        signing_keys,
+        wots.fips205_compression(tweak, pk_seed, signing_keys),
     )
     return tree.root_from_path(
         tweak,
@@ -175,5 +175,5 @@ def pk_from_sig(
         computed,
         indices,
         parts[:, params.len :, :],
-        node_addresses(positions),
+        node_addresses(position),
     )

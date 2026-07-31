@@ -8,6 +8,7 @@ py_test(
     srcs = ["adrs_test.py"],
     deps = [
         "//sig_frx/hashbased:adrs",
+        "//sig_frx/hashbased:adrs_encoding",
         requirement("absl_py"),
         requirement("numpy"),
     ],
@@ -178,6 +179,7 @@ py_test(
         "//sig_frx/hashbased:xmss",
         "@hash_frx//hash_frx:sha256",
         requirement("absl_py"),
+        requirement("frx"),
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )

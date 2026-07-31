@@ -16,6 +16,7 @@ import numpy as np
 from absl.testing import absltest
 
 from sig_frx.hashbased import adrs as a
+from sig_frx.hashbased import adrs_encoding
 
 
 class FullLayoutTest(absltest.TestCase):
@@ -209,6 +210,48 @@ class BatchTest(absltest.TestCase):
                 a.hash_tree(layer=0, tree=1 << 64, height=0, index=np.arange(2)),
                 compressed=False,
             )
+
+    def test_a_high_tree_address_survives_an_unsigned_field_beside_it(self) -> None:
+        # Stacking a signed column beside an unsigned one promotes the pair to
+        # float64, which rounds anything above 2^53 — and the tallest hypertree
+        # addresses 2^63. The columns a caller carries are uint64 while the node
+        # indices it tiles under them come out of `arange` signed, so the mix is
+        # the normal case rather than an exotic one.
+        high = np.array([(1 << 63) + 1, (1 << 63) + 2], dtype=np.uint64)
+        batch = a.encode_batch(
+            a.hash_tree(layer=0, tree=high, height=0, index=np.arange(2)),
+            compressed=True,
+        )
+        np.testing.assert_array_equal(
+            batch,
+            self._reference(
+                [
+                    a.hash_tree(layer=0, tree=int(high[row]), height=0, index=row)
+                    for row in range(2)
+                ],
+                compressed=True,
+            ),
+        )
+
+
+class BroadcastRuleTest(absltest.TestCase):
+    """`rows` is what a component asks before it lays out a batch."""
+
+    def test_all_scalars_is_one_row(self) -> None:
+        self.assertEqual(adrs_encoding.rows((1, 2, 3)), 1)
+
+    def test_a_column_sets_the_row_count(self) -> None:
+        self.assertEqual(adrs_encoding.rows((1, np.arange(5), 3)), 5)
+
+    def test_it_agrees_with_the_table_the_encoding_builds(self) -> None:
+        fields = (np.arange(4), 7, np.zeros(4, dtype=np.int64))
+        self.assertEqual(
+            adrs_encoding.rows(fields), adrs_encoding.columns(fields).shape[0]
+        )
+
+    def test_a_field_that_is_not_one_value_per_row_is_an_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "one value per row"):
+            adrs_encoding.rows((1, np.zeros((2, 3), dtype=np.int64)))
 
 
 if __name__ == "__main__":

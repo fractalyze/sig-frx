@@ -22,6 +22,7 @@ that reaches the wrong root at any layer reaches the wrong root at the top.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypeVar
 
 import frx.numpy as fnp
 import numpy as np
@@ -30,6 +31,9 @@ from frx.typing import ArrayLike
 
 from sig_frx.hashbased import tree, wots, xmss
 from sig_frx.hashbased.tweakable import TweakableHash
+
+# A hypertree index: the signer's one, or a verifier's column of them.
+_Index = TypeVar("_Index", int, np.ndarray)
 
 
 @dataclass(frozen=True)
@@ -51,8 +55,12 @@ class HypertreeParams:
         return self.wots.len + self.tree_height
 
 
-def _climb(tree_index: int, height: int) -> tuple[int, int]:
-    """One layer up: the leaf index it lands on, and the tree index above it."""
+def _climb(tree_index: _Index, height: int) -> tuple[_Index, _Index]:
+    """One layer up: the leaf index it lands on, and the tree index above it.
+
+    One index or a whole column of them — verification climbs `B` claims at once,
+    and they each sit in their own tree.
+    """
     return tree_index % (1 << height), tree_index >> height
 
 
@@ -95,7 +103,7 @@ def sign(
                     layer_signature[None, ...],
                     current[None, :],
                     pk_seed,
-                    [position],
+                    position,
                     [current_leaf],
                 )
             )[0]
@@ -134,7 +142,6 @@ def roots_from_sig(
 
     nodes = np.asarray(messages)
     for layer in range(params.layers):
-        positions = [tree.TreePosition(layer=layer, tree=int(index)) for index in trees]
         nodes = np.asarray(
             xmss.pk_from_sig(
                 tweak,
@@ -142,14 +149,12 @@ def roots_from_sig(
                 parts[:, layer, :, :],
                 nodes,
                 pk_seed,
-                positions,
+                tree.TreePosition(layer=layer, tree=trees),
                 leaves,
             )
         )
         if layer + 1 < params.layers:
-            climbed = [_climb(int(index), params.tree_height) for index in trees]
-            leaves = np.array([leaf for leaf, _ in climbed], dtype=np.int64)
-            trees = np.array([above for _, above in climbed], dtype=np.int64)
+            leaves, trees = _climb(trees, params.tree_height)
     return fnp.asarray(nodes)
 
 
