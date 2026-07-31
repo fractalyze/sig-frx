@@ -186,6 +186,26 @@ py_library(
 )
 
 py_library(
+    name = "rfc8391_xmss",
+    srcs = [
+        "__init__.py",
+        "rfc8391_xmss.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":rfc8391_adrs",
+        ":rfc8391_hashes",
+        ":rfc8391_params",
+        ":rfc8391_wots",
+        ":tree",
+        ":wots",
+        "@hash_frx//hash_frx:sha256",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
     name = "hypertree",
     srcs = [
         "__init__.py",

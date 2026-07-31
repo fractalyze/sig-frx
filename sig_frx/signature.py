@@ -59,6 +59,17 @@ that drifts from the seam rather than the consumer that calls it::
 
     if TYPE_CHECKING:
         _: type[Signature] = SlhDsa
+
+**A stateful scheme implements `verify` and not `sign`, and carries no pin.** A
+one-time key signs once — signing twice at one index reveals the WOTS+ secret — so
+the signer has to hand back the key advanced past what it just used, which is two
+return values where this seam has one. Widening `sign` to return the next key
+would put a value on every stateless scheme that none of them can produce, and the
+alternative of a seam-shaped `sign` that quietly leaves the state where it was is
+the exact failure the discipline exists to prevent. So `XMSS` (RFC 8391) exposes
+`sign(secret_key, message) -> (signature, next_secret_key)` under its own name and
+implements the rest of the seam unchanged. That is the expected shape for a
+stateful scheme rather than a scheme that has not finished.
 """
 
 from __future__ import annotations
