@@ -61,8 +61,8 @@ def _at_index(
     index bytes directly, and so does this.
     """
     wound = secret_key.copy()
-    wound[: rfc8391_xmss.INDEX_BYTES] = np.frombuffer(
-        index.to_bytes(rfc8391_xmss.INDEX_BYTES, "big"), dtype=np.uint8
+    wound[: scheme.params.index_bytes] = np.frombuffer(
+        index.to_bytes(scheme.params.index_bytes, "big"), dtype=np.uint8
     )
     return wound
 
@@ -105,7 +105,7 @@ class ReferenceDigestTest(absltest.TestCase):
                 index = rfc8391_vectors.xmss_signing_index(scheme.params.height)
                 self.assertEqual(
                     int.from_bytes(
-                        bytes(np.asarray(signature)[: rfc8391_xmss.INDEX_BYTES]), "big"
+                        bytes(np.asarray(signature)[: scheme.params.index_bytes]), "big"
                     ),
                     index,
                 )
@@ -122,7 +122,7 @@ class ReferenceDigestTest(absltest.TestCase):
                 self.assertEqual(
                     bytes(
                         signature[
-                            rfc8391_xmss.INDEX_BYTES : rfc8391_xmss.INDEX_BYTES + n
+                            scheme.params.index_bytes : scheme.params.index_bytes + n
                         ]
                     ),
                     vectors.randomizer,
@@ -140,7 +140,7 @@ class ReferenceDigestTest(absltest.TestCase):
                 hashes = sha2_hashes(scheme.params, Sha256())
                 pub_seed = public_key[n:]
                 sk_seed = secret_key[
-                    rfc8391_xmss.INDEX_BYTES : rfc8391_xmss.INDEX_BYTES + n
+                    scheme.params.index_bytes : scheme.params.index_bytes + n
                 ]
 
                 leaf = rfc8391_wots.pk_gen(
@@ -164,7 +164,7 @@ class ReferenceDigestTest(absltest.TestCase):
                 scheme, _, secret_key = _key(oid)
                 n = scheme.params.n
                 signature = np.asarray(scheme.sign(secret_key, _message())[0])
-                start = rfc8391_xmss.INDEX_BYTES + n + scheme.params.wots.len * n
+                start = scheme.params.index_bytes + n + scheme.params.wots.len * n
                 self.assertEqual(
                     bytes(signature[start : start + n]),
                     vectors.auth_path_head,
@@ -240,8 +240,9 @@ class RejectionTest(absltest.TestCase):
 
     def test_a_tampered_signature_is_rejected(self) -> None:
         for offset in (
-            rfc8391_xmss.INDEX_BYTES,  # the randomizer
-            rfc8391_xmss.INDEX_BYTES + self.scheme.params.n,  # the WOTS+ signature
+            self.scheme.params.index_bytes,  # the randomizer
+            self.scheme.params.index_bytes
+            + self.scheme.params.n,  # the WOTS+ signature
             self.scheme.signature_max_size - 1,  # the top of the auth path
         ):
             with self.subTest(offset=offset):
@@ -254,8 +255,8 @@ class RejectionTest(absltest.TestCase):
         # and the tree the signature is checked at *and* rides in what was signed,
         # so a verifier cannot take it on trust.
         relabelled = self.signature.copy()
-        relabelled[: rfc8391_xmss.INDEX_BYTES] = np.frombuffer(
-            (0).to_bytes(rfc8391_xmss.INDEX_BYTES, "big"), dtype=np.uint8
+        relabelled[: self.scheme.params.index_bytes] = np.frombuffer(
+            (0).to_bytes(self.scheme.params.index_bytes, "big"), dtype=np.uint8
         )
         self.assertFalse(self._verdict(signature=relabelled))
 
@@ -263,9 +264,9 @@ class RejectionTest(absltest.TestCase):
         # It addresses a tree that does not exist rather than wrapping onto a leaf
         # that does.
         relabelled = self.signature.copy()
-        relabelled[: rfc8391_xmss.INDEX_BYTES] = np.frombuffer(
+        relabelled[: self.scheme.params.index_bytes] = np.frombuffer(
             (self.scheme.signatures_per_key + 3).to_bytes(
-                rfc8391_xmss.INDEX_BYTES, "big"
+                self.scheme.params.index_bytes, "big"
             ),
             dtype=np.uint8,
         )
@@ -301,7 +302,7 @@ class StateTest(absltest.TestCase):
         _, advanced = scheme.sign(secret_key, _message())
         self.assertEqual(
             int.from_bytes(
-                bytes(np.asarray(advanced)[: rfc8391_xmss.INDEX_BYTES]), "big"
+                bytes(np.asarray(advanced)[: scheme.params.index_bytes]), "big"
             ),
             index + 1,
         )
@@ -312,8 +313,8 @@ class StateTest(absltest.TestCase):
         scheme, _, secret_key = _key(0x0D)
         _, advanced = scheme.sign(secret_key, _message())
         np.testing.assert_array_equal(
-            np.asarray(advanced)[rfc8391_xmss.INDEX_BYTES :],
-            np.asarray(secret_key)[rfc8391_xmss.INDEX_BYTES :],
+            np.asarray(advanced)[scheme.params.index_bytes :],
+            np.asarray(secret_key)[scheme.params.index_bytes :],
         )
 
     def test_signing_the_advanced_key_uses_the_next_one_time_key(self) -> None:
@@ -369,13 +370,19 @@ class SeamTest(absltest.TestCase):
                     sizes,
                 )
 
-    def test_the_index_field_is_four_bytes_whatever_the_height(self) -> None:
-        # §4.1.11 fixes it for XMSS; XMSS-MT rounds `h` up to a byte instead.
-        for oid in (0x01, 0x02, 0x03):
+    def test_the_index_width_is_the_one_place_the_variants_diverge(self) -> None:
+        # §4.1.8 fixes four bytes for XMSS whatever `h` is; §4.2.2 rounds `h` up to
+        # a byte for XMSS-MT. So a height-10 XMSS signature carries four index
+        # bytes where a height-20 XMSS-MT signature carries three — reading it off
+        # `h` for both would mis-parse every XMSS signature.
+        for oid, height in ((0x01, 10), (0x02, 16), (0x03, 20)):
             scheme = rfc8391_xmss.sha2(oid)
-            self.assertEqual(
-                scheme.secret_key_size, rfc8391_xmss.INDEX_BYTES + 4 * scheme.params.n
-            )
+            self.assertEqual(scheme.params.height, height)
+            self.assertEqual(scheme.params.index_bytes, 4, scheme.params.name)
+        for oid, height, expected in ((0x02, 20, 3), (0x03, 40, 5), (0x06, 60, 8)):
+            scheme = rfc8391_xmss.mt_sha2(oid)
+            self.assertEqual(scheme.params.height, height)
+            self.assertEqual(scheme.params.index_bytes, expected, scheme.params.name)
 
     def test_a_context_is_refused_rather_than_ignored(self) -> None:
         # RFC 8391 has no application context, and accepting one we then dropped

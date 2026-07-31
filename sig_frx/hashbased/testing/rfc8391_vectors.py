@@ -162,6 +162,62 @@ XMSS_REFERENCE: dict[int, XmssReferenceVectors] = {
 }
 
 
+@dataclass(frozen=True)
+class XmssMtReferenceVectors:
+    """The same fixture through §4.2's multi-tree signing.
+
+    No leaf or authentication-path row here, unlike the single-tree vectors: a
+    multi-tree signature has one of each *per layer*, so `layer_split` is what
+    stands in — the tree and leaf the index resolves to at each layer, which is the
+    derivation a multi-tree implementation gets wrong and everything else follows
+    from.
+    """
+
+    oid: int
+    root: bytes
+    randomizer: bytes
+    message_digest: bytes
+    # `(tree, leaf)` per layer, lowest first — the order the signature's blocks
+    # are laid out in.
+    layer_split: tuple[tuple[int, int], ...]
+    digest_public_key: bytes
+    digest_signature: bytes
+
+
+# Both sampled sets are `20/4`: four layers of height 5, so keygen builds one tree
+# of 32 leaves for a key that signs 2^20 messages. That is the whole argument for
+# the multi-tree variant, and it is also why these vectors are cheaper to run than
+# the single-tree ones.
+XMSSMT_REFERENCE: dict[int, XmssMtReferenceVectors] = {
+    0x02: XmssMtReferenceVectors(
+        oid=0x02,
+        root=bytes.fromhex(
+            "2063c0b3ddf86940b17f60d5f607b1af8a2a8be6281ce5121012291e66a1f83a"
+        ),
+        randomizer=bytes.fromhex(
+            "152cafe9c871dc7677de8f9e9c100a86d01d0d6f11d971c66a3aacfcda764f23"
+        ),
+        message_digest=bytes.fromhex(
+            "b73128f60f1581bba6595c30aeb3c6c394d4c660518f97b2618e760134d6a82a"
+        ),
+        layer_split=((16384, 0), (512, 0), (16, 0), (0, 16)),
+        digest_public_key=bytes.fromhex("9df4c75282451bf2bc53"),
+        digest_signature=bytes.fromhex("fd4ff4c18801147b2804"),
+    ),
+    0x22: XmssMtReferenceVectors(
+        oid=0x22,
+        root=bytes.fromhex("52c6f5642a6c2683ea3fc9c3191a16af91527b34630f0133"),
+        randomizer=bytes.fromhex("146ae53c9054a5e72a5ff1e9072335593631d848de9cfc29"),
+        message_digest=bytes.fromhex(
+            "5a995cf0312c95475be29363b6036d173b5c16dcd1fd3da1"
+        ),
+        layer_split=((16384, 0), (512, 0), (16, 0), (0, 16)),
+        digest_public_key=bytes.fromhex("eef50cfa8f267939ad08"),
+        digest_signature=bytes.fromhex("759e579a56097da369b5"),
+    ),
+}
+
+
 REFERENCE: dict[int, ReferenceVectors] = {
     0x01: ReferenceVectors(
         oid=0x01,
