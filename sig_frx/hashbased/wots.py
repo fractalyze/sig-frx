@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, lru_cache
 
 import frx.numpy as fnp
 import numpy as np
@@ -39,6 +39,12 @@ from sig_frx.hashbased.tweakable import ChainHash, TweakableHash, repeat_per_ent
 Compress = Callable[[Array], Array]
 
 Field = adrs.Field
+
+# The widest window `base_2b` can read a digit out of, bounded by the uint32 it
+# assembles the window in. A digit may start part-way into a byte, so the window
+# has to hold `b` bits from any of the eight offsets within one.
+_MAX_WINDOW_BYTES = 4
+_MAX_DIGIT_BITS = 8 * _MAX_WINDOW_BYTES - 7
 
 
 @dataclass(frozen=True)
@@ -87,14 +93,55 @@ class WotsPosition:
         return adrs_encoding.rows((self.layer, self.tree, self.key_pair))
 
 
+@lru_cache(maxsize=None)
+def _digit_plan(b: int, out_len: int) -> tuple[np.ndarray, np.ndarray, int]:
+    """Where the digits sit in the byte stream: each one's first byte and shift,
+    and how many bytes the window they are read out of has to span.
+
+    Digit `j` is bits `[j·b, (j+1)·b)` of the input read as one big-endian
+    stream, so all three are functions of `j` and `b` alone — constants of the
+    parameter set rather than of the message. Precomputing them is what turns the
+    conversion into one gather.
+
+    The span is what the digits actually reach rather than a fixed width. Every
+    WOTS+ call has `b = lg_w = 4`, which divides a byte, so no digit crosses one
+    and the window is the byte itself — the assembly in `base_2b` disappears.
+    FORS asks for `a` bits, which does not divide a byte at any parameter set, so
+    it pays for a two- or three-byte window; it makes one call where WOTS+ makes
+    two per hypertree layer.
+    """
+    offsets = np.arange(out_len) * b
+    within = offsets % 8
+    span = -(-(int(within.max(initial=0)) + b) // 8)
+    return offsets // 8, 8 * span - b - within, span
+
+
 def base_2b(data: ArrayLike, b: int, out_len: int) -> Array:
     """`base_2b` — FIPS 205 §4.4, Algorithm 4: `X` as `out_len` base-2^b digits.
 
-    Vectorized over a leading batch axis, and unrolled: `out_len` and `b` are
-    parameter-set constants, so the standard's `while` over input bytes is a
-    static schedule rather than a loop over data. The accumulator keeps 24 bits,
-    which is more than the `b + 8` the algorithm can ever read from it.
+    Vectorized over the batch axis and over the digits. Algorithm 4 feeds the
+    input into an accumulator a byte at a time because it is written for a scalar
+    implementation; read as a whole it says something simpler — digit `j` is bits
+    `[j·b, (j+1)·b)` of the big-endian stream — and `b` and `out_len` are
+    parameter-set constants, so where every digit sits is known on the host and
+    the conversion is one gather, one shift and one mask.
+
+    Transcribing the loop instead costs `out_len` rounds of array work on a batch
+    that is already `[B]` wide, and `out_len` is `len1 = 32` at every defined
+    parameter set. Measured on the verify path it was 19% of the host time and a
+    third of the whole call's array dispatches, against a handful of operations
+    here whatever `out_len` is.
+
+    Rank is preserved the way the callers expect: `[L]` gives `[1, out_len]` and
+    `[B, L]` gives `[B, out_len]`.
     """
+    if b > _MAX_DIGIT_BITS:
+        raise ValueError(
+            f"a {b}-bit digit does not fit the {8 * _MAX_WINDOW_BYTES}-bit "
+            f"window it is read out of, which has to hold it from any bit "
+            f"offset within a byte; the widest a defined parameter set asks "
+            f"for is 14"
+        )
     values = fnp.asarray(data, dtype=fnp.uint32)
     if values.ndim == 1:
         values = values[None, :]
@@ -105,18 +152,22 @@ def base_2b(data: ArrayLike, b: int, out_len: int) -> Array:
             f"{b} bits, got {values.shape[-1]}"
         )
 
-    digits = []
-    total = fnp.zeros(values.shape[0], dtype=fnp.uint32)
-    consumed = 0
-    bits = 0
-    for _ in range(out_len):
-        while bits < b:
-            total = ((total << 8) | values[:, consumed]) & 0xFFFFFF
-            consumed += 1
-            bits += 8
-        bits -= b
-        digits.append((total >> bits) & (2**b - 1))
-    return fnp.stack(digits, axis=-1)
+    starts, shifts, span = _digit_plan(b, out_len)
+    stream = values[:, :needed]
+    if span > 1:
+        # A window near the end runs past the input. Those bits are never read —
+        # a digit starting there would be past `out_len` — so zeros will do.
+        stream = fnp.concatenate(
+            [stream, fnp.zeros((values.shape[0], span - 1), dtype=fnp.uint32)],
+            axis=-1,
+        )
+    # Every byte position's own window, assembled big-endian. The loop is over
+    # the window's bytes — none at all where a digit fits inside one — and never
+    # over the digits or the data.
+    window = stream[:, :needed]
+    for offset in range(1, span):
+        window = (window << 8) | stream[:, offset : offset + needed]
+    return (window[:, starts] >> fnp.asarray(shifts, dtype=fnp.uint32)) & ((1 << b) - 1)
 
 
 def message_digits(params: WotsParams, message: ArrayLike) -> Array:

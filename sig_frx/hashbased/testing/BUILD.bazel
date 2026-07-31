@@ -129,6 +129,7 @@ py_test(
     srcs = ["wots_test.py"],
     deps = [
         "//sig_frx/hashbased:adrs",
+        "//sig_frx/hashbased:slh_dsa",
         "//sig_frx/hashbased:tweakable",
         "//sig_frx/hashbased:wots",
         "@hash_frx//hash_frx:sha256",
