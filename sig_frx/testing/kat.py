@@ -18,6 +18,15 @@ dropping a field — a published failure verdict, a mode marker selecting a
 different operation — reports a pass for a case that was never run, which is the
 one outcome worse than a failure.
 
+**Not every scheme comes through here, and the exception is narrow.** This
+normalizes formats and drives `Signature`, so a scheme with neither — no published
+vector file to parse, and no seam-shaped `sign` because it is stateful — gates in
+its own test instead. Satisfying the Protocol for such a scheme would mean an
+adapter whose `sign` discards the advanced key, which is not a different operation
+the way the internal and pre-hash interfaces are: it is the operation with the
+property that makes it safe removed. `docs/reference/conventions.md` states what
+that scheme owes in exchange.
+
 **A standard publishes vectors per operation, so the caller says which one it is
 running.** FIPS 205 publishes its internal interface and its pre-hash variant
 beside the plain one, and a scheme implements those under its own names rather
