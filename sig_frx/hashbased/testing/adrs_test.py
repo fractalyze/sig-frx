@@ -12,6 +12,7 @@ order it chose.
 
 from __future__ import annotations
 
+import frx
 import numpy as np
 from absl.testing import absltest
 
@@ -199,16 +200,42 @@ class BatchTest(absltest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsigned"):
             a.encode_batch(a.hash_tree(0, 0, 0, np.array([0, -1])), compressed=True)
 
-    def test_a_field_wider_than_the_columns_carry_is_an_error(self) -> None:
-        # `encode` is not width-bounded and takes this; the batched path carries
-        # 64-bit columns, and no defined parameter set comes near either limit.
+    def test_a_field_wider_than_its_lane_is_an_error(self) -> None:
+        # `encode` is not width-bounded and takes this; the batched path carries an
+        # integer field in an array lane, and no defined parameter set comes near
+        # either limit.
         a.encode(
             a.hash_tree(layer=0, tree=1 << 64, height=0, index=0), compressed=False
         )
-        with self.assertRaisesRegex(ValueError, "wider than 64 bits"):
+        with self.assertRaisesRegex(ValueError, "arrive as bytes"):
             a.encode_batch(
                 a.hash_tree(layer=0, tree=1 << 64, height=0, index=np.arange(2)),
                 compressed=False,
+            )
+
+    def test_a_field_past_its_lane_can_arrive_as_bytes(self) -> None:
+        # What the error above points at, and what a traced caller does with the
+        # tree address: hand over the bytes rather than a number the lane cannot
+        # hold. The full form gives the tree twelve bytes, so a 2^64 value fits the
+        # slot even though it does not fit the lane.
+        wide = (1 << 64) + 7
+        as_bytes = np.frombuffer(wide.to_bytes(12, "big"), dtype=np.uint8)
+        batch = a.encode_batch(
+            a.hash_tree(
+                layer=0,
+                tree=np.broadcast_to(as_bytes, (2, 12)),
+                height=0,
+                index=np.arange(2),
+            ),
+            compressed=False,
+        )
+        for row in range(2):
+            self.assertEqual(
+                bytes(np.asarray(batch)[row]),
+                a.encode(
+                    a.hash_tree(layer=0, tree=wide, height=0, index=row),
+                    compressed=False,
+                ),
             )
 
     def test_a_high_tree_address_survives_an_unsigned_field_beside_it(self) -> None:
@@ -230,6 +257,95 @@ class BatchTest(absltest.TestCase):
                     for row in range(2)
                 ],
                 compressed=True,
+            ),
+        )
+
+
+class TracedTest(absltest.TestCase):
+    """The same addresses, built from traced fields.
+
+    What a traced verifier needs: the fields it holds are tracers, so the encoder
+    has to run on them and produce exactly what the host produces. The host form
+    is the reference, since `BatchTest` above already ties that to the standard.
+    """
+
+    def _jit_encode(self, *, compressed: bool):  # type: ignore[no-untyped-def]
+        def build(tree, key_pair, index):  # type: ignore[no-untyped-def]
+            return a.encode_batch(
+                a.fors_tree(
+                    layer=0, tree=tree, key_pair=key_pair, height=2, index=index
+                ),
+                compressed=compressed,
+            )
+
+        return frx.jit(build)
+
+    def test_traced_fields_give_the_host_bytes(self) -> None:
+        rows = 5
+        tree = np.arange(rows, dtype=np.uint32) * 7 + 1
+        key_pair = np.arange(rows, dtype=np.uint32) * 3
+        index = np.arange(rows, dtype=np.uint32) * 11 + 2
+        for compressed in (False, True):
+            with self.subTest(compressed=compressed):
+                traced = np.asarray(
+                    self._jit_encode(compressed=compressed)(tree, key_pair, index)
+                )
+                host = np.asarray(
+                    a.encode_batch(
+                        a.fors_tree(
+                            layer=0, tree=tree, key_pair=key_pair, height=2, index=index
+                        ),
+                        compressed=compressed,
+                    )
+                )
+                np.testing.assert_array_equal(traced, host)
+
+    def test_a_tree_address_above_the_lane_rides_as_bytes(self) -> None:
+        # The reason a byte field exists. frx runs without x64, so a traced integer
+        # field is 32 bits and a tree address — up to 2^64 at the defined parameter
+        # sets — would truncate silently. As bytes it does not.
+        rows = 3
+        wide = [(1 << 63) + 5 * row + 1 for row in range(rows)]
+        as_bytes = np.stack(
+            [np.frombuffer(value.to_bytes(8, "big"), dtype=np.uint8) for value in wide]
+        )
+        index = np.arange(rows, dtype=np.uint32)
+
+        def build(tree_bytes, node):  # type: ignore[no-untyped-def]
+            return a.encode_batch(
+                a.hash_tree(layer=0, tree=tree_bytes, height=1, index=node),
+                compressed=True,
+            )
+
+        traced = np.asarray(frx.jit(build)(as_bytes, index))
+        for row in range(rows):
+            self.assertEqual(
+                bytes(traced[row]),
+                a.encode(
+                    a.hash_tree(layer=0, tree=wide[row], height=1, index=row),
+                    compressed=True,
+                ),
+                f"row {row}",
+            )
+
+    def test_a_traced_uint32_field_would_have_truncated(self) -> None:
+        # The case the test above defends against, made explicit: the same value
+        # through an integer field does *not* survive, so the byte field is
+        # load-bearing rather than stylistic.
+        wide = (1 << 63) + 1
+        lane = np.full(2, wide, dtype=np.uint64)
+        truncated = np.asarray(
+            frx.jit(
+                lambda tree: a.encode_batch(
+                    a.hash_tree(layer=0, tree=tree, height=1, index=np.arange(2)),
+                    compressed=True,
+                )
+            )(lane)
+        )
+        self.assertNotEqual(
+            bytes(truncated[0]),
+            a.encode(
+                a.hash_tree(layer=0, tree=wide, height=1, index=0), compressed=True
             ),
         )
 
