@@ -22,7 +22,6 @@ that reaches the wrong root at any layer reaches the wrong root at the top.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypeVar
 
 import frx.numpy as fnp
 import numpy as np
@@ -31,9 +30,6 @@ from frx.typing import ArrayLike
 
 from sig_frx.hashbased import bytestring, tree, wots, xmss
 from sig_frx.hashbased.tweakable import TweakableHash
-
-# A hypertree index: the signer's one, or a verifier's column of them.
-_Index = TypeVar("_Index", int, np.ndarray)
 
 
 @dataclass(frozen=True)
@@ -50,6 +46,15 @@ class HypertreeParams:
         return self.layers * self.tree_height
 
     @property
+    def tree_index_bytes(self) -> int:
+        """How wide the index a walk starts from is, in bytes.
+
+        `h − h'` bits, byte-rounded: what `bytestring` carries between layers, and
+        what a caller has to encode an index to before handing it over.
+        """
+        return -(-(self.total_height - self.tree_height) // 8)
+
+    @property
     def signature_values(self) -> int:
         """`n`-byte values in one layer's XMSS signature."""
         return self.wots.len + self.tree_height
@@ -59,8 +64,8 @@ def _climb(tree_index: int, height: int) -> tuple[int, int]:
     """One layer up: the leaf index it lands on, and the tree index above it.
 
     The signer's form. Signing is one signature on the host, where a Python
-    integer holds the index at any width; a verifier climbs a batch of them and
-    takes `_climb_batch` instead, because that width does not fit an array lane.
+    integer holds the index at any width — the one representation that never
+    truncates. A verifier climbs a batch and takes `_climb_batch` instead.
     """
     return tree_index % (1 << height), tree_index >> height
 
@@ -70,9 +75,8 @@ def _climb_batch(
 ) -> tuple[Array, bytestring.ByteString]:
     """The same step for a whole batch, over indices carried as bytes.
 
-    The leaf index is what comes off the bottom — `h'` bits, so a column holds it
-    — and the tree index above is what is left, which stays bytes because 54 to
-    64 bits do not fit one. See `bytestring` for why that is not a choice.
+    The leaf index comes off the bottom and the tree index above is what is left.
+    See `bytestring` for why the one stays bytes and the other does not.
     """
     return (
         bytestring.low_bits(tree_indices, height),
@@ -133,13 +137,17 @@ def roots_from_sig(
     signatures: ArrayLike,
     messages: ArrayLike,
     pk_seed: ArrayLike,
-    tree_indices: ArrayLike,
+    tree_indices: bytestring.ByteString,
     leaf_indices: ArrayLike,
 ) -> Array:
     """The top-layer root each claim implies — Algorithm 13 lines 1 to 12, batched.
 
     `signatures` is `[B, d, len + h', n]`; the result is `[B, n]`, which the caller
     compares against the public key's root.
+
+    `tree_indices` is `[B, tree_index_bytes]` bytes rather than a column of
+    numbers — see `bytestring` — while `leaf_indices` is a column, since `h'` bits
+    fit one.
     """
     parts = np.asarray(signatures)
     batch = parts.shape[0]
@@ -148,10 +156,7 @@ def roots_from_sig(
         raise ValueError(
             f"a hypertree signature batch is {expected}, got {tuple(parts.shape)}"
         )
-    # The tree index arrives as bytes and stays that way: it is 54 to 64 bits at
-    # the defined parameter sets, which no integer array lane holds under a tracer.
-    trees = tree_indices
-    leaves = leaf_indices
+    trees, leaves = tree_indices, leaf_indices
     if trees.shape[0] != batch or leaves.shape[0] != batch:
         raise ValueError(
             f"one tree index and one leaf index per signature: got {batch} "

@@ -16,9 +16,9 @@ arithmetic, and is what every component actually calls — a single verification
 addresses hundreds of thousands of positions, so an address has to cost no Python
 of its own.
 
-`rows` and `columns` are that batch rule made available to the components above,
-which carry their own positions as columns and have to agree with the encoding
-about what a batch is before they build one.
+`rows` is that batch rule made available to the components above, which carry
+their own positions as columns and have to agree with the encoding about what a
+batch is before they build one.
 
 **A field may arrive as bytes, and one has to.** An integer field rides an array
 lane, and under a tracer that lane is 32 bits wide — frx runs without x64, where
@@ -49,12 +49,14 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 
+from sig_frx.hashbased import bytestring
+
 # One field of an address, in either of two forms. An **integer** field is a
 # single value or one per row, and the arrays broadcast, so a caller mixes the two
 # freely — a fixed layer against a column of node indices is the common shape. A
 # **byte** field is `[rows, width]` uint8, already big-endian, for a slot whose
 # value the caller holds as bytes.
-Field: TypeAlias = int | np.ndarray | Array
+Field: TypeAlias = int | bytestring.ByteString
 
 # One slot of an encoding: what the field is called, and how many bytes it gets.
 # The name is only ever read back out in an error message, which is the whole
@@ -76,13 +78,12 @@ def rows(values: Sequence[Field]) -> int:
     each one — a WOTS+ key pair owns `len` chains, so it has to know how many key
     pairs it has before it can tile the chain numbers under them.
 
-    The same broadcast `columns` performs, so the two cannot disagree about what a
-    batch is. A byte field contributes its leading axis, since its trailing one is
-    the slot's width rather than a second address.
+    A byte field contributes its leading axis, since its trailing one is the
+    slot's width rather than a second address.
     """
     shape = np.broadcast_shapes(
         *[
-            np.shape(value)[:1] if _is_bytes(value) else np.shape(value)
+            np.shape(value)[:1] if bytestring.is_bytes(value) else np.shape(value)
             for value in values
         ]
     )
@@ -93,44 +94,6 @@ def rows(values: Sequence[Field]) -> int:
     return shape[0] if shape else 1
 
 
-def columns(values: Sequence[Field]) -> np.ndarray:
-    """The integer fields as one `[rows, len(values)]` unsigned table.
-
-    Host-only, and only for callers that want the broadcast columns themselves —
-    `encode_batch` does not go through it. A byte field has no place in an integer
-    table, so a caller holding one is already past what this can express.
-
-    Each field is cast before the stack rather than after. Stacking a signed field
-    beside an unsigned one promotes the pair to float64, which silently rounds any
-    value above 2^53 — and a tree address reaches 2^63. That is the failure the
-    width check cannot see, because the rounding has already happened by the time
-    there is a table to check.
-    """
-    arrays = []
-    for value in values:
-        if _is_bytes(value):
-            raise ValueError(
-                "a byte field has no integer column; it is already the bytes"
-            )
-        array = np.asarray(value)
-        if array.dtype.kind not in "iu":
-            raise ValueError(
-                f"address fields are integers, got dtype {array.dtype}; a field "
-                f"wider than 64 bits needs `encode`, which is not width-bounded"
-            )
-        if array.dtype.kind == "i" and array.min() < 0:
-            raise ValueError(f"address fields are unsigned, got {array.min()}")
-        arrays.append(array)
-    rows(values)
-    return np.stack(
-        [
-            np.atleast_1d(value).astype(np.uint64)
-            for value in np.broadcast_arrays(*arrays)
-        ],
-        axis=-1,
-    )
-
-
 def repeat_rows(value: Field, times: int) -> Field:
     """A field with each of its rows repeated `times` times, consecutively.
 
@@ -139,13 +102,19 @@ def repeat_rows(value: Field, times: int) -> Field:
     Either form of field, since the caller should not have to know which it holds:
     an integer column repeats its values, a byte field repeats its rows.
 
-    A single value is returned untouched. It already covers every row by
-    broadcasting, and materializing it would only make the batch bigger.
+    A value that already covers every row is returned untouched — a single value
+    by broadcasting, or any value when `times` is one. It already covers every row by
+    broadcasting, and materializing it would only make the batch bigger. So the
+    result does **not** report the row count: a caller that needs one has it from
+    its own data, and `rows` answers the broadcast width rather than the batch.
+
+    Not `tweakable.repeat_per_entry`, which looks like this and is not: that one
+    passes rank-1 values through (an address column is rank 1) and forces uint8
+    onto a device. The two sit side by side in `fors.pk_from_sig`, correctly.
     """
-    if np.ndim(value) == 0:
+    if times == 1 or np.ndim(value) == 0:
         return value
-    xnp = fnp if _is_traced(value) else np
-    return xnp.repeat(value, times, axis=0)
+    return bytestring.namespace(value).repeat(value, times, axis=0)
 
 
 def encode(values: Sequence[Field], slots: tuple[Slot, ...]) -> bytes:
@@ -185,29 +154,13 @@ def encode_batch(
     implementation rather than a host one and a device one that must agree.
     """
     count = rows(values)
-    xnp = fnp if any(_is_traced(value) for value in values) else np
+    xnp = bytestring.namespace(*values)
     blocks = _field_bytes(values, count, xnp)
     if xnp is np:
         _reject_overflow(blocks, slots)
     widths = tuple(block.shape[1] for block in blocks)
     source = xnp.concatenate([*blocks, xnp.zeros((count, 1), dtype=xnp.uint8)], axis=-1)
     return source[:, _byte_plan(slots, widths)]
-
-
-def _is_bytes(value: Field) -> bool:
-    """Whether this field arrived as its bytes rather than as a number.
-
-    A byte field is `[rows, width]` **uint8**, and the dtype is half the test on
-    purpose. Without it a two-dimensional integer array — a caller who reshaped
-    wrongly — would read as bytes and encode silently; with it, that falls through
-    to the integer path and `rows` rejects it for not being one value per row.
-    """
-    return len(np.shape(value)) == 2 and getattr(value, "dtype", None) == np.uint8
-
-
-def _is_traced(value: Field) -> bool:
-    """Whether this field is a device array, and so cannot be packed with numpy."""
-    return isinstance(value, Array)
 
 
 def _field_bytes(
@@ -224,11 +177,13 @@ def _field_bytes(
     `width` for an integer field is what its lane holds, which is where the 32-bit
     ceiling under a tracer comes from.
     """
-    numbers = [index for index, value in enumerate(values) if not _is_bytes(value)]
+    numbers = [
+        index for index, value in enumerate(values) if not bytestring.is_bytes(value)
+    ]
     blocks: dict[int, np.ndarray | Array] = {
         index: xnp.asarray(values[index], dtype=xnp.uint8)
         for index, value in enumerate(values)
-        if _is_bytes(value)
+        if bytestring.is_bytes(value)
     }
     if numbers:
         table = _integer_table([values[index] for index in numbers], count, xnp)

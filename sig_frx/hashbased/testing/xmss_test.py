@@ -168,14 +168,14 @@ class XmssSignatureTest(absltest.TestCase):
 def _tree_bytes(trees: list[int], params: hypertree.HypertreeParams) -> np.ndarray:
     """Tree indices as the byte strings the hypertree walk takes.
 
-    `roots_from_sig` carries the index as bytes rather than as a number: at a real
-    parameter set it is 54 to 64 bits, and no integer array lane holds that. These
-    cases read better as integers, so the conversion sits here — which is also
-    what `_split_digest` hands it in production.
+    These cases read better as integers, so the conversion sits here — which is
+    also what `_split_digest` hands the walk in production. See `bytestring`.
     """
-    width = -(-(params.total_height - params.tree_height) // 8)
     return np.stack(
-        [np.frombuffer(index.to_bytes(width, "big"), dtype=np.uint8) for index in trees]
+        [
+            np.frombuffer(index.to_bytes(params.tree_index_bytes, "big"), np.uint8)
+            for index in trees
+        ]
     )
 
 

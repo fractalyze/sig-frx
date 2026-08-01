@@ -27,9 +27,9 @@ hashes, so those sets need a SHA-512 `ByteHash` before `sha2` can build them.
 **Verification takes the batch and signing does not**, the asymmetry every layer
 below carries. Each entry brings its own public key, so `PK.seed` and `PK.root`
 vary across the batch, and the digest — which picks the FORS key — varies with
-them: the batch shares nothing but the context. The indices the digest yields are
-host integers, because that is what addresses a node: every component below builds
-its addresses on the host from a concrete index.
+them: the batch shares nothing but the context. Of the indices the digest yields,
+the leaf index is a column and the tree index stays bytes — 54 to 64 bits do not
+fit an array lane, and an address slot takes bytes anyway (see `bytestring`).
 
 **Three interfaces, one of them on the seam.** The seam is §10's pure external
 operation (Algorithms 22 and 24), which is what an application wants. The other
@@ -123,8 +123,12 @@ class SlhDsaParams:
 
     @cached_property
     def tree_index_bytes(self) -> int:
-        """`ceil((h − h/d)/8)` — the slice `idx_tree` comes from, line 7."""
-        return -(-(self.h - self.tree_height) // 8)
+        """`ceil((h − h/d)/8)` — the slice `idx_tree` comes from, line 7.
+
+        The same width `hypertree` carries an index in, which is not a coincidence:
+        this slice is what it starts from.
+        """
+        return self.hypertree_params.tree_index_bytes
 
     @cached_property
     def leaf_index_bytes(self) -> int:
@@ -402,9 +406,8 @@ class SlhDsa:
             randomizer, key.pk_seed, key.pk_root, body
         )
         # Lines 11 to 13: the digest picks the FORS key, by tree and by key pair.
-        # Signing is one signature and stays on the host, where a Python integer
-        # holds the tree index at any width — so this is the one place the bytes
-        # are read as the number the components below take.
+        # The signer's seam: one signature on the host, where a Python integer holds
+        # the index at any width, so this is the one place the bytes become a number.
         tree_index = int.from_bytes(bytes(np.asarray(tree_indices)[0]), "big")
         leaf_index = int(leaf_indices[0])
         position = fors.ForsPosition(tree=tree_index, key_pair=leaf_index)
@@ -630,12 +633,8 @@ class SlhDsa:
         `[B, ceil(k·a/8)]`, the tree index as `[B, tree_index_bytes]` **bytes**,
         and the leaf index as a `[B]` column.
 
-        **The tree index is never made into a number.** It is 54 to 64 bits at the
-        defined parameter sets, and an integer array lane is 32 under a tracer, so
-        a number is a representation it does not fit — see `bytestring`. It is
-        also not one it needs: an index addresses a node, and §4.2's tree address
-        is a byte slot. The leaf index is `h'` bits, at most 9, so that one is a
-        column.
+        **The tree index is never made into a number** — see `bytestring`. The
+        leaf index is `h'` bits, at most 9, so that one is a column.
 
         The reduction is what keeps `idx_tree` inside the hypertree: the slice is
         byte-rounded, so it carries up to seven bits more than `h − h'` and those

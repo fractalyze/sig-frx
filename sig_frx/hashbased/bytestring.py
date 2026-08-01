@@ -33,15 +33,30 @@ from frx import Array
 # A big-endian byte string per row: `[rows, width]` uint8, host or traced.
 ByteString: TypeAlias = np.ndarray | Array
 
+# The lane `low_bits` reads into. Deliberately the narrow one: it is what frx
+# gives without x64, so a value this refuses is one no traced caller could hold.
+_COLUMN_BITS = 32
 
-def namespace(*values: ByteString) -> Any:
+
+def namespace(*values: object) -> Any:
     """Which array namespace these values belong to.
 
     Host values stay on numpy rather than being lifted onto a device, which is
     what keeps the signing path — one signature, all concrete — from paying for
-    a dispatch per operation.
+    a dispatch per operation. `adrs_encoding` asks the same question of address
+    fields, so the rule lives here rather than once per module.
     """
     return fnp if any(isinstance(value, Array) for value in values) else np
+
+
+def is_bytes(value: int | ByteString) -> bool:
+    """Whether this value is a byte string rather than a number.
+
+    Rank two **and** uint8, and the dtype is half the test on purpose: without it
+    a two-dimensional integer array — a caller who reshaped wrongly — would read
+    as bytes and be consumed silently.
+    """
+    return len(np.shape(value)) == 2 and getattr(value, "dtype", None) == np.uint8
 
 
 def mask_to(values: ByteString, bits: int) -> ByteString:
@@ -60,11 +75,15 @@ def low_bits(values: ByteString, bits: int) -> ByteString:
     Only for values that fit one: a leaf index is `h'` bits, at most 9 at any
     defined parameter set. The bytes above what `bits` reaches are never read, so
     a caller does not have to mask first.
+
+    Reads from the **end** of the row, where `wots.base_2b` reads digits from the
+    front of a stream at a static bit offset. Neither can stand in for the other:
+    at `h' = 3` this wants the bottom three bits and `base_2b` gives the top three.
     """
-    if bits > 32:
+    if bits > _COLUMN_BITS:
         raise ValueError(f"{bits} bits do not fit the column this reads into")
     span = -(-bits // 8)
-    tail = values[:, values.shape[-1] - span :]
+    tail = values[:, -span:]
     column = tail[:, 0].astype(np.uint32)
     for index in range(1, span):
         column = (column << 8) | tail[:, index].astype(np.uint32)
@@ -83,30 +102,22 @@ def shift_right(values: ByteString, bits: int) -> ByteString:
     whole, part = divmod(bits, 8)
     if whole >= width:
         return xnp.zeros_like(values)
-    moved = (
-        xnp.concatenate([_zeros(values, whole, xnp), values[:, : width - whole]], -1)
-        if whole
-        else values
+    # One zero byte more than the slide needs, so that each byte and the one above
+    # it — its left neighbour, big-endian — are two slices of the same array.
+    padded = xnp.concatenate(
+        [
+            xnp.zeros((values.shape[0], whole + 1), dtype=np.uint8),
+            values[:, : width - whole],
+        ],
+        axis=-1,
     )
     if not part:
-        return moved
-    # Each byte takes its own high bits down and the bits that fell out of the
-    # byte above it, which is the byte to its left in big-endian order.
-    carried = xnp.concatenate([_zeros(values, 1, xnp), moved[:, :-1]], -1)
-    return ((moved >> part) | (carried << (8 - part))).astype(np.uint8)
-
-
-def _zeros(like: ByteString, width: int, xnp: Any) -> ByteString:
-    return xnp.zeros((like.shape[0], width), dtype=np.uint8)
+        return padded[:, 1:]
+    return (padded[:, 1:] >> part) | (padded[:, :-1] << (8 - part))
 
 
 @lru_cache(maxsize=None)
 def _byte_mask(width: int, bits: int) -> np.ndarray:
     """Which bits of each byte survive keeping the low `bits` of a `width`-byte row."""
-    mask = np.zeros(width, dtype=np.uint8)
-    for index in range(width):
-        reaches = bits - 8 * (width - 1 - index)  # bits of this byte the value has
-        mask[index] = (
-            0 if reaches <= 0 else 0xFF if reaches >= 8 else (1 << reaches) - 1
-        )
-    return mask
+    reaches = np.clip(bits - 8 * np.arange(width - 1, -1, -1), 0, 8)
+    return ((1 << reaches) - 1).astype(np.uint8)
