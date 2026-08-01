@@ -15,8 +15,15 @@ this file is the map plus the rules every change must respect.
 - **Detailed design & open decisions:** tracked on GitHub — epic issue
   [fractalyze/sig-frx#1](https://github.com/fractalyze/sig-frx/issues/1).
 
-## Three non-negotiables
+## Four non-negotiables
 
+- **An integer array lane is 32 bits.** frx runs without x64, so `uint64` becomes
+  `uint32` and a wider value truncates *without raising* — silently addressing the
+  wrong subtree. Anything that can exceed 2^32 is carried as bytes, which is what
+  the standards call it anyway (`toInt`/`toByte` pairs): see
+  [`bytestring.py`](sig_frx/hashbased/bytestring.py). Host code hides this,
+  because Python integers have no width — so a value that only ever lived on the
+  host is exactly where this bites when it is first traced.
 - **Standards-exact, or it is not done.** Every scheme reproduces its
   specification byte for byte, gated on the published known-answer tests. A
   scheme that verifies its own signatures has demonstrated nothing — a
