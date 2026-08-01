@@ -17,6 +17,19 @@ py_library(
 )
 
 py_library(
+    name = "bytestring",
+    srcs = [
+        "__init__.py",
+        "bytestring.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
     name = "adrs",
     srcs = [
         "__init__.py",
@@ -128,6 +141,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":bytestring",
         ":fors",
         ":hypertree",
         ":tree",
@@ -216,6 +230,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":bytestring",
         ":tree",
         ":tweakable",
         ":wots",

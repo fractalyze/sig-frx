@@ -131,6 +131,23 @@ def columns(values: Sequence[Field]) -> np.ndarray:
     )
 
 
+def repeat_rows(value: Field, times: int) -> Field:
+    """A field with each of its rows repeated `times` times, consecutively.
+
+    What a caller laying rows out under each address needs — a WOTS+ key pair owns
+    `len` chains, so its prefix repeats `len` times before the next key pair's.
+    Either form of field, since the caller should not have to know which it holds:
+    an integer column repeats its values, a byte field repeats its rows.
+
+    A single value is returned untouched. It already covers every row by
+    broadcasting, and materializing it would only make the batch bigger.
+    """
+    if np.ndim(value) == 0:
+        return value
+    xnp = fnp if _is_traced(value) else np
+    return xnp.repeat(value, times, axis=0)
+
+
 def encode(values: Sequence[Field], slots: tuple[Slot, ...]) -> bytes:
     """One address as bytes, field by field, the way its standard writes it.
 

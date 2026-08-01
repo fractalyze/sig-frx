@@ -29,7 +29,7 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hashbased import tree, wots, xmss
+from sig_frx.hashbased import bytestring, tree, wots, xmss
 from sig_frx.hashbased.tweakable import TweakableHash
 
 # A hypertree index: the signer's one, or a verifier's column of them.
@@ -55,13 +55,29 @@ class HypertreeParams:
         return self.wots.len + self.tree_height
 
 
-def _climb(tree_index: _Index, height: int) -> tuple[_Index, _Index]:
+def _climb(tree_index: int, height: int) -> tuple[int, int]:
     """One layer up: the leaf index it lands on, and the tree index above it.
 
-    One index or a whole column of them — verification climbs `B` claims at once,
-    and they each sit in their own tree.
+    The signer's form. Signing is one signature on the host, where a Python
+    integer holds the index at any width; a verifier climbs a batch of them and
+    takes `_climb_batch` instead, because that width does not fit an array lane.
     """
     return tree_index % (1 << height), tree_index >> height
+
+
+def _climb_batch(
+    tree_indices: bytestring.ByteString, height: int
+) -> tuple[Array, bytestring.ByteString]:
+    """The same step for a whole batch, over indices carried as bytes.
+
+    The leaf index is what comes off the bottom — `h'` bits, so a column holds it
+    — and the tree index above is what is left, which stays bytes because 54 to
+    64 bits do not fit one. See `bytestring` for why that is not a choice.
+    """
+    return (
+        bytestring.low_bits(tree_indices, height),
+        bytestring.shift_right(tree_indices, height),
+    )
 
 
 def sign(
@@ -132,12 +148,15 @@ def roots_from_sig(
         raise ValueError(
             f"a hypertree signature batch is {expected}, got {tuple(parts.shape)}"
         )
-    trees = np.asarray(tree_indices, dtype=np.int64).reshape(-1).copy()
-    leaves = np.asarray(leaf_indices, dtype=np.int64).reshape(-1).copy()
-    if len(trees) != batch or len(leaves) != batch:
+    # The tree index arrives as bytes and stays that way: it is 54 to 64 bits at
+    # the defined parameter sets, which no integer array lane holds under a tracer.
+    trees = tree_indices
+    leaves = leaf_indices
+    if trees.shape[0] != batch or leaves.shape[0] != batch:
         raise ValueError(
             f"one tree index and one leaf index per signature: got {batch} "
-            f"signatures, {len(trees)} tree indices, {len(leaves)} leaf indices"
+            f"signatures, {trees.shape[0]} tree indices, {leaves.shape[0]} leaf "
+            f"indices"
         )
 
     nodes = np.asarray(messages)
@@ -154,7 +173,7 @@ def roots_from_sig(
             )
         )
         if layer + 1 < params.layers:
-            leaves, trees = _climb(trees, params.tree_height)
+            leaves, trees = _climb_batch(trees, params.tree_height)
     return fnp.asarray(nodes)
 
 
