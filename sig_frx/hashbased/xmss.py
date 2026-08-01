@@ -156,7 +156,9 @@ def pk_from_sig(
             f"one signature per tree: got shape {tuple(parts.shape)} for "
             f"{count} trees"
         )
-    indices = np.asarray(leaf_indices, dtype=np.int64).reshape(-1)
+    # Unsigned: a leaf index is one, and a signed column makes every address
+    # batch built from it re-prove that on the whole array.
+    indices = np.asarray(leaf_indices, dtype=np.uint32).reshape(-1)
     # The leaf index is which key pair of that tree signed, so it is the batch's
     # key pair column against the tree's own layer and tree columns.
     signing_keys = wots.WotsPosition(position.layer, position.tree, indices)

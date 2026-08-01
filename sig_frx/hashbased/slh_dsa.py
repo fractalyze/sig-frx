@@ -27,9 +27,9 @@ hashes, so those sets need a SHA-512 `ByteHash` before `sha2` can build them.
 **Verification takes the batch and signing does not**, the asymmetry every layer
 below carries. Each entry brings its own public key, so `PK.seed` and `PK.root`
 vary across the batch, and the digest — which picks the FORS key — varies with
-them: the batch shares nothing but the context. The indices the digest yields are
-host integers, because that is what addresses a node: every component below builds
-its addresses on the host from a concrete index.
+them: the batch shares nothing but the context. Of the indices the digest yields,
+the leaf index is a column and the tree index stays bytes — 54 to 64 bits do not
+fit an array lane, and an address slot takes bytes anyway (see `bytestring`).
 
 **Three interfaces, one of them on the seam.** The seam is §10's pure external
 operation (Algorithms 22 and 24), which is what an application wants. The other
@@ -55,7 +55,7 @@ from frx.typing import ArrayLike
 from hash_frx.byte_hash import ByteHash
 from hash_frx.sha256 import Sha256
 
-from sig_frx.hashbased import fors, hypertree, tree, wots, xmss
+from sig_frx.hashbased import bytestring, fors, hypertree, tree, wots, xmss
 from sig_frx.hashbased.tweakable import Sha2TweakableHash, TweakableHash
 from sig_frx.signature import Signature
 
@@ -123,8 +123,12 @@ class SlhDsaParams:
 
     @cached_property
     def tree_index_bytes(self) -> int:
-        """`ceil((h − h/d)/8)` — the slice `idx_tree` comes from, line 7."""
-        return -(-(self.h - self.tree_height) // 8)
+        """`ceil((h − h/d)/8)` — the slice `idx_tree` comes from, line 7.
+
+        The same width `hypertree` carries an index in, which is not a coincidence:
+        this slice is what it starts from.
+        """
+        return self.hypertree_params.tree_index_bytes
 
     @cached_property
     def leaf_index_bytes(self) -> int:
@@ -261,28 +265,6 @@ def _prepend(prefix: np.ndarray, messages: ArrayLike) -> Array:
         return fnp.concatenate([head, body])
     return fnp.concatenate(
         [fnp.broadcast_to(head, (body.shape[0], head.shape[0])), body], axis=-1
-    )
-
-
-def _to_int(values: np.ndarray, bits: int) -> np.ndarray:
-    """`toInt` over a batch of byte strings, reduced to `bits` — §4.1, Algorithm 3.
-
-    `[B, w]` -> `[B]`: each row read big-endian, one column out. The rows are
-    padded up to the eight bytes a uint64 carries and read as one, rather than a
-    row at a time — an index is one per signature, and a Python loop over
-    signatures is what the batch axis exists to remove.
-
-    Every index slice a parameter set defines fits: the tallest hypertree
-    addresses 64 bits, so `w` is at most 8 and `bits` at most 64.
-
-    The reduction is a mask because the modulus is a power of two — the same
-    value, without leaving uint64 arithmetic.
-    """
-    rows, width = values.shape
-    padded = np.zeros((rows, 8), dtype=np.uint8)
-    padded[:, 8 - width :] = values
-    return padded.view(">u8").reshape(rows).astype(np.uint64) & np.uint64(
-        (1 << bits) - 1
     )
 
 
@@ -424,9 +406,10 @@ class SlhDsa:
             randomizer, key.pk_seed, key.pk_root, body
         )
         # Lines 11 to 13: the digest picks the FORS key, by tree and by key pair.
-        # Signing is one signature, so the batch's two columns are read back as the
-        # single indices every component below takes.
-        tree_index, leaf_index = int(tree_indices[0]), int(leaf_indices[0])
+        # The signer's seam: one signature on the host, where a Python integer holds
+        # the index at any width, so this is the one place the bytes become a number.
+        tree_index = int.from_bytes(bytes(np.asarray(tree_indices)[0]), "big")
+        leaf_index = int(leaf_indices[0])
         position = fors.ForsPosition(tree=tree_index, key_pair=leaf_index)
         fors_signature = fors.sign(
             self._tweak,
@@ -647,13 +630,15 @@ class SlhDsa:
         """Algorithm 19 lines 5 to 10 — the same lines as Algorithm 20's 8 to 13.
 
         One `H_msg` over the whole batch, then the split: `md` as
-        `[B, ceil(k·a/8)]`, and the tree and leaf indices as `[B]` columns of host
-        integers, since an index is what addresses a node and every address is
-        built on the host.
+        `[B, ceil(k·a/8)]`, the tree index as `[B, tree_index_bytes]` **bytes**,
+        and the leaf index as a `[B]` column.
 
-        `toInt` reads big-endian and the reduction is what keeps `idx_tree` inside
-        the hypertree — the slice is byte-rounded, so it carries up to seven bits
-        more than `h − h'` and those bits are not part of the index.
+        **The tree index is never made into a number** — see `bytestring`. The
+        leaf index is `h'` bits, at most 9, so that one is a column.
+
+        The reduction is what keeps `idx_tree` inside the hypertree: the slice is
+        byte-rounded, so it carries up to seven bits more than `h − h'` and those
+        bits are not part of the index.
         """
         params = self.params
         digest = np.asarray(
@@ -663,10 +648,10 @@ class SlhDsa:
         leaf_end = tree_end + params.leaf_index_bytes
         return (
             fnp.asarray(digest[:, : params.md_bytes], dtype=fnp.uint8),
-            _to_int(
+            bytestring.mask_to(
                 digest[:, params.md_bytes : tree_end], params.h - params.tree_height
             ),
-            _to_int(digest[:, tree_end:leaf_end], params.tree_height),
+            bytestring.low_bits(digest[:, tree_end:leaf_end], params.tree_height),
         )
 
 

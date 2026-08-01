@@ -359,10 +359,15 @@ class BroadcastRuleTest(absltest.TestCase):
     def test_a_column_sets_the_row_count(self) -> None:
         self.assertEqual(adrs_encoding.rows((1, np.arange(5), 3)), 5)
 
-    def test_it_agrees_with_the_table_the_encoding_builds(self) -> None:
-        fields = (np.arange(4), 7, np.zeros(4, dtype=np.int64))
+    def test_it_agrees_with_what_the_encoding_builds(self) -> None:
+        # The two must not disagree: a caller asks `rows` how many addresses it is
+        # about to build, then builds them.
         self.assertEqual(
-            adrs_encoding.rows(fields), adrs_encoding.columns(fields).shape[0]
+            adrs_encoding.rows((np.arange(4), 7, 0)),
+            a.encode_batch(
+                a.hash_tree(layer=np.arange(4), tree=7, height=0, index=0),
+                compressed=True,
+            ).shape[0],
         )
 
     def test_a_field_that_is_not_one_value_per_row_is_an_error(self) -> None:

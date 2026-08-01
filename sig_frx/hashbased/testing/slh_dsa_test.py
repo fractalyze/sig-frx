@@ -419,16 +419,21 @@ class DigestSplitTest(absltest.TestCase):
             )
             with self.subTest(index):
                 self.assertEqual(bytes(np.asarray(got_md)[0]), md)
-                self.assertEqual(got_trees.tolist(), [idx_tree])
+                self.assertEqual(
+                    int.from_bytes(bytes(np.asarray(got_trees)[0]), "big"), idx_tree
+                )
                 self.assertEqual(got_leaves.tolist(), [idx_leaf])
                 # The reduction is what keeps a byte-rounded slice inside the
                 # hypertree it indexes into.
                 self.assertLess(idx_tree, 1 << (_PARAMS.h - _PARAMS.tree_height))
                 self.assertLess(idx_leaf, 1 << _PARAMS.tree_height)
 
-    def test_the_indices_come_back_as_one_column_each(self) -> None:
+    def test_the_indices_come_back_one_per_signature(self) -> None:
         # An index per signature, read out of the batch at once rather than a row
         # at a time — a Python loop over signatures is what the batch axis removes.
+        # The tree index is a row of bytes and the leaf index a column, which is
+        # the split `bytestring` exists for: 54 to 64 bits do not fit a lane and
+        # `h'` bits do.
         scheme = _scheme()
         public_key, secret_key = (np.asarray(part) for part in scheme.keygen(_SEED))
         batch = 3
@@ -453,32 +458,9 @@ class DigestSplitTest(absltest.TestCase):
             np.stack([public_key[16:]] * batch),
             messages,
         )
-        for column in (trees, leaves):
-            self.assertIsInstance(column, np.ndarray)
-            self.assertEqual(column.shape, (batch,))
-
-    def test_to_int_reads_every_parameter_sets_index_slice(self) -> None:
-        # The small parameters above never reach the widths a real set uses: an
-        # eight-byte tree slice reduced to 63 or 64 bits, which is where a uint64
-        # column would round if it were carried as anything wider.
-        rng = np.random.default_rng(0)
-        for name, params in slh_dsa.SHA2_PARAMETER_SETS.items():
-            digest = rng.integers(0, 256, size=(4, params.m), dtype=np.uint8)
-            tree_end = params.md_bytes + params.tree_index_bytes
-            leaf_end = tree_end + params.leaf_index_bytes
-            slices = (
-                (digest[:, params.md_bytes : tree_end], params.h - params.tree_height),
-                (digest[:, tree_end:leaf_end], params.tree_height),
-            )
-            for block, bits in slices:
-                with self.subTest(name, width=block.shape[1], bits=bits):
-                    self.assertEqual(
-                        slh_dsa._to_int(block, bits).tolist(),
-                        [
-                            int.from_bytes(bytes(row), "big") % (1 << bits)
-                            for row in block
-                        ],
-                    )
+        self.assertEqual(trees.shape, (batch, _PARAMS.tree_index_bytes))
+        self.assertEqual(trees.dtype, np.uint8)
+        self.assertEqual(leaves.shape, (batch,))
 
 
 class VerifyTest(absltest.TestCase):

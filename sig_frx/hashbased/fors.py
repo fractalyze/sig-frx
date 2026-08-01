@@ -96,7 +96,7 @@ def _node_addresses(position: ForsPosition) -> tree.NodeAddresses:
     return build
 
 
-def _batch_node_addresses(position: ForsPosition) -> tree.NodeAddresses:
+def _batch_node_addresses(position: ForsPosition, keys: int) -> tree.NodeAddresses:
     """Node addresses for a row batch whose rows sit in *different* FORS keys.
 
     Row `r`'s node is addressed in the forest `position`'s columns name for row
@@ -104,8 +104,11 @@ def _batch_node_addresses(position: ForsPosition) -> tree.NodeAddresses:
     `root_from_path`, where each row walks its own path — and not in a
     whole-forest reduction, where the node count halves each level and the
     correspondence would not hold.
+
+    `keys` is the row count rather than something read off `position`: a position
+    whose fields are all single values covers every row by broadcasting, so it
+    cannot say how many there are.
     """
-    keys = position.count
 
     def build(height: int, indices: np.ndarray) -> np.ndarray:
         flat = np.asarray(indices).reshape(-1)
@@ -272,10 +275,10 @@ def pk_from_sig(
     # and the seed both repeat `k` times to line up with them.
     rows = batch * params.k
     per_tree = ForsPosition(
-        tree=np.repeat(np.broadcast_to(position.tree, batch), params.k),
-        key_pair=np.repeat(np.broadcast_to(position.key_pair, batch), params.k),
+        tree=adrs_encoding.repeat_rows(position.tree, params.k),
+        key_pair=adrs_encoding.repeat_rows(position.key_pair, params.k),
     )
-    node_addresses = _batch_node_addresses(per_tree)
+    node_addresses = _batch_node_addresses(per_tree, rows)
     seeds = repeat_per_entry(pk_seed, params.k)
     indices = message_indices(params, md).reshape(-1)
     leaf_nodes = tweak.f(

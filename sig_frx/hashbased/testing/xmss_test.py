@@ -165,6 +165,20 @@ class XmssSignatureTest(absltest.TestCase):
             self.assertEqual(bytes(got[index]), bytes(self.root), f"leaf {leaf}")
 
 
+def _tree_bytes(trees: list[int], params: hypertree.HypertreeParams) -> np.ndarray:
+    """Tree indices as the byte strings the hypertree walk takes.
+
+    These cases read better as integers, so the conversion sits here — which is
+    also what `_split_digest` hands the walk in production. See `bytestring`.
+    """
+    return np.stack(
+        [
+            np.frombuffer(index.to_bytes(params.tree_index_bytes, "big"), np.uint8)
+            for index in trees
+        ]
+    )
+
+
 class HypertreeTest(absltest.TestCase):
     PARAMS = hypertree.HypertreeParams(layers=2, tree_height=_HEIGHT, wots=_WOTS)
 
@@ -212,8 +226,8 @@ class HypertreeTest(absltest.TestCase):
                     signatures,
                     messages,
                     _PK_SEED,
-                    trees,
-                    leaves,
+                    _tree_bytes(trees, self.PARAMS),
+                    np.asarray(leaves, dtype=np.uint32),
                     self.pk_root,
                 )
             )
@@ -342,8 +356,10 @@ class TwoPublicSeedsTest(absltest.TestCase):
                     self.signatures,
                     np.stack([_MESSAGE] * len(self.SEEDS)),
                     seeds,
-                    [tree_index for tree_index, _ in self.POSITIONS],
-                    [leaf for _, leaf in self.POSITIONS],
+                    _tree_bytes(
+                        [tree_index for tree_index, _ in self.POSITIONS], self.PARAMS
+                    ),
+                    np.asarray([leaf for _, leaf in self.POSITIONS], dtype=np.uint32),
                     roots,
                 )
             )

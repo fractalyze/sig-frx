@@ -231,7 +231,7 @@ def chain(
 
 def _position_columns(
     position: WotsPosition, per_position: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[Field, Field, Field]:
     """The key pairs' address prefix, each repeated once per row it owns.
 
     The rows are key-pair-major, which is the layout every batch here uses: key
@@ -239,11 +239,10 @@ def _position_columns(
     once is what keeps the cost of an address batch independent of how many
     addresses are in it.
     """
-    table = adrs_encoding.columns((position.layer, position.tree, position.key_pair))
     return (
-        np.repeat(table[:, 0], per_position),
-        np.repeat(table[:, 1], per_position),
-        np.repeat(table[:, 2], per_position),
+        adrs_encoding.repeat_rows(position.layer, per_position),
+        adrs_encoding.repeat_rows(position.tree, per_position),
+        adrs_encoding.repeat_rows(position.key_pair, per_position),
     )
 
 

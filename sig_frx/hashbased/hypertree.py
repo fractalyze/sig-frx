@@ -22,18 +22,14 @@ that reaches the wrong root at any layer reaches the wrong root at the top.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypeVar
 
 import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hashbased import tree, wots, xmss
+from sig_frx.hashbased import bytestring, tree, wots, xmss
 from sig_frx.hashbased.tweakable import TweakableHash
-
-# A hypertree index: the signer's one, or a verifier's column of them.
-_Index = TypeVar("_Index", int, np.ndarray)
 
 
 @dataclass(frozen=True)
@@ -50,18 +46,42 @@ class HypertreeParams:
         return self.layers * self.tree_height
 
     @property
+    def tree_index_bytes(self) -> int:
+        """How wide the index a walk starts from is, in bytes.
+
+        `h − h'` bits, byte-rounded: what `bytestring` carries between layers, and
+        what a caller has to encode an index to before handing it over.
+        """
+        return -(-(self.total_height - self.tree_height) // 8)
+
+    @property
     def signature_values(self) -> int:
         """`n`-byte values in one layer's XMSS signature."""
         return self.wots.len + self.tree_height
 
 
-def _climb(tree_index: _Index, height: int) -> tuple[_Index, _Index]:
+def _climb(tree_index: int, height: int) -> tuple[int, int]:
     """One layer up: the leaf index it lands on, and the tree index above it.
 
-    One index or a whole column of them — verification climbs `B` claims at once,
-    and they each sit in their own tree.
+    The signer's form. Signing is one signature on the host, where a Python
+    integer holds the index at any width — the one representation that never
+    truncates. A verifier climbs a batch and takes `_climb_batch` instead.
     """
     return tree_index % (1 << height), tree_index >> height
+
+
+def _climb_batch(
+    tree_indices: bytestring.ByteString, height: int
+) -> tuple[Array, bytestring.ByteString]:
+    """The same step for a whole batch, over indices carried as bytes.
+
+    The leaf index comes off the bottom and the tree index above is what is left.
+    See `bytestring` for why the one stays bytes and the other does not.
+    """
+    return (
+        bytestring.low_bits(tree_indices, height),
+        bytestring.shift_right(tree_indices, height),
+    )
 
 
 def sign(
@@ -117,13 +137,17 @@ def roots_from_sig(
     signatures: ArrayLike,
     messages: ArrayLike,
     pk_seed: ArrayLike,
-    tree_indices: ArrayLike,
+    tree_indices: bytestring.ByteString,
     leaf_indices: ArrayLike,
 ) -> Array:
     """The top-layer root each claim implies — Algorithm 13 lines 1 to 12, batched.
 
     `signatures` is `[B, d, len + h', n]`; the result is `[B, n]`, which the caller
     compares against the public key's root.
+
+    `tree_indices` is `[B, tree_index_bytes]` bytes rather than a column of
+    numbers — see `bytestring` — while `leaf_indices` is a column, since `h'` bits
+    fit one.
     """
     parts = np.asarray(signatures)
     batch = parts.shape[0]
@@ -132,12 +156,12 @@ def roots_from_sig(
         raise ValueError(
             f"a hypertree signature batch is {expected}, got {tuple(parts.shape)}"
         )
-    trees = np.asarray(tree_indices, dtype=np.int64).reshape(-1).copy()
-    leaves = np.asarray(leaf_indices, dtype=np.int64).reshape(-1).copy()
-    if len(trees) != batch or len(leaves) != batch:
+    trees, leaves = tree_indices, leaf_indices
+    if trees.shape[0] != batch or leaves.shape[0] != batch:
         raise ValueError(
             f"one tree index and one leaf index per signature: got {batch} "
-            f"signatures, {len(trees)} tree indices, {len(leaves)} leaf indices"
+            f"signatures, {trees.shape[0]} tree indices, {leaves.shape[0]} leaf "
+            f"indices"
         )
 
     nodes = np.asarray(messages)
@@ -154,7 +178,7 @@ def roots_from_sig(
             )
         )
         if layer + 1 < params.layers:
-            leaves, trees = _climb(trees, params.tree_height)
+            leaves, trees = _climb_batch(trees, params.tree_height)
     return fnp.asarray(nodes)
 
 
