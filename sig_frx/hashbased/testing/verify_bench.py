@@ -17,11 +17,16 @@ Three things it measures:
   work: building addresses, and the array plumbing around them.
 - **Per stage.** `H_msg` and the digest split, FORS reconstruction, and the
   hypertree walk, in the order `verify_internal` runs them.
+- **Eager against traced.** The whole path traces, so `frx.jit(verify)` is one
+  program where the eager form is a few hundred thousand dispatches. What that
+  buys is a wall-clock question with a compile time attached, and both are here:
+  a compile is paid once per `(parameter set, batch size)` shape and amortizes
+  over every call at that shape, so it is reported beside the warm latency rather
+  than folded into it.
 
-There is no compile time to separate out. Nothing in the path is traced: the hash
-takes concrete arrays and the tree and leaf indices are host integers that address
-nodes, so `verify` is a sequence of eager dispatches. A jit-ed comparison is what
-this becomes when that changes.
+The host / hash split is an eager-only measurement. Under a tracer the injected
+hash is called once, to build the program rather than to run it, so what the
+wrapper times is tracing — the split is meaningless there and is not printed.
 
     bazel run //sig_frx/hashbased/testing:verify_bench -- --batches=1,8,64
 """
@@ -29,8 +34,9 @@ this becomes when that changes.
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
+import frx
 import numpy as np
 from absl import app, flags
 from frx import Array
@@ -118,7 +124,31 @@ def _fixture(
     return scheme, measured, public_key, message, signature
 
 
-def _latency(name: str, batches: Sequence[int], reps: int) -> None:
+def _batch_of(
+    public_key: np.ndarray, message: np.ndarray, signature: np.ndarray, batch: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return (
+        np.stack([public_key] * batch),
+        np.stack([message] * batch),
+        np.stack([signature] * batch),
+    )
+
+
+def _fastest(call: Callable[[], object], reps: int) -> float:
+    """The fastest of `reps` timed calls, in seconds. Assumes a warm caller."""
+    return min(_timed(call) for _ in range(reps))
+
+
+def _timed(call: Callable[[], object]) -> float:
+    start = time.perf_counter()
+    _blocked(call())
+    return time.perf_counter() - start
+
+
+def _latency(
+    name: str, batches: Sequence[int], reps: int
+) -> tuple[slh_dsa.SlhDsa, np.ndarray, np.ndarray, np.ndarray, dict[int, float]]:
+    """The eager table. Returns the fixture and the per-signature seconds."""
     scheme, measured, public_key, message, signature = _fixture(name)
     params = scheme.params
     print(
@@ -129,19 +159,14 @@ def _latency(name: str, batches: Sequence[int], reps: int) -> None:
         f"{'B':>5} {'total ms':>10} {'per sig ms':>11} {'hash %':>7} "
         f"{'host %':>7} {'dispatches':>11} {'rows/sig':>10}"
     )
-    first = None
-    last = None
+    eager: dict[int, float] = {}
     for batch in batches:
-        keys = np.stack([public_key] * batch)
-        messages = np.stack([message] * batch)
-        signatures = np.stack([signature] * batch)
-        _blocked(scheme.verify(keys, messages, signatures))  # warm the caches
+        arrays = _batch_of(public_key, message, signature, batch)
+        _blocked(scheme.verify(*arrays))  # warm the caches
         best = None
         for _ in range(reps):
             measured.reset()
-            start = time.perf_counter()
-            _blocked(scheme.verify(keys, messages, signatures))
-            elapsed = time.perf_counter() - start
+            elapsed = _timed(lambda: scheme.verify(*arrays))
             if best is None or elapsed < best:
                 best, hashing, calls, rows = (
                     elapsed,
@@ -150,19 +175,53 @@ def _latency(name: str, batches: Sequence[int], reps: int) -> None:
                     measured.rows,
                 )
         assert best is not None
-        per_signature = best / batch * 1e3
-        first = per_signature if first is None else first
-        last = per_signature
+        eager[batch] = best / batch
         print(
-            f"{batch:>5} {best * 1e3:>10.1f} {per_signature:>11.2f} "
+            f"{batch:>5} {best * 1e3:>10.1f} {eager[batch] * 1e3:>11.2f} "
             f"{100 * hashing / best:>7.1f} {100 * (best - hashing) / best:>7.1f} "
             f"{calls:>11} {rows // batch:>10}"
         )
-    assert first is not None and last is not None
+    first, last = eager[batches[0]], eager[batches[-1]]
     print(
         f"  per-signature: {first / last:.1f}x faster at B={batches[-1]} than at "
         f"B={batches[0]}, on a dispatch count that never changed"
     )
+    return scheme, public_key, message, signature, eager
+
+
+def _traced(
+    scheme: slh_dsa.SlhDsa,
+    public_key: np.ndarray,
+    message: np.ndarray,
+    signature: np.ndarray,
+    batches: Sequence[int],
+    reps: int,
+    eager: dict[int, float],
+) -> None:
+    """The same latencies under `frx.jit`, with the compile they cost separated.
+
+    A fresh `jit` per batch size, so the compile reported is that shape's own: the
+    batch axis is part of the traced shape, and a cache hit from a previous size
+    would report zero for work that was really done.
+
+    The compile is the cold call minus the warm one, which is the same reading the
+    sibling repos take — a cold call is a compile plus one execution, and the
+    execution is what the warm calls measure.
+    """
+    print(
+        f"{'B':>5} {'compile s':>10} {'total ms':>10} {'per sig ms':>11} "
+        f"{'vs eager':>9}"
+    )
+    for batch in batches:
+        arrays = _batch_of(public_key, message, signature, batch)
+        verify = frx.jit(scheme.verify)
+        cold = _timed(lambda: verify(*arrays))
+        best = _fastest(lambda: verify(*arrays), reps)
+        per_signature = best / batch
+        print(
+            f"{batch:>5} {cold - best:>10.1f} {best * 1e3:>10.1f} "
+            f"{per_signature * 1e3:>11.2f} {eager[batch] / per_signature:>8.2f}x"
+        )
 
 
 def _stages(name: str, batch: int) -> None:
@@ -235,8 +294,11 @@ def main(argv: Sequence[str]) -> None:
     del argv
     batches = [int(value) for value in _BATCHES.value]
     for name in _PARAMETER_SETS.value:
-        _latency(name, batches, _REPS.value)
+        scheme, public_key, message, signature, eager = _latency(
+            name, batches, _REPS.value
+        )
         _stages(name, batches[-1])
+        _traced(scheme, public_key, message, signature, batches, _REPS.value, eager)
 
 
 if __name__ == "__main__":

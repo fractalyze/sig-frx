@@ -40,6 +40,7 @@ import enum
 from dataclasses import dataclass
 
 import numpy as np
+from frx import Array
 
 from sig_frx.hashbased import adrs_encoding
 
@@ -175,7 +176,7 @@ def encode(adrs: Adrs, *, compressed: bool) -> bytes:
     return adrs_encoding.encode(_fields(adrs), _slot_widths(compressed=compressed))
 
 
-def encode_batch(adrs: Adrs, *, compressed: bool) -> np.ndarray:
+def encode_batch(adrs: Adrs, *, compressed: bool) -> np.ndarray | Array:
     """A batch of addresses of one type as uint8 `[rows, size]`.
 
     The batch axis is where a caller hashes many positions at once — every chain of

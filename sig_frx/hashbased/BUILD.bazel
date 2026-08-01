@@ -1,8 +1,10 @@
 load("@rules_python//python:defs.bzl", "py_library")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 
-# Addresses are host-side and hash-free: every component builds them before any
-# hashing starts, so these depend on neither frx nor hash-frx.
+# Addresses are structural and hash-free: every component builds them before any
+# hashing starts, so these depend on no hash. They do depend on frx, because the
+# fields they pack are host integers on the signing path and traced values on the
+# verification path, and the packing runs where the fields already live.
 py_library(
     name = "adrs_encoding",
     srcs = [
@@ -39,6 +41,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":adrs_encoding",
+        requirement("frx"),
         requirement("numpy"),
     ],
 )
@@ -94,6 +97,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":adrs",
+        ":bytestring",
         ":tweakable",
         requirement("frx"),
         requirement("numpy"),
@@ -109,6 +113,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":adrs",
+        ":bytestring",
         ":tree",
         ":tweakable",
         ":wots",
@@ -126,6 +131,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":adrs",
+        ":bytestring",
         ":tree",
         ":tweakable",
         ":wots",

@@ -74,11 +74,19 @@ Under the seam the batch widens unevenly and the work stays batched at each widt
 signing here exists to reproduce vectors — so a caller who needs many uses
 `frx.vmap` rather than a second entry point.
 
-Two things qualify what "batched" delivers. The hashes run eagerly, so a batched
-call is one dispatch per level rather than one traced graph. And the tree and leaf
-indices come out of the digest as host integers, because an address is built on the
-host from a concrete index — which is where a traced index would have to be handled
-differently.
+The whole of `verify` traces, so `frx.jit(verify)` is one program rather than one
+dispatch per level. Getting there meant taking every value the path carries off the
+host. The hypertree index rides as bytes, because it reaches 64 bits and an integer
+array lane is 32 — see
+[`sig_frx/hashbased/bytestring.py`](../../sig_frx/hashbased/bytestring.py). An
+address is packed wherever its fields already live, so the same expression builds
+one from host integers and from traced columns. And the digest is left where
+`H_msg` produced it, since the tree and leaf indices are slices of it.
+
+`sign` stays on the host, and the asymmetry is deliberate rather than unfinished: a
+signer holds one signature, where a Python integer carries the tree index at any
+width and never truncates. The two paths meet at the digest split, which is the one
+place those bytes become a number.
 
 ## What leaks
 

@@ -22,7 +22,7 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hashbased import adrs, tree, wots
+from sig_frx.hashbased import adrs, bytestring, tree, wots
 from sig_frx.hashbased.tweakable import TweakableHash
 
 
@@ -118,8 +118,8 @@ def node_addresses(position: tree.TreePosition) -> tree.NodeAddresses:
     """
     count = position.count
 
-    def build(height: int, indices: np.ndarray) -> np.ndarray:
-        flat = np.asarray(indices).reshape(-1)
+    def build(height: int, indices: ArrayLike) -> bytestring.ByteString:
+        flat = bytestring.index_column(indices)
         if flat.shape[0] != count:
             raise ValueError(
                 f"one node per tree: got {count} trees and {flat.shape[0]} indices"
@@ -148,17 +148,19 @@ def pk_from_sig(
     Each entry carries its own tree, its own leaf index and its own message, which
     is what a hypertree layer hands it: `B` independent claims that each imply a
     root.
+
+    The signature and the leaf index stay in the namespace they arrive in: a
+    hypertree walk hands over a slice of what it was given, which is concrete when
+    a signer climbs its own layers and traced when a verifier walks a batch.
     """
-    parts = np.asarray(signatures)
+    parts = bytestring.namespace(signatures).asarray(signatures)
     count = position.count
     if parts.ndim != 3 or parts.shape[0] != count:
         raise ValueError(
             f"one signature per tree: got shape {tuple(parts.shape)} for "
             f"{count} trees"
         )
-    # Unsigned: a leaf index is one, and a signed column makes every address
-    # batch built from it re-prove that on the whole array.
-    indices = np.asarray(leaf_indices, dtype=np.uint32).reshape(-1)
+    indices = bytestring.index_column(leaf_indices)
     # The leaf index is which key pair of that tree signed, so it is the batch's
     # key pair column against the tree's own layer and tree columns.
     signing_keys = wots.WotsPosition(position.layer, position.tree, indices)

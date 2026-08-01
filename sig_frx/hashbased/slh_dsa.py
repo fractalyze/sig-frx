@@ -402,12 +402,16 @@ class SlhDsa:
         key = self._parse_secret_key(secret_key)
         body = fnp.asarray(message, dtype=fnp.uint8)
         randomizer = self._tweak.prf_msg(key.prf, self._opt_rand(key, randomness), body)
-        md, tree_indices, leaf_indices = self._split_digest(
+        digests, tree_indices, leaf_indices = self._split_digest(
             randomizer, key.pk_seed, key.pk_root, body
         )
         # Lines 11 to 13: the digest picks the FORS key, by tree and by key pair.
         # The signer's seam: one signature on the host, where a Python integer holds
         # the index at any width, so this is the one place the bytes become a number.
+        # The digest lands here with them, because the components below read their
+        # FORS indices out of it and address their nodes with that same integer —
+        # which is wider than the lane a device holds one in.
+        md = np.asarray(digests)
         tree_index = int.from_bytes(bytes(np.asarray(tree_indices)[0]), "big")
         leaf_index = int(leaf_indices[0])
         position = fors.ForsPosition(tree=tree_index, key_pair=leaf_index)
@@ -626,7 +630,7 @@ class SlhDsa:
         pk_seeds: ArrayLike,
         pk_roots: ArrayLike,
         messages: ArrayLike,
-    ) -> tuple[Array, np.ndarray, np.ndarray]:
+    ) -> tuple[Array, bytestring.ByteString, bytestring.ByteString]:
         """Algorithm 19 lines 5 to 10 — the same lines as Algorithm 20's 8 to 13.
 
         One `H_msg` over the whole batch, then the split: `md` as
@@ -639,15 +643,21 @@ class SlhDsa:
         The reduction is what keeps `idx_tree` inside the hypertree: the slice is
         byte-rounded, so it carries up to seven bits more than `h − h'` and those
         bits are not part of the index.
+
+        The digest is left where `H_msg` produced it. All three slices are static,
+        so a traced digest splits the same way a concrete one does — and the split
+        is the head of the verification path, so pulling it to the host here would
+        settle for everything below it.
         """
         params = self.params
-        digest = np.asarray(
-            self._tweak.h_msg(randomizers, pk_seeds, pk_roots, messages)
+        digest = fnp.asarray(
+            self._tweak.h_msg(randomizers, pk_seeds, pk_roots, messages),
+            dtype=fnp.uint8,
         )
         tree_end = params.md_bytes + params.tree_index_bytes
         leaf_end = tree_end + params.leaf_index_bytes
         return (
-            fnp.asarray(digest[:, : params.md_bytes], dtype=fnp.uint8),
+            digest[:, : params.md_bytes],
             bytestring.mask_to(
                 digest[:, params.md_bytes : tree_end], params.h - params.tree_height
             ),
