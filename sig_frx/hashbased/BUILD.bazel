@@ -10,7 +10,10 @@ py_library(
         "adrs_encoding.py",
     ],
     visibility = ["//visibility:public"],
-    deps = [requirement("numpy")],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+    ],
 )
 
 py_library(
