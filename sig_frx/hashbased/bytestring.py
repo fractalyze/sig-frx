@@ -29,6 +29,7 @@ from typing import Any, TypeAlias
 import frx.numpy as fnp
 import numpy as np
 from frx import Array
+from frx.typing import ArrayLike
 
 # A big-endian byte string per row: `[rows, width]` uint8, host or traced.
 ByteString: TypeAlias = np.ndarray | Array
@@ -47,6 +48,24 @@ def namespace(*values: object) -> Any:
     fields, so the rule lives here rather than once per module.
     """
     return fnp if any(isinstance(value, Array) for value in values) else np
+
+
+def index_column(values: ArrayLike) -> ByteString:
+    """`values` as a flat unsigned column, left in the namespace they arrive in.
+
+    Node and leaf indices. They come from the host where a whole tree is built —
+    key generation and signing, over an `arange` — and from a tracer on the
+    verification path, where the digest chose them. `np.asarray` covers both only
+    by pulling the traced one to the host, which is the conversion this package
+    exists to avoid.
+
+    Unsigned because an index is, and 32 bits because that is the lane one rides:
+    the widest an index reaches here is the FORS forest's `k·2^a`, 57 344 at
+    SHA2-128s. The value that does *not* fit a lane is the hypertree's tree index,
+    which is why that one is bytes and never comes through here.
+    """
+    xnp = namespace(values)
+    return xnp.asarray(values, dtype=xnp.uint32).reshape(-1)
 
 
 def is_bytes(value: int | ByteString) -> bool:

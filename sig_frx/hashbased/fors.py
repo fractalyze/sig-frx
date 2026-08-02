@@ -34,7 +34,7 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hashbased import adrs, adrs_encoding, tree, wots
+from sig_frx.hashbased import adrs, adrs_encoding, bytestring, tree, wots
 from sig_frx.hashbased.tweakable import TweakableHash, repeat_per_entry
 
 
@@ -81,14 +81,14 @@ class ForsPosition:
 def _node_addresses(position: ForsPosition) -> tree.NodeAddresses:
     """The `FORS_TREE` addresses this forest's nodes tweak with."""
 
-    def build(height: int, indices: np.ndarray) -> np.ndarray:
+    def build(height: int, indices: ArrayLike) -> bytestring.ByteString:
         return adrs.encode_batch(
             adrs.fors_tree(
                 layer=0,
                 tree=position.tree,
                 key_pair=position.key_pair,
                 height=height,
-                index=np.asarray(indices).reshape(-1),
+                index=bytestring.index_column(indices),
             ),
             compressed=True,
         )
@@ -110,8 +110,8 @@ def _batch_node_addresses(position: ForsPosition, keys: int) -> tree.NodeAddress
     cannot say how many there are.
     """
 
-    def build(height: int, indices: np.ndarray) -> np.ndarray:
-        flat = np.asarray(indices).reshape(-1)
+    def build(height: int, indices: ArrayLike) -> bytestring.ByteString:
+        flat = bytestring.index_column(indices)
         if flat.shape[0] != keys:
             raise ValueError(
                 f"one node per FORS key: got {keys} keys and {flat.shape[0]} indices"
@@ -143,7 +143,7 @@ def secret_values(
             layer=0,
             tree=position.tree,
             key_pair=position.key_pair,
-            index=np.asarray(indices).reshape(-1),
+            index=bytestring.index_column(indices),
         ),
         compressed=True,
     )
@@ -167,7 +167,7 @@ def leaves(
     return tweak.f(pk_seed, _node_addresses(position)(0, indices), secrets)
 
 
-def message_indices(params: ForsParams, digest: ArrayLike) -> np.ndarray:
+def message_indices(params: ForsParams, digest: ArrayLike) -> bytestring.ByteString:
     """Which leaf of each tree the digest picks — `base_2b(md, a, k)`, forest-wide.
 
     Algorithm 16 line 2 gives the within-tree index of each tree's chosen leaf;
@@ -176,11 +176,20 @@ def message_indices(params: ForsParams, digest: ArrayLike) -> np.ndarray:
 
     Rank-preserving: one digest gives `[k]`, and a batch of them gives `[B, k]` —
     which is what verifying a batch of signatures asks for, one digest per entry.
+
+    Namespace-preserving too, and that is the load-bearing half: these index
+    *addresses* rather than being hashed, so where they land decides where every
+    address batch built from them is packed. `base_2b` reads its digits on the
+    device whatever it is given, so a concrete digest gets them back — which is
+    what keeps the signer's host-width tree address off a 32-bit lane.
+
+    The offsets are the parameter set's own, so they are a host constant the
+    digits broadcast against either way.
     """
-    values = np.asarray(digest)
-    within = np.asarray(wots.base_2b(values, params.a, params.k))
-    indices = np.arange(params.k) * params.t + within
-    return indices[0] if values.ndim == 1 else indices
+    xnp = bytestring.namespace(digest)
+    within = xnp.asarray(wots.base_2b(digest, params.a, params.k))
+    indices = within + np.arange(params.k, dtype=np.uint32) * np.uint32(params.t)
+    return indices[0] if np.ndim(digest) == 1 else indices
 
 
 def sign(
@@ -265,7 +274,9 @@ def pk_from_sig(
         raise ValueError(
             f"a FORS signature batch is {expected}, got {tuple(parts.shape)}"
         )
-    md = np.atleast_2d(np.asarray(digests))
+    md = bytestring.namespace(digests).asarray(digests)
+    if md.ndim == 1:
+        md = md[None, :]
     if md.shape[0] != batch:
         raise ValueError(
             f"one digest per FORS key: got {batch} keys, {md.shape[0]} digests"

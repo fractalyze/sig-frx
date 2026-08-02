@@ -148,8 +148,13 @@ def roots_from_sig(
     `tree_indices` is `[B, tree_index_bytes]` bytes rather than a column of
     numbers — see `bytestring` — while `leaf_indices` is a column, since `h'` bits
     fit one.
+
+    Nothing here comes back to the host between layers: each layer's roots are the
+    next layer's messages, and the climb is a static schedule of shifts over the
+    index. So the whole walk is one expression whether the batch is concrete or
+    traced.
     """
-    parts = np.asarray(signatures)
+    parts = bytestring.namespace(signatures).asarray(signatures)
     batch = parts.shape[0]
     expected = (batch, params.layers, params.signature_values, params.wots.n)
     if parts.shape != expected:
@@ -164,18 +169,16 @@ def roots_from_sig(
             f"indices"
         )
 
-    nodes = np.asarray(messages)
+    nodes = messages
     for layer in range(params.layers):
-        nodes = np.asarray(
-            xmss.pk_from_sig(
-                tweak,
-                params.wots,
-                parts[:, layer, :, :],
-                nodes,
-                pk_seed,
-                tree.TreePosition(layer=layer, tree=trees),
-                leaves,
-            )
+        nodes = xmss.pk_from_sig(
+            tweak,
+            params.wots,
+            parts[:, layer, :, :],
+            nodes,
+            pk_seed,
+            tree.TreePosition(layer=layer, tree=trees),
+            leaves,
         )
         if layer + 1 < params.layers:
             leaves, trees = _climb_batch(trees, params.tree_height)

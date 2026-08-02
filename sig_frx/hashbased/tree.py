@@ -41,11 +41,13 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hashbased import adrs, adrs_encoding
+from sig_frx.hashbased import adrs, adrs_encoding, bytestring
 from sig_frx.hashbased.tweakable import NodeHash
 
-# Builds the addresses of the given nodes at one height: `(height, indices)`.
-NodeAddresses = Callable[[int, np.ndarray], np.ndarray]
+# Builds the addresses of the given nodes at one height: `(height, indices)`. The
+# indices are concrete where a whole tree is built and traced where a batch walks
+# its paths, so a builder takes them as they come rather than on the host.
+NodeAddresses = Callable[[int, ArrayLike], bytestring.ByteString]
 
 
 @dataclass(frozen=True)
@@ -70,13 +72,13 @@ class TreePosition:
 def xmss_node_addresses(position: TreePosition) -> NodeAddresses:
     """The `TREE`-type addresses an XMSS tree's nodes tweak with."""
 
-    def build(height: int, indices: np.ndarray) -> np.ndarray:
+    def build(height: int, indices: ArrayLike) -> bytestring.ByteString:
         return adrs.encode_batch(
             adrs.hash_tree(
                 layer=position.layer,
                 tree=position.tree,
                 height=height,
-                index=np.asarray(indices).reshape(-1),
+                index=bytestring.index_column(indices),
             ),
             compressed=True,
         )
@@ -164,7 +166,7 @@ def auth_path(
 def _shifted(node_addresses: NodeAddresses, by: int) -> NodeAddresses:
     """A builder whose heights are offset, for reducing one level at a time."""
 
-    def build(height: int, indices: np.ndarray) -> np.ndarray:
+    def build(height: int, indices: ArrayLike) -> bytestring.ByteString:
         return node_addresses(height + by, indices)
 
     return build
@@ -189,10 +191,14 @@ def root_from_path(
     goes. Those agree even for FORS, whose leaf `i·2^a + local` sits in tree `i` —
     `i·2^(a−j)` is even for every level `j < a`, so the forest-wide index and the
     within-tree one have the same parity at every level a path walks through.
+
+    The index stays where it arrives — see `bytestring.index_column`. Every use it
+    is put to is a shift and a mask against a static level, so the walk is the same
+    expression over a concrete index and a traced one.
     """
     nodes = fnp.asarray(leaves, dtype=fnp.uint8)
     sibling_paths = fnp.asarray(paths, dtype=fnp.uint8)
-    leaf_indices = np.asarray(indices, dtype=np.int64).reshape(-1)
+    leaf_indices = bytestring.index_column(indices)
     if sibling_paths.shape[0] != nodes.shape[0] or len(leaf_indices) != nodes.shape[0]:
         raise ValueError(
             f"one index and one path per leaf: got {nodes.shape[0]} leaves, "
