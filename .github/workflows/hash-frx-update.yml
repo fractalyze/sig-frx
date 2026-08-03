@@ -7,6 +7,17 @@
 #
 # hash-frx moves fast, and a stale pin here means a break in the layer this repo
 # is built on gets found late — against a scheme, weeks after the change.
+#
+# One branch, force-pushed: `bump/hash-frx` always carries the newest pin, on top
+# of the newest main. A branch per upstream commit accumulates a PR per day that
+# nobody merges, each one older than the last and each burning a CI run — and the
+# one worth merging is never the one on top. Re-cutting from HEAD also rebases
+# for free, so the open PR never goes stale against main.
+#
+# This mirrors `fractalyze/github-actions/pin-bump`, which the frx side uses. The
+# action is not reused directly because it edits `<PREFIX>_COMMIT`/`_SHA256` in a
+# `workspace.bzl`; this repo pins through a bzlmod `git_override` and carries a
+# lock that only `bazel mod deps` can refresh.
 
 name: hash-frx Update
 
@@ -54,13 +65,10 @@ jobs:
             exit 0
           fi
 
-          branch="bump/hash-frx-${upstream:0:12}"
-          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
-            echo "a bump PR for ${upstream:0:12} is already open"
-            exit 0
-          fi
-
-          git checkout -b "${branch}"
+          # One branch for every bump, re-cut from the checked-out main so the
+          # PR carries the newest pin on top of the newest base.
+          branch="bump/hash-frx"
+          git checkout -B "${branch}"
           sed -i "s/${pinned}/${upstream}/" MODULE.bazel
           # The lock records the resolved module graph, so it moves with the pin;
           # leaving it stale would put the drift in every contributor's next diff.
@@ -69,13 +77,24 @@ jobs:
           git config user.email 'fractalyze-dev@users.noreply.github.com'
           git add MODULE.bazel MODULE.bazel.lock
           git commit -m "build(deps): bump the hash-frx pin to ${upstream:0:12}"
-          git push -u origin "${branch}"
+          git push --force origin "${branch}"
 
-          gh pr create --base main --head "${branch}" \
-            --title "build(deps): bump the hash-frx pin to ${upstream:0:12}" \
-            --body "$(printf '%s\n' \
-              "Moves the \`hash_frx\` \`git_override\` in \`MODULE.bazel\` from \`${pinned:0:12}\` to \`${upstream:0:12}\`." \
-              "" \
-              "Compare: https://github.com/fractalyze/hash-frx/compare/${pinned}...${upstream}" \
-              "" \
-              "CI is the review: the dependency guard exercises a real hash-frx computation across the pin, so a break in the layer below fails here rather than inside a scheme.")"
+          title="build(deps): bump the hash-frx pin to ${upstream:0:12}"
+          body=$(printf '%s\n' \
+            "Moves the \`hash_frx\` \`git_override\` in \`MODULE.bazel\` from \`${pinned:0:12}\` to \`${upstream:0:12}\`." \
+            "" \
+            "Compare: https://github.com/fractalyze/hash-frx/compare/${pinned}...${upstream}" \
+            "" \
+            "CI is the review: the dependency guard exercises a real hash-frx computation across the pin, so a break in the layer below fails here rather than inside a scheme." \
+            "" \
+            "Force-pushed in place as hash-frx moves, so this PR is always the newest pin on the newest main.")
+
+          # A force-push moves an open PR's head but leaves its title and body
+          # untouched, and both name the pin.
+          existing=$(gh pr list --head "${branch}" --state open --json number --jq '.[0].number // empty')
+          if [ -n "${existing}" ]; then
+            echo "refreshing PR #${existing} for ${upstream:0:12}"
+            gh pr edit "${existing}" --title "${title}" --body "${body}"
+          else
+            gh pr create --base main --head "${branch}" --title "${title}" --body "${body}"
+          fi
