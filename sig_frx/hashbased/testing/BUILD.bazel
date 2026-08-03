@@ -252,7 +252,11 @@ py_library(
 # ones; `slh_dsa_sweep_test` is the exhaustive run.
 py_test(
     name = "slh_dsa_kat_test",
-    size = "medium",
+    # The longest test in this package — ~276 s on the CI executor, which does
+    # not fit `medium`'s 300 s with any margin. Size it from the executor rather
+    # than from a dev workstation: the same run takes ~175 s locally, so a local
+    # measurement reports roughly twice the headroom that CI has.
+    size = "large",
     srcs = ["slh_dsa_kat_test.py"],
     deps = [
         ":slh_dsa_vectors",
