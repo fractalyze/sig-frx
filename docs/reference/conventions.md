@@ -28,6 +28,48 @@ sampled in fixed-size blocks with a mask, or it runs on the host. Which one a
 scheme picks is a decision its page records, along with the timing consequence
 ([`security.md`](security.md)).
 
+## The lattice NTT is per-repo, and the shape is the shared part
+
+ML-DSA's NTT lives here; ML-KEM's lives in
+[`enc-frx`](https://github.com/fractalyze/enc-frx). They are deliberately not
+shared, and the reason is not that sharing would be hard — it is that the two
+transforms disagree about the things a shared implementation would have to hold
+fixed.
+
+| | ML-DSA (FIPS 204) | ML-KEM (FIPS 203) |
+| --- | --- | --- |
+| modulus | 8380417 (23-bit) | 3329 (12-bit) |
+| depth | 8 layers, complete | 7 layers, **incomplete** |
+| base case | pointwise | degree-1 products mod `X² − ζ` |
+| worst-case product | 2^46 — **exceeds a lane** | 2^24 — fits |
+
+The last row decides it, and it is the repo's first non-negotiable applied to
+arithmetic: an integer array lane is 32 bits. A product of two ML-DSA residues is
+about 7·10^13, which a lane neither holds nor complains about — it returns a wrong
+number. ML-KEM's worst case is 11075584 and computes exactly. So ML-DSA needs a
+split representation that ML-KEM does not, and an NTT "parameterized over the
+modulus" would be parameterizing the representation of a field element rather than
+a constant.
+
+The depth difference says the same thing about the algorithm rather than the
+arithmetic: ML-KEM stops one layer early and its base case multiplies degree-1
+polynomials, so that step is different code, not a different constant.
+
+What is genuinely common is the layer-walk skeleton — a few dozen lines, which is
+not enough to carry a cross-repo pin. `hash-frx` is the wrong home for it in any
+case, being the *symmetric* layer: a lattice NTT is not a hash and does not belong
+there merely because both repos already depend on it.
+
+So each repo implements its own, and the convention is that the two **look
+alike**: same module layout, the same names (`ntt`, `intt`, `base_mul`,
+`montgomery_reduce`), the same twiddle-table generation style. The cost being
+avoided is not duplicated lines — it is two implementations that look unrelated,
+so a bug fixed in one is never looked for in the other. Whoever writes the second
+should be able to read the first.
+
+Revisit when a third lattice scheme appears. Two implementations are not evidence
+for an abstraction; three usually are.
+
 ## Keys and signatures are bytes at the seam
 
 They cross the `Signature` seam as `uint8` arrays in the standard's encoding, not
