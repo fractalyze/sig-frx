@@ -73,6 +73,44 @@ section it comes from: `# FIPS 205 §4.2`, not `# domain separator`. Signature
 code is easy to write plausibly and wrongly, and the section number is what lets
 a reviewer check it rather than agree with it.
 
+## Test the reshaped form against the standard's own form
+
+Almost nothing here computes the way its standard writes it: a hash chain runs
+its full length and masks instead of stopping at a digit, a Merkle tree iterates
+where the standard recurses, a forest of trees reduces in one pass, a batch of key
+pairs advances together. Each of those is a change made for the compiler, and each
+is the only thing about the module a reader has to take on trust.
+
+So take it back: transcribe the standard's algorithm — naively, looping the way it
+loops, one item at a time — into the test, and require the two to agree. Cover the
+cases the reshaping papers over, which for a masked loop means a full pass, a
+partial one, a no-op and a mid-sequence start.
+
+Transcribe from the document, not from memory. The specifications are public and a
+named algorithm is two commands away:
+
+```sh
+curl -sSfL -o spec.pdf <url> && pdftotext -layout spec.pdf spec.txt
+awk '/Algorithm 5 chain/,/Algorithm 6/' spec.txt
+```
+
+What this method cannot catch is a misreading shared by both sides, since one
+author wrote both. Only published vectors close that gap — so a component's tests
+localize a failure, and the known-answer tests are what find it.
+
+## Generalize a component when its second consumer arrives
+
+Every seam in the hash-based layer was widened by the component built on top of
+it, not when it first landed: the tree took a node-address builder once FORS
+needed `FORS_TREE` addresses, and WOTS+ took a sequence of key pairs once an XMSS
+tree needed all of them walked at once. Widening earlier would have meant guessing
+which axis mattered, and a seam nobody asked for is harder to remove than one
+absent.
+
+The corollary is that refactoring a module days or hours old is normal here. The
+question is whether a real second caller is forcing the shape, not how recent the
+first version is.
+
 ## Known-answer tests are the gate
 
 A scheme that reproduces every published signature byte and accepts every
