@@ -39,9 +39,15 @@ from sig_frx.testing import kat
 
 _RUNFILES = Runfiles.Create()
 
-# The parameter sets §11.2.1's SHA-256-only family reaches. Categories 3 and 5
-# hash `H`, `T_l` and `PRF_msg` with SHA-512, and the SHAKE sets need SHAKE256.
-CONSTRUCTIBLE_SETS = ("SLH-DSA-SHA2-128s", "SLH-DSA-SHA2-128f")
+# Every SHAKE set, and the SHA-2 sets §11.2.1's SHA-256-only family reaches.
+# §11.1 reaches all six SHAKE sets with SHAKE256 alone, at every security
+# category; the SHA-2 categories 3 and 5 hash `H`, `T_l` and `PRF_msg` with
+# SHA-512 (§11.2.2) and stay out until a SHA-512 `ByteHash` exists.
+CONSTRUCTIBLE_SETS = (
+    "SLH-DSA-SHA2-128s",
+    "SLH-DSA-SHA2-128f",
+    *slh_dsa.SHAKE_PARAMETER_SETS,
+)
 
 # ACVP's name for each pre-hash function it exercises. A case signs the function's
 # OID along with its digest, so an entry maps to a `PreHash` constructor carrying
@@ -221,7 +227,7 @@ def excluded_by_reason(vectors: list[kat.KatVector]) -> dict[str, int]:
         if vector.unsupported:
             counts["operation nothing here names"] += 1
         elif vector.parameter_set not in CONSTRUCTIBLE_SETS:
-            counts["parameter set needs SHA-512 or SHAKE256"] += 1
+            counts["parameter set needs SHA-512"] += 1
         elif vector.pre_hash is not None and vector.pre_hash not in PRE_HASHES:
             counts["pre-hash function hash-frx does not provide"] += 1
     return dict(counts)
@@ -243,9 +249,12 @@ def group(vectors: list[kat.KatVector]) -> dict[Operation, list[kat.KatVector]]:
 
 def implementation(operation: Operation) -> Signature:
     """The thing that performs `operation` — the scheme, or an adapter over it."""
-    scheme = slh_dsa.sha2(
-        operation.parameter_set, deterministic=bool(operation.deterministic)
+    build = (
+        slh_dsa.shake
+        if operation.parameter_set in slh_dsa.SHAKE_PARAMETER_SETS
+        else slh_dsa.sha2
     )
+    scheme = build(operation.parameter_set, deterministic=bool(operation.deterministic))
     if operation.interface == "internal":
         if operation.pre_hash is not None:
             raise ValueError(f"{operation}: the internal interface has no pre-hash")

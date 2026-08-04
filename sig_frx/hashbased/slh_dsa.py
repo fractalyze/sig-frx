@@ -53,10 +53,15 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 from hash_frx.byte_hash import ByteHash
+from hash_frx.keccak.byte_hashes import Shake256
 from hash_frx.sha256 import Sha256
 
 from sig_frx.hashbased import bytestring, fors, hypertree, tree, wots, xmss
-from sig_frx.hashbased.tweakable import Sha2TweakableHash, TweakableHash
+from sig_frx.hashbased.tweakable import (
+    Sha2TweakableHash,
+    ShakeTweakableHash,
+    TweakableHash,
+)
 from sig_frx.signature import Signature
 
 # The domain separators of §10.2: zero for pure signing, one for pre-hash signing.
@@ -192,6 +197,15 @@ SHA2_PARAMETER_SETS: dict[str, SlhDsaParams] = {
     "SLH-DSA-SHA2-192f": SlhDsaParams(n=24, h=66, d=22, a=8, k=33),
     "SLH-DSA-SHA2-256s": SlhDsaParams(n=32, h=64, d=8, a=14, k=22),
     "SLH-DSA-SHA2-256f": SlhDsaParams(n=32, h=68, d=17, a=9, k=35),
+}
+
+# The SHAKE half of the same rows, derived rather than transcribed a second time.
+# Table 2 gives one row two names and one set of values, so writing the six out
+# again would be six chances for the copies to disagree about a constant the
+# standard states once.
+SHAKE_PARAMETER_SETS: dict[str, SlhDsaParams] = {
+    name.replace("SHA2", "SHAKE"): params
+    for name, params in SHA2_PARAMETER_SETS.items()
 }
 
 
@@ -685,6 +699,26 @@ def sha2(name: str, *, deterministic: bool = False) -> SlhDsa:
         )
     return SlhDsa(
         Sha2TweakableHash(Sha256(), n=params.n, m=params.m),
+        params,
+        deterministic=deterministic,
+    )
+
+
+def shake(name: str, *, deterministic: bool = False) -> SlhDsa:
+    """The `SLH-DSA-SHAKE-*` parameter set called `name`, over hash-frx's SHAKE256.
+
+    All six, unlike `sha2`. §11.1 reaches every function with SHAKE256 at every
+    security category, because an extendable output already produces whatever
+    length the function wants — where §11.2 has to change hash at categories 3
+    and 5 to get one. The category is a parameter here rather than a constraint.
+    """
+    if name not in SHAKE_PARAMETER_SETS:
+        raise ValueError(f"{name!r} is not one of {sorted(SHAKE_PARAMETER_SETS)}")
+    params = SHAKE_PARAMETER_SETS[name]
+    return SlhDsa(
+        # `Shake256` is the callable the family wants: an XOF's constructor takes
+        # the output length, so the two lengths this needs are two instances.
+        ShakeTweakableHash(Shake256, n=params.n, m=params.m),
         params,
         deterministic=deterministic,
     )

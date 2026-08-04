@@ -158,6 +158,7 @@ py_library(
         "//sig_frx:signature",
         "@hash_frx//hash_frx:byte_hash",
         "@hash_frx//hash_frx:sha256",
+        "@hash_frx//hash_frx/keccak",
         requirement("frx"),
         requirement("numpy"),
     ],

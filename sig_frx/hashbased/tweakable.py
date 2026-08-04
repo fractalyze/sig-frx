@@ -34,6 +34,7 @@ path (see `docs/reference/security.md`).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 import frx.numpy as fnp
@@ -284,3 +285,115 @@ class Sha2TweakableHash:
 
     def _digest(self, messages: Array) -> Array:
         return fnp.asarray(self._byte_hash.digest(messages), dtype=fnp.uint8)
+
+
+class ShakeTweakableHash:
+    """The SHAKE instantiation — FIPS 205 §11.1.
+
+    One construction for all six functions, at every security category:
+    SHAKE256 over the concatenated operands, squeezed to the length wanted.
+    Where §11.2 needs MGF1 to reach `m` bytes, HMAC for `PRF_msg`, a zero pad
+    filling a compression block, and a second hash at categories 3 and 5, this
+    needs none of them — an extendable output already produces any length, so
+    the construction *is* the concatenation.
+
+    That is why `slh_dsa.shake` builds all six parameter sets where
+    `slh_dsa.sha2` builds two: there is no second hash to reach for.
+
+    The address is the full 32 bytes rather than §11.2's 22-byte compression,
+    which is what `compressed_address = False` tells a caller.
+    """
+
+    def __init__(self, xof: Callable[[int], ByteHash], *, n: int, m: int) -> None:
+        """`xof` yields a `ByteHash` of the requested output length.
+
+        A `Shake256` class is exactly that callable, and so is its host sibling,
+        which is what keeps this from naming a concrete hash. Two lengths are
+        wanted and they are fixed by the parameter set, so both are built once
+        here rather than per call: an XOF at two lengths is two hashes, not one
+        hash asked twice.
+        """
+        self._chain = xof(n)  # PRF, F, H, T_l, PRF_msg
+        self._message = xof(m)  # H_msg
+        self.n = n
+        self.m = m
+        self.compressed_address = False
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ShakeTweakableHash):
+            return NotImplemented
+        return (self._chain, self._message) == (other._chain, other._message)
+
+    def __hash__(self) -> int:
+        return hash((type(self), self._chain, self._message))
+
+    # -- the tweaked family ------------------------------------------------
+
+    def prf(self, pk_seed: ArrayLike, sk_seed: ArrayLike, adrs: ArrayLike) -> Array:
+        return self._tweak(pk_seed, adrs, sk_seed)
+
+    def f(self, pk_seed: ArrayLike, adrs: ArrayLike, m1: ArrayLike) -> Array:
+        return self._tweak(pk_seed, adrs, m1)
+
+    def h(self, pk_seed: ArrayLike, adrs: ArrayLike, m2: ArrayLike) -> Array:
+        return self._tweak(pk_seed, adrs, m2)
+
+    def t(self, pk_seed: ArrayLike, adrs: ArrayLike, messages: ArrayLike) -> Array:
+        return self._tweak(pk_seed, adrs, messages)
+
+    def prf_msg(
+        self, sk_prf: ArrayLike, opt_rand: ArrayLike, message: ArrayLike
+    ) -> Array:
+        payload = fnp.concatenate(
+            [
+                fnp.asarray(sk_prf, dtype=fnp.uint8),
+                fnp.asarray(opt_rand, dtype=fnp.uint8),
+                fnp.asarray(message, dtype=fnp.uint8),
+            ]
+        )
+        return self._digest(self._chain, payload[None, :])[0]
+
+    def h_msg(
+        self,
+        randomizer: ArrayLike,
+        pk_seed: ArrayLike,
+        pk_root: ArrayLike,
+        message: ArrayLike,
+    ) -> Array:
+        messages = fnp.asarray(message, dtype=fnp.uint8)
+        if messages.ndim == 1:
+            messages = messages[None, :]
+        batch = messages.shape[0]
+        return self._digest(
+            self._message,
+            fnp.concatenate(
+                [
+                    _batched(randomizer, batch),
+                    _batched(pk_seed, batch),
+                    _batched(pk_root, batch),
+                    messages,
+                ],
+                axis=-1,
+            ),
+        )
+
+    # -- the construction the family is built from -------------------------
+
+    def _tweak(self, pk_seed: ArrayLike, adrs: ArrayLike, payload: ArrayLike) -> Array:
+        # The addresses set the batch, as in the SHA-2 family: one hash per
+        # position, with the seed and the payload possibly shared across them.
+        # No truncation — the XOF was asked for exactly `n` bytes.
+        addresses = fnp.asarray(adrs, dtype=fnp.uint8)
+        if addresses.ndim == 1:
+            addresses = addresses[None, :]
+        batch = addresses.shape[0]
+        return self._digest(
+            self._chain,
+            fnp.concatenate(
+                [_batched(pk_seed, batch), addresses, _batched(payload, batch)],
+                axis=-1,
+            ),
+        )
+
+    def _digest(self, byte_hash: ByteHash, messages: Array) -> Array:
+        return fnp.asarray(byte_hash.digest(messages), dtype=fnp.uint8)
