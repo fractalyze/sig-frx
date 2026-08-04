@@ -165,6 +165,26 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# The one property that spans every address-building component: each tweaks with
+# the encoding its family names. The known-answer tests reach it only where they
+# run, and the sets that would reach all of it are `slow_kat`, so this is the fast
+# guard.
+py_test(
+    name = "address_encoding_test",
+    size = "small",
+    srcs = ["address_encoding_test.py"],
+    deps = [
+        "//sig_frx/hashbased:adrs",
+        "//sig_frx/hashbased:fors",
+        "//sig_frx/hashbased:tree",
+        "//sig_frx/hashbased:wots",
+        "//sig_frx/hashbased:xmss",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 py_test(
     name = "fors_test",
     size = "small",

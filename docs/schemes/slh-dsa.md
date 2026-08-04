@@ -15,9 +15,10 @@ encodings are Figures 15 to 17, the domain separators and the context framing ar
 §10.2, and the digest split is Algorithm 19 lines 6 to 10. None of it is
 negotiable: a signature is a byte string that either matches what NIST published
 or does not — and it does, for every operation the standard defines and every
-parameter set §11.2.1's family can build, against ACVP's `keyGen`, `sigGen` and
-`sigVer` sets. The exhaustive run over both sets is tagged `slow_kat`; the merge
-gate gets the same operations at the `f` set.
+parameter set the two families here can build, against ACVP's `keyGen`, `sigGen`
+and `sigVer` sets. That is all six SHAKE sets and SHA-2's category 1 pair. The
+exhaustive run over every one of them is tagged `slow_kat`; the merge gate gets
+the same operations at one `f` set.
 
 Three interfaces, and the seam names one. §10's pure external operation is the
 seam; HashSLH-DSA and §9's internal interface prepend a different message, so they
@@ -36,6 +37,21 @@ What this implementation chooses:
   but hash `H`, `T_l` and `PRF_msg` with SHA-512 (§11.2.2), which makes them a
   family over two hashes and needs a SHA-512 `ByteHash` rather than a constant
   change here.
+- **`shake` builds all six sets where `sha2` builds two.** §11.1 reaches every
+  function with SHAKE256 at every security category, because an extendable output
+  already produces whatever length each one wants — there is no MGF1 to reach `m`
+  bytes, no HMAC, no compression-block padding, and no second hash to change to.
+  An XOF at two lengths is two hashes rather than one asked twice, so the family
+  holds one instance per length its parameter set names.
+- **The address encoding belongs to the family, and every component asks.** The
+  address has two encodings — §11.2's 22-byte `ADRS^c` and §4.2's full 32 — and
+  which one applies is a property of the hash family, published as
+  `TweakableHash.compressed_address`. Components read it rather than deciding,
+  because a component that decides is right for exactly one family. The builders
+  that hold no family take it as a required keyword, so a caller that forgets is a
+  type error rather than a wrong public key. `tree.py`'s Merkle walk never sees
+  it: the walk is shared with RFC 8391, whose addresses are neither encoding, so
+  it takes a builder and the encoding is that builder's parameter.
 - **Loops are reshaped for the compiler, everywhere below this module.** A WOTS+
   chain runs its full length and masks instead of stopping at a digit; a Merkle
   tree iterates where the standard recurses; FORS reduces all `k` trees as one

@@ -36,16 +36,19 @@ class SweepTest(absltest.TestCase):
         return len(vectors)
 
     def test_every_published_key_is_reproduced(self) -> None:
-        self.assertEqual(self._sweep("keyGen"), 20)
+        # 10 cases for each of the eight constructible sets.
+        self.assertEqual(self._sweep("keyGen"), 80)
 
     def test_every_published_signature_is_reproduced(self) -> None:
-        # 7 pure and 7 internal cases per mode, plus the one pre-hash case whose
-        # function hash-frx provides, for each of the two sets.
-        self.assertEqual(self._sweep("sigGen"), 60)
+        # 7 pure and 7 internal cases per mode, plus the one pre-hash case per
+        # mode whose function hash-frx provides: 30 for each of the eight sets.
+        self.assertEqual(self._sweep("sigGen"), 240)
 
     def test_every_published_verdict_is_reproduced(self) -> None:
-        # 14 pure and 14 internal per set, plus the one runnable pre-hash case.
-        self.assertEqual(self._sweep("sigVer"), 58)
+        # 14 pure and 14 internal per set, plus the runnable pre-hash cases —
+        # one per set, except SLH-DSA-SHAKE-256f, for which ACVP publishes two.
+        # So 29 for seven of the eight sets and 30 for that one, not a multiple.
+        self.assertEqual(self._sweep("sigVer"), 233)
 
 
 if __name__ == "__main__":

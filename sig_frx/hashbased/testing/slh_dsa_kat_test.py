@@ -61,15 +61,16 @@ class KeyGenKatTest(absltest.TestCase):
         self.assertContainsSubset(slh_dsa_vectors.CONSTRUCTIBLE_SETS, published)
         self.assertEqual(
             slh_dsa_vectors.excluded_by_reason(self.vectors),
-            {"parameter set needs SHA-512 or SHAKE256": 100},
+            {"parameter set needs SHA-512": 40},
         )
         for name in published - set(slh_dsa_vectors.CONSTRUCTIBLE_SETS):
             with self.subTest(name):
-                if name in slh_dsa.SHA2_PARAMETER_SETS:
-                    with self.assertRaises(NotImplementedError):
-                        slh_dsa.sha2(name)
-                else:
-                    self.assertNotIn(name, slh_dsa.SHA2_PARAMETER_SETS)
+                # All that is left out is SHA-2 at categories 3 and 5, which
+                # §11.2.2 hashes with SHA-512. Each says so rather than quietly
+                # building a family over the wrong hash.
+                self.assertIn(name, slh_dsa.SHA2_PARAMETER_SETS)
+                with self.assertRaises(NotImplementedError):
+                    slh_dsa.sha2(name)
 
     def test_a_seed_the_standard_did_not_publish_gives_another_key(self) -> None:
         # The published cases all pass under a keygen that ignored its seed and

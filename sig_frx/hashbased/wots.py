@@ -246,13 +246,20 @@ def _position_columns(
     )
 
 
-def _chain_addresses(params: WotsParams, position: WotsPosition) -> list[np.ndarray]:
+def _chain_addresses(
+    params: WotsParams, position: WotsPosition, *, compressed: bool
+) -> list[np.ndarray]:
     """Every chain's address at every step, for every key pair.
 
     `w − 1` batches of `position.count · len` addresses, laid out key pair by key
     pair. That layout is what lets an XMSS tree walk all of its WOTS+ keys in one
     call: 2^h' key pairs of `len` chains are one batch, so a tree's leaves cost
     `w − 1` hashes rather than `2^h' · (w − 1)`.
+
+    `compressed` is the parameter set's address encoding, which the callers read
+    off their family as `TweakableHash.compressed_address`. `chain` itself never
+    sees it: the walk takes the addresses already built, which is what lets
+    RFC 8391 hand it a batch of its own.
     """
     layers, trees, key_pairs = _position_columns(position, params.len)
     chains = np.tile(np.arange(params.len), position.count)
@@ -265,7 +272,7 @@ def _chain_addresses(params: WotsParams, position: WotsPosition) -> list[np.ndar
                 chain=chains,
                 hash_index=step,
             ),
-            compressed=True,
+            compressed=compressed,
         )
         for step in range(params.w - 1)
     ]
@@ -291,7 +298,7 @@ def secret_values(
             key_pair=key_pairs,
             chain=np.tile(np.arange(params.len), position.count),
         ),
-        compressed=True,
+        compressed=tweak.compressed_address,
     )
     return tweak.prf(pk_seed, sk_seed, addresses)
 
@@ -317,7 +324,7 @@ def pk_gen(
         secret_values(tweak, params, pk_seed, sk_seed, position),
         fnp.zeros(rows, dtype=fnp.uint32),
         fnp.full(rows, params.w - 1, dtype=fnp.uint32),
-        _chain_addresses(params, position),
+        _chain_addresses(params, position, compressed=tweak.compressed_address),
     )
     return compress(ends.reshape(keys, params.len * params.n))
 
@@ -342,7 +349,7 @@ def sign(
         secret_values(tweak, params, pk_seed, sk_seed, position),
         fnp.zeros(params.len, dtype=fnp.uint32),
         digits,
-        _chain_addresses(params, position),
+        _chain_addresses(params, position, compressed=tweak.compressed_address),
     )
 
 
@@ -374,7 +381,7 @@ def pk_from_sig(
         rows,
         digits,
         (params.w - 1) - digits,
-        _chain_addresses(params, position),
+        _chain_addresses(params, position, compressed=tweak.compressed_address),
     )
     return compress(ends.reshape(keys, params.len * params.n))
 
@@ -389,7 +396,7 @@ def fips205_compression(
     """
     layers, trees, key_pairs = _position_columns(position, 1)
     addresses = adrs.encode_batch(
-        adrs.wots_pk(layers, trees, key_pairs), compressed=True
+        adrs.wots_pk(layers, trees, key_pairs), compressed=tweak.compressed_address
     )
 
     def compress(ends: Array) -> Array:

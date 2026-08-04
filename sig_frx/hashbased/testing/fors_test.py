@@ -92,7 +92,7 @@ class ForestTest(absltest.TestCase):
                 _PK_SEED,
                 fors.leaves(tweak, _PARAMS, _PK_SEED, _SK_SEED, _POSITION),
                 _PARAMS.a,
-                fors._node_addresses(_POSITION),
+                fors._node_addresses(_POSITION, compressed=tweak.compressed_address),
             )
         )
         self.assertEqual(roots.shape, (_PARAMS.k, _N))

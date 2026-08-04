@@ -78,8 +78,12 @@ class ForsPosition:
         return adrs_encoding.rows((self.tree, self.key_pair))
 
 
-def _node_addresses(position: ForsPosition) -> tree.NodeAddresses:
-    """The `FORS_TREE` addresses this forest's nodes tweak with."""
+def _node_addresses(position: ForsPosition, *, compressed: bool) -> tree.NodeAddresses:
+    """The `FORS_TREE` addresses this forest's nodes tweak with.
+
+    `compressed` is the parameter set's address encoding, as in
+    `tree.xmss_node_addresses`.
+    """
 
     def build(height: int, indices: ArrayLike) -> bytestring.ByteString:
         return adrs.encode_batch(
@@ -90,13 +94,15 @@ def _node_addresses(position: ForsPosition) -> tree.NodeAddresses:
                 height=height,
                 index=bytestring.index_column(indices),
             ),
-            compressed=True,
+            compressed=compressed,
         )
 
     return build
 
 
-def _batch_node_addresses(position: ForsPosition, keys: int) -> tree.NodeAddresses:
+def _batch_node_addresses(
+    position: ForsPosition, keys: int, *, compressed: bool
+) -> tree.NodeAddresses:
     """Node addresses for a row batch whose rows sit in *different* FORS keys.
 
     Row `r`'s node is addressed in the forest `position`'s columns name for row
@@ -124,7 +130,7 @@ def _batch_node_addresses(position: ForsPosition, keys: int) -> tree.NodeAddress
                 height=height,
                 index=flat,
             ),
-            compressed=True,
+            compressed=compressed,
         )
 
     return build
@@ -145,7 +151,7 @@ def secret_values(
             key_pair=position.key_pair,
             index=bytestring.index_column(indices),
         ),
-        compressed=True,
+        compressed=tweak.compressed_address,
     )
     return tweak.prf(pk_seed, sk_seed, addresses)
 
@@ -164,7 +170,8 @@ def leaves(
     """
     indices = np.arange(params.leaves)
     secrets = secret_values(tweak, pk_seed, sk_seed, position, indices)
-    return tweak.f(pk_seed, _node_addresses(position)(0, indices), secrets)
+    addresses = _node_addresses(position, compressed=tweak.compressed_address)
+    return tweak.f(pk_seed, addresses(0, indices), secrets)
 
 
 def message_indices(params: ForsParams, digest: ArrayLike) -> bytestring.ByteString:
@@ -207,7 +214,12 @@ def sign(
     indices = message_indices(params, digest)
     forest = leaves(tweak, params, pk_seed, sk_seed, position)
     paths = tree.auth_path(
-        tweak, pk_seed, forest, indices, params.a, _node_addresses(position)
+        tweak,
+        pk_seed,
+        forest,
+        indices,
+        params.a,
+        _node_addresses(position, compressed=tweak.compressed_address),
     )
     secrets = secret_values(tweak, pk_seed, sk_seed, position, indices)
     return fnp.concatenate([secrets[:, None, :], paths], axis=1)
@@ -225,7 +237,7 @@ def public_key(
     """
     addresses = adrs.encode_batch(
         adrs.fors_roots(layer=0, tree=position.tree, key_pair=position.key_pair),
-        compressed=True,
+        compressed=tweak.compressed_address,
     )
     stacked = fnp.asarray(roots, dtype=fnp.uint8).reshape(position.count, -1)
     return tweak.t(pk_seed, addresses, stacked)
@@ -244,7 +256,7 @@ def pk_gen(
         pk_seed,
         leaves(tweak, params, pk_seed, sk_seed, position),
         params.a,
-        _node_addresses(position),
+        _node_addresses(position, compressed=tweak.compressed_address),
     )
     return public_key(tweak, pk_seed, position, roots)[0]
 
@@ -289,7 +301,9 @@ def pk_from_sig(
         tree=adrs_encoding.repeat_rows(position.tree, params.k),
         key_pair=adrs_encoding.repeat_rows(position.key_pair, params.k),
     )
-    node_addresses = _batch_node_addresses(per_tree, rows)
+    node_addresses = _batch_node_addresses(
+        per_tree, rows, compressed=tweak.compressed_address
+    )
     seeds = repeat_per_entry(pk_seed, params.k)
     indices = message_indices(params, md).reshape(-1)
     leaf_nodes = tweak.f(

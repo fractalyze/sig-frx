@@ -71,7 +71,7 @@ def root(
         tweak,
         pk_seed,
         leaves(tweak, params, pk_seed, sk_seed, position, height),
-        tree.xmss_node_addresses(position),
+        tree.xmss_node_addresses(position, compressed=tweak.compressed_address),
     )
 
 
@@ -94,7 +94,7 @@ def sign(
         forest,
         [leaf_index],
         height,
-        tree.xmss_node_addresses(position),
+        tree.xmss_node_addresses(position, compressed=tweak.compressed_address),
     )[0]
     signature = wots.sign(
         tweak,
@@ -107,7 +107,9 @@ def sign(
     return np.concatenate([np.asarray(signature), np.asarray(path)])
 
 
-def node_addresses(position: tree.TreePosition) -> tree.NodeAddresses:
+def node_addresses(
+    position: tree.TreePosition, *, compressed: bool
+) -> tree.NodeAddresses:
     """Node addresses for a batch whose entries sit in *different* trees.
 
     Entry `k`'s node is addressed in the tree `position`'s columns name for row
@@ -115,6 +117,9 @@ def node_addresses(position: tree.TreePosition) -> tree.NodeAddresses:
     `root_from_path`, where a signature walks its own path — and not in a
     whole-tree reduction, where the node count halves each level and the
     correspondence would not hold.
+
+    `compressed` is the parameter set's address encoding, as in
+    `tree.xmss_node_addresses`.
     """
     count = position.count
 
@@ -128,7 +133,7 @@ def node_addresses(position: tree.TreePosition) -> tree.NodeAddresses:
             adrs.hash_tree(
                 layer=position.layer, tree=position.tree, height=height, index=flat
             ),
-            compressed=True,
+            compressed=compressed,
         )
 
     return build
@@ -179,5 +184,5 @@ def pk_from_sig(
         computed,
         indices,
         parts[:, params.len :, :],
-        node_addresses(position),
+        node_addresses(position, compressed=tweak.compressed_address),
     )
