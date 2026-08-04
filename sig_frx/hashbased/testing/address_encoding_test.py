@@ -40,6 +40,12 @@ _HEIGHT = 2
 _PK_SEED = np.frombuffer(bytes(range(_N)), dtype=np.uint8)
 _SK_SEED = np.frombuffer(bytes(range(100, 100 + _N)), dtype=np.uint8)
 
+# Two key pairs of one tree, and one FORS key: what the key-generation and
+# signing paths hold. The verify cases build their own, because a verifier's
+# entries each sit in a tree of their own.
+_WOTS_POSITION = wots.WotsPosition(layer=1, tree=2, key_pair=np.arange(2))
+_FORS_POSITION = fors.ForsPosition(tree=6, key_pair=2)
+
 
 class _Recorder:
     """A `TweakableHash` that records the addresses it is tweaked with.
@@ -101,26 +107,25 @@ class AddressEncodingTest(absltest.TestCase):
     # -- WOTS+ -------------------------------------------------------------
 
     def test_the_wots_secret_values_ask_their_family(self) -> None:
-        position = wots.WotsPosition(layer=1, tree=2, key_pair=np.arange(2))
         self._assert_encoding(
-            lambda tweak: wots.secret_values(tweak, _WOTS, _PK_SEED, _SK_SEED, position)
+            lambda tweak: wots.secret_values(
+                tweak, _WOTS, _PK_SEED, _SK_SEED, _WOTS_POSITION
+            )
         )
 
     def test_the_wots_chains_and_their_compression_ask_their_family(self) -> None:
-        position = wots.WotsPosition(layer=1, tree=2, key_pair=np.arange(2))
         self._assert_encoding(
             lambda tweak: wots.pk_gen(
                 tweak,
                 _WOTS,
                 _PK_SEED,
                 _SK_SEED,
-                position,
-                wots.fips205_compression(tweak, _PK_SEED, position),
+                _WOTS_POSITION,
+                wots.fips205_compression(tweak, _PK_SEED, _WOTS_POSITION),
             )
         )
 
     def test_the_wots_verifier_asks_its_family(self) -> None:
-        position = wots.WotsPosition(layer=1, tree=2, key_pair=np.arange(2))
         signatures = np.zeros((2, _WOTS.len, _N), dtype=np.uint8)
         messages = np.zeros((2, _N), dtype=np.uint8)
         self._assert_encoding(
@@ -130,8 +135,8 @@ class AddressEncodingTest(absltest.TestCase):
                 signatures,
                 messages,
                 _PK_SEED,
-                position,
-                wots.fips205_compression(tweak, _PK_SEED, position),
+                _WOTS_POSITION,
+                wots.fips205_compression(tweak, _PK_SEED, _WOTS_POSITION),
             )
         )
 
@@ -165,16 +170,16 @@ class AddressEncodingTest(absltest.TestCase):
     # -- FORS --------------------------------------------------------------
 
     def test_the_fors_key_generation_asks_its_family(self) -> None:
-        position = fors.ForsPosition(tree=6, key_pair=2)
         self._assert_encoding(
-            lambda tweak: fors.pk_gen(tweak, _FORS, _PK_SEED, _SK_SEED, position)
+            lambda tweak: fors.pk_gen(tweak, _FORS, _PK_SEED, _SK_SEED, _FORS_POSITION)
         )
 
     def test_the_fors_signer_asks_its_family(self) -> None:
-        position = fors.ForsPosition(tree=6, key_pair=2)
         digest = np.frombuffer(bytes([0b10110100, 0b01101110]), dtype=np.uint8)
         self._assert_encoding(
-            lambda tweak: fors.sign(tweak, _FORS, digest, _PK_SEED, _SK_SEED, position)
+            lambda tweak: fors.sign(
+                tweak, _FORS, digest, _PK_SEED, _SK_SEED, _FORS_POSITION
+            )
         )
 
     def test_the_fors_verifier_asks_its_family(self) -> None:
