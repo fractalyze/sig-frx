@@ -21,7 +21,7 @@ _N = 16
 _HEIGHT = 3
 _LEAVES = 1 << _HEIGHT
 _POSITION = tree.TreePosition(layer=2, tree=5)
-_ADDRESSES = tree.xmss_node_addresses(_POSITION)
+_ADDRESSES = tree.xmss_node_addresses(_POSITION, compressed=True)
 _PK_SEED = np.frombuffer(bytes(range(_N)), dtype=np.uint8)
 
 
@@ -86,7 +86,10 @@ class RootTest(absltest.TestCase):
             bytes(
                 np.asarray(
                     tree.root(
-                        tweak, _PK_SEED, leaves, tree.xmss_node_addresses(elsewhere)
+                        tweak,
+                        _PK_SEED,
+                        leaves,
+                        tree.xmss_node_addresses(elsewhere, compressed=True),
                     )
                 )
             ),

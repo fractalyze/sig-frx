@@ -315,7 +315,9 @@ class SignVerifyTest(absltest.TestCase):
             wots.secret_values(self.tweak, _PARAMS, _PK_SEED, _SK_SEED, _POSITION),
             np.zeros(_PARAMS.len, dtype=np.uint32),
             np.full(_PARAMS.len, _PARAMS.w - 1, dtype=np.uint32),
-            wots._chain_addresses(_PARAMS, _POSITION),
+            wots._chain_addresses(
+                _PARAMS, _POSITION, compressed=self.tweak.compressed_address
+            ),
         )
         np.testing.assert_array_equal(
             np.asarray(self.compress(ends.reshape(1, _PARAMS.len * _N)))[0],

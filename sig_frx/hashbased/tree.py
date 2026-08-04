@@ -69,8 +69,16 @@ class TreePosition:
         return adrs_encoding.rows((self.layer, self.tree))
 
 
-def xmss_node_addresses(position: TreePosition) -> NodeAddresses:
-    """The `TREE`-type addresses an XMSS tree's nodes tweak with."""
+def xmss_node_addresses(position: TreePosition, *, compressed: bool) -> NodeAddresses:
+    """The `TREE`-type addresses an XMSS tree's nodes tweak with.
+
+    `compressed` is the parameter set's address encoding — the SHA-2 sets tweak
+    with the 22-byte `ADRS^c` and the SHAKE sets with the full 32 — which a
+    caller reads off its family as `TweakableHash.compressed_address`. It is the
+    builder's parameter rather than the walk's: the walk below is shared with
+    RFC 8391, whose addresses are neither of FIPS 205's two encodings, so it
+    takes a builder and never learns what one encodes.
+    """
 
     def build(height: int, indices: ArrayLike) -> bytestring.ByteString:
         return adrs.encode_batch(
@@ -80,7 +88,7 @@ def xmss_node_addresses(position: TreePosition) -> NodeAddresses:
                 height=height,
                 index=bytestring.index_column(indices),
             ),
-            compressed=True,
+            compressed=compressed,
         )
 
     return build
