@@ -99,6 +99,12 @@ address is packed wherever its fields already live, so the same expression build
 one from host integers and from traced columns. And the digest is left where
 `H_msg` produced it, since the tree and leaf indices are slices of it.
 
+That program costs a compile per `(parameter set, batch size)`, and the sets with
+the taller hypertree cost tens of seconds of it — which the caller verifying one
+signature at a time amortizes over the fewest calls. A persistent FRX compilation
+cache (`FRX_COMPILATION_CACHE_DIR`) makes it payable once across processes rather
+than once per process.
+
 `sign` stays on the host, and the asymmetry is deliberate rather than unfinished: a
 signer holds one signature, where a Python integer carries the tree index at any
 width and never truncates. The two paths meet at the digest split, which is the one

@@ -24,6 +24,10 @@ Three things it measures:
   over every call at that shape, so it is reported beside the warm latency rather
   than folded into it.
 
+That compile is charged per process until a caller sets
+`FRX_COMPILATION_CACHE_DIR`, which makes it reusable across them. Running this
+twice under one cache directory is how to measure what that saves.
+
 The host / hash split is an eager-only measurement. Under a tracer the injected
 hash is called once, to build the program rather than to run it, so what the
 wrapper times is tracing — the split is meaningless there and is not printed.
