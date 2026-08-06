@@ -14,6 +14,11 @@ on:
   # every parameter set runs daily rather than never.
   schedule:
     - cron: "0 17 * * *"
+  # Manual runs, because `setup` computes the test matrix and a re-run replays
+  # the matrix it already produced — so a change to what `setup` reads (the
+  # runner-availability variable) is invisible to `gh run rerun`, and without
+  # this an empty commit is the only way to get a fresh one.
+  workflow_dispatch:
 
 # Cancel in-progress runs for PRs (same head branch), but never cancel pushes
 # to main so that every merge gets a full CI run.
