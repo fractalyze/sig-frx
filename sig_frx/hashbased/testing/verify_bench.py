@@ -24,6 +24,13 @@ Three things it measures:
   over every call at that shape, so it is reported beside the warm latency rather
   than folded into it.
 
+That compile is charged per process only until a caller sets
+`JAX_COMPILATION_CACHE_DIR`, which frx reads: a second process reaching the same
+shape loads the executable rather than building it, for 76% to 87% less compile
+and no change to the warm column. Running this twice under one cache directory is
+both how that was measured and how to measure it again — the numbers and the
+caveats are in `docs/schemes/slh-dsa.md`.
+
 The host / hash split is an eager-only measurement. Under a tracer the injected
 hash is called once, to build the program rather than to run it, so what the
 wrapper times is tracing — the split is meaningless there and is not printed.

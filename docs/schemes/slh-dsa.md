@@ -104,6 +104,48 @@ signer holds one signature, where a Python integer carries the tree index at any
 width and never truncates. The two paths meet at the digest split, which is the one
 place those bytes become a number.
 
+## What the trace costs, and how to pay it once
+
+Tracing buys an order of magnitude at `B = 1` and a compile per
+`(parameter set, batch size)` — which is the trade a caller who verifies one
+signature at a time is least able to make, because that caller amortizes the
+compile over the fewest calls.
+
+It is payable once across processes rather than once per process. FRX reads
+`JAX_COMPILATION_CACHE_DIR` — the fork keeps the name JAX gave it, so the `FRX_`
+spelling a caller would reasonably guess sets nothing, silently — and a second
+process reaching the same shape loads the executable instead of building it:
+
+| Set | `B` | Compile, cold | Compile, warm |
+| --- | --- | ------------- | ------------- |
+| SHA2-128f | 1 | 109.2 s | 21.9 s |
+| SHA2-128f | 64 | 92.4 s | 22.2 s |
+| SHA2-128s | 1 | 34.3 s | 4.4 s |
+| SHA2-128s | 64 | 34.4 s | 4.7 s |
+
+One workstation, CPU, measured by
+[`verify_bench`](../../sig_frx/hashbased/testing/verify_bench.py) run twice under
+one cache directory. Warm latency does not move, because the cache displaces
+compilation and nothing else. What remains warm is tracing and lowering, which
+every process does regardless — the cache is keyed on the HLO they produce, so it
+can only start where they stop.
+
+The cache holds one entry per shape, which is where the claim above becomes
+visible on disk: two parameter sets at two batch sizes leave four entries.
+
+Nothing in this repo wraps that variable, and nothing should. It is a JAX-level
+knob that already works, and a flag here would be a second name for it that only
+this repo's callers know to look for.
+
+On CPU a cache hit logs `Loading XLA:CPU AOT result. Target machine feature
++prefer-no-gather is not supported on the host machine`, warning that execution
+could fail with `SIGILL`. It fires on the machine that wrote the entry:
+`+prefer-no-gather` is a code-generation preference that appears in the compile's
+feature string and never in host detection, so the two cannot match. The known-answer
+tests pass against a warm cache, which is what the warning is worth checking
+against — on the same host it is noise, and across unlike hosts it is the reason
+a cache directory should not be shared between them.
+
 ## What leaks
 
 Read [`../reference/security.md`](../reference/security.md) first: signing carries
