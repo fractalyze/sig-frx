@@ -10,8 +10,9 @@ The second difference is the last word. RFC 8391 randomizes every hash with a ke
 *and* a bitmask, both produced by `PRF(SEED, ADRS)`, so one position needs two or
 three addresses that differ only in a `keyAndMask` counter — a word FIPS 205 has
 no equivalent of. `with_key_and_mask` is that derivation, and it works on the
-encoded bytes because the word is last: the hash family gets one address and
-rewrites four bytes rather than re-encoding.
+encoded bytes: the hash family gets one address and rewrites four bytes rather
+than re-encoding. `with_third_word` is the same move one word earlier, for a
+WOTS+ chain that advances the hash address and holds everything before it.
 
 **Nothing here normalizes, and that is deliberate.** §2.5 says of the address
 setters:
@@ -65,8 +66,10 @@ _SLOTS: tuple[adrs_encoding.Slot, ...] = (
     ("keyAndMask", WORD_BYTES),
 )
 
-# Where `with_key_and_mask` rewrites, which is the last word by construction.
-_KEY_AND_MASK_OFFSET = ADRS_SIZE - WORD_BYTES
+# Which slot each rewritable word is. The tree spans two words, so these are not
+# §2.5's word numbers.
+_THIRD_WORD = 5
+_KEY_AND_MASK = 6
 
 
 class AdrsType(enum.IntEnum):
@@ -174,15 +177,21 @@ def with_key_and_mask(encoded: np.ndarray, value: int) -> np.ndarray:
 
     §5.1 derives a hash's key and its bitmask from the same position, separated
     only by this word: `F` needs values 0 and 1, and `H` needs 0, 1 and 2 because
-    its bitmask is twice as long. The word is last, so this rewrites four bytes of
-    an address a caller already encoded rather than making it build two or three.
+    its bitmask is twice as long. So this rewrites four bytes of an address a
+    caller already encoded rather than making it build two or three.
     """
-    if encoded.shape[-1] != ADRS_SIZE:
-        raise ValueError(
-            f"an encoded address is {ADRS_SIZE} bytes, got {encoded.shape[-1]}"
-        )
-    out = np.array(encoded, dtype=np.uint8)
-    out[..., _KEY_AND_MASK_OFFSET:] = np.frombuffer(
-        adrs_encoding.encode((value,), (("keyAndMask", WORD_BYTES),)), dtype=np.uint8
-    )
-    return out
+    return adrs_encoding.with_field(encoded, _SLOTS, _KEY_AND_MASK, value)
+
+
+def with_third_word(encoded: np.ndarray, value: int) -> np.ndarray:
+    """The same encoded addresses with their third word replaced.
+
+    A WOTS+ chain is what asks for it: §3.1.2 advances the hash address a step at a
+    time and holds the layer, tree, type, OTS address and chain address across the
+    whole walk, so its `w − 1` addresses are one batch encoded and `w − 1` words
+    written into it rather than `w − 1` encodes of fields that never move.
+
+    Named for the slot rather than for what it holds, the way `Adrs.trailing` is:
+    the word is a hash address under `OTS` and a tree index under `LTREE`.
+    """
+    return adrs_encoding.with_field(encoded, _SLOTS, _THIRD_WORD, value)

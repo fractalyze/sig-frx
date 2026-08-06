@@ -227,6 +227,17 @@ class ChainTest(absltest.TestCase):
                 f"chain {index}",
             )
 
+    def test_the_step_addresses_are_the_address_of_each_step(self) -> None:
+        # `_chain_addresses` encodes the chain once and writes each step's hash
+        # address into it, where the loop above encodes every step. The two have to
+        # agree byte for byte: a step tweaking with anything else walks a chain no
+        # verifier can follow, and does so self-consistently.
+        got = wots._chain_addresses(_PARAMS, _POSITION, compressed=True)
+        expected = self._step_addresses(_PARAMS.len)
+        self.assertLen(got, len(expected))
+        for step, (addresses, reference) in enumerate(zip(got, expected)):
+            np.testing.assert_array_equal(addresses, reference, f"step {step}")
+
     def test_zero_steps_leaves_the_value_alone(self) -> None:
         values = np.arange(2 * _N, dtype=np.uint8).reshape(2, _N)
         got = np.asarray(

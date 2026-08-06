@@ -76,14 +76,13 @@ def _chain_addresses(
 
     `w − 1` batches of `len(positions) · len` addresses. §3.1.2 advances the hash
     address with the step and holds the chain address across it, so the addresses
-    differ per step and not just per chain.
+    differ per step and not just per chain — and differ in that word alone, which
+    is why the batch is encoded once and each step writes its own into it.
     """
     layers, trees, types, ots = _leading_columns(positions, params.len)
     chains = np.tile(np.arange(params.len), len(positions))
-    return [
-        rfc8391_adrs.encode_batch(Adrs(layers, trees, types, (ots, chains, step)))
-        for step in range(params.w - 1)
-    ]
+    encoded = rfc8391_adrs.encode_batch(Adrs(layers, trees, types, (ots, chains, 0)))
+    return [rfc8391_adrs.with_third_word(encoded, step) for step in range(params.w - 1)]
 
 
 def secret_values(

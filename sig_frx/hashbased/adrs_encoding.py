@@ -16,6 +16,13 @@ arithmetic, and is what every component actually calls — a single verification
 addresses hundreds of thousands of positions, so an address has to cost no Python
 of its own.
 
+`with_field` is the one thing done to a batch after it is encoded, and it is there
+because a component often addresses a run of positions that differ in one field —
+a WOTS+ chain's `w − 1` steps differ in the hash address alone. Splicing that
+field's bytes into a batch already built is what keeps the run from costing an
+encode per position, and it produces the same bytes as encoding each of them,
+which is what its test pins.
+
 `rows` is that batch rule made available to the components above, which carry
 their own positions as columns and have to agree with the encoding about what a
 batch is before they build one.
@@ -161,6 +168,45 @@ def encode_batch(
     widths = tuple(block.shape[1] for block in blocks)
     source = xnp.concatenate([*blocks, xnp.zeros((count, 1), dtype=xnp.uint8)], axis=-1)
     return source[:, _byte_plan(slots, widths)]
+
+
+def with_field(
+    encoded: np.ndarray | Array, slots: tuple[Slot, ...], field: int, value: int
+) -> np.ndarray | Array:
+    """The same encoded addresses with one field replaced, in every row at once.
+
+    What a caller addressing a run of positions that differ in a single field
+    needs. A WOTS+ chain step advances the hash address and holds the layer, tree,
+    key pair, chain and type across the whole walk, and RFC 8391's key and bitmask
+    are one position under a counter — so both build one batch and vary a word of
+    it, where encoding each position separately rebuilds every field it shares with
+    the last one.
+
+    The field takes **one value for the whole batch**, which is what makes this
+    cheaper than an encode rather than another form of it: the bytes are `encode`'s,
+    written on the host, so a field too wide for its slot raises here for the same
+    reason it does there, and splicing them in costs the same handful of array
+    operations whatever the batch is.
+
+    Host in, host out, and traced in, traced out — the same rule `encode_batch`
+    follows, since this is a caller's next step after it.
+    """
+    width = size(slots)
+    shape = np.shape(encoded)
+    if shape[-1] != width:
+        raise ValueError(f"an encoded address is {width} bytes, got {shape[-1]}")
+    xnp = bytestring.namespace(encoded)
+    start = size(slots[:field])
+    _, slot_width = slots[field]
+    replacement = xnp.broadcast_to(
+        xnp.asarray(np.frombuffer(encode((value,), (slots[field],)), dtype=np.uint8)),
+        (*shape[:-1], slot_width),
+    )
+    # A field at either end of the layout leaves no bytes on that side, and an
+    # empty piece is dropped rather than concatenated: this runs once per step of
+    # every chain, so the operation it would cost is one per step.
+    pieces = [encoded[..., :start], replacement, encoded[..., start + slot_width :]]
+    return xnp.concatenate([piece for piece in pieces if piece.shape[-1]], axis=-1)
 
 
 def _field_bytes(

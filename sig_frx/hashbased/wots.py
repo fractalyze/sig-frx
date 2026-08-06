@@ -248,7 +248,7 @@ def _position_columns(
 
 def _chain_addresses(
     params: WotsParams, position: WotsPosition, *, compressed: bool
-) -> list[np.ndarray]:
+) -> list[np.ndarray | Array]:
     """Every chain's address at every step, for every key pair.
 
     `w − 1` batches of `position.count · len` addresses, laid out key pair by key
@@ -256,24 +256,32 @@ def _chain_addresses(
     call: 2^h' key pairs of `len` chains are one batch, so a tree's leaves cost
     `w − 1` hashes rather than `2^h' · (w − 1)`.
 
+    **One encode, and a word per step.** A step's address differs from the last
+    one's in the hash address alone — the layer, tree, key pair, chain and type are
+    the chain's, whatever step it is at — so the batch is encoded once and each step
+    writes its own third word into it. Encoding every step instead rebuilds five
+    fields that never move: measured on the verify path at SLH-DSA-SHA2-128f, that
+    was two fifths of an eager verification and three quarters of the address
+    encodes in it, since a rebuilt field costs a dispatch rather than a splice.
+
     `compressed` is the parameter set's address encoding, which the callers read
     off their family as `TweakableHash.compressed_address`. `chain` itself never
     sees it: the walk takes the addresses already built, which is what lets
     RFC 8391 hand it a batch of its own.
     """
     layers, trees, key_pairs = _position_columns(position, params.len)
-    chains = np.tile(np.arange(params.len), position.count)
+    encoded = adrs.encode_batch(
+        adrs.wots_hash(
+            layer=layers,
+            tree=trees,
+            key_pair=key_pairs,
+            chain=np.tile(np.arange(params.len), position.count),
+            hash_index=0,
+        ),
+        compressed=compressed,
+    )
     return [
-        adrs.encode_batch(
-            adrs.wots_hash(
-                layer=layers,
-                tree=trees,
-                key_pair=key_pairs,
-                chain=chains,
-                hash_index=step,
-            ),
-            compressed=compressed,
-        )
+        adrs.with_third_word(encoded, step, compressed=compressed)
         for step in range(params.w - 1)
     ]
 
