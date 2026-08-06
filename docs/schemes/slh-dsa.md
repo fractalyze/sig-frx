@@ -111,10 +111,9 @@ Tracing buys an order of magnitude at `B = 1` and a compile per
 signature at a time is least able to make, because that caller amortizes the
 compile over the fewest calls.
 
-It is payable once across processes rather than once per process. FRX reads
-`JAX_COMPILATION_CACHE_DIR` — the fork keeps the name JAX gave it, so the `FRX_`
-spelling a caller would reasonably guess sets nothing, silently — and a second
-process reaching the same shape loads the executable instead of building it:
+It is payable once across processes rather than once per process. Set
+`FRX_COMPILATION_CACHE_DIR`, and a second process reaching the same shape loads
+the executable instead of building it:
 
 | Set | `B` | Compile, cold | Compile, warm |
 | --- | --- | ------------- | ------------- |
@@ -133,9 +132,14 @@ can only start where they stop.
 The cache holds one entry per shape, which is where the claim above becomes
 visible on disk: two parameter sets at two batch sizes leave four entries.
 
-Nothing in this repo wraps that variable, and nothing should. It is a JAX-level
-knob that already works, and a flag here would be a second name for it that only
-this repo's callers know to look for.
+`JAX_COMPILATION_CACHE_DIR` sets the same thing and wins if both are set: FRX
+mirrors every `FRX_*` variable onto the `JAX_*` name its upstream reads, rather
+than enumerating the ones it knows about. Either spelling works, and the numbers
+above were taken under the second.
+
+Nothing in this repo wraps that variable, and nothing should. It is a knob that
+already works at the FRX level, and a flag here would be a second name for it
+that only this repo's callers know to look for.
 
 On CPU a cache hit logs `Loading XLA:CPU AOT result. Target machine feature
 +prefer-no-gather is not supported on the host machine`, warning that execution
