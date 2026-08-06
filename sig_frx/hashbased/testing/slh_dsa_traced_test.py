@@ -47,7 +47,7 @@ def _seed(size: int) -> np.ndarray:
 
 
 def _mixed_batch(
-    public_key: np.ndarray, signature: np.ndarray
+    public_key: np.ndarray, signature: np.ndarray, count: int = 4
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """A batch of alternating verdicts — keys, messages, signatures.
 
@@ -57,38 +57,54 @@ def _mixed_batch(
     two passing ones and each passing entry between two failing ones, so accepting
     a bad entry and losing a good one are both visible, whichever way a verdict
     would smear along the batch.
+
+    Four is the smallest count that holds both of those, which is why it is the
+    default; shorter batches are for the sizes themselves rather than the smear.
     """
     tampered = signature.copy()
     tampered[-1] ^= 1
     return (
-        np.stack([public_key] * 4),
-        np.stack([_MESSAGE] * 4),
-        np.stack([signature, tampered, signature, tampered]),
+        np.stack([public_key] * count),
+        np.stack([_MESSAGE] * count),
+        np.stack([signature if i % 2 == 0 else tampered for i in range(count)]),
     )
 
 
 class TracedVerifyTest(absltest.TestCase):
-    def _assert_traces_to_the_eager_verdicts(self, scheme: slh_dsa.SlhDsa) -> None:
+    def _assert_traces_to_the_eager_verdicts(
+        self, scheme: slh_dsa.SlhDsa, count: int = 4
+    ) -> None:
         public_key, secret_key = (
             np.asarray(part) for part in scheme.keygen(_seed(scheme.params.seed_size))
         )
-        batch = _mixed_batch(public_key, np.asarray(scheme.sign(secret_key, _MESSAGE)))
+        batch = _mixed_batch(
+            public_key, np.asarray(scheme.sign(secret_key, _MESSAGE)), count
+        )
 
         traced = np.asarray(frx.jit(scheme.verify)(*batch))
 
         np.testing.assert_array_equal(traced, np.asarray(scheme.verify(*batch)))
         self.assertEqual(
-            [bool(verdict) for verdict in traced], [True, False, True, False]
+            [bool(verdict) for verdict in traced], [i % 2 == 0 for i in range(count)]
         )
 
-    def test_a_small_set_traces_to_the_eager_verdicts(self) -> None:
-        self._assert_traces_to_the_eager_verdicts(
-            slh_dsa.SlhDsa(
-                Sha2TweakableHash(Sha256(), n=_SMALL.n, m=_SMALL.m),
-                _SMALL,
-                deterministic=True,
-            )
+    def test_a_small_set_traces_to_the_eager_verdicts_at_every_batch_size(self) -> None:
+        """Every size up to the default, because a compiled size covers only itself.
+
+        The seam takes the batch size from its caller, and nothing in FIPS 205 makes
+        one size different from another — but the backend compiler is free to fail on
+        a single leading dimension, and it can do so by aborting the process rather
+        than raising, which no assertion here would survive to report. The small set
+        is what makes holding several sizes cheap; the real sets below trace one.
+        """
+        scheme = slh_dsa.SlhDsa(
+            Sha2TweakableHash(Sha256(), n=_SMALL.n, m=_SMALL.m),
+            _SMALL,
+            deterministic=True,
         )
+        for count in (1, 2, 3, 4):
+            with self.subTest(batch=count):
+                self._assert_traces_to_the_eager_verdicts(scheme, count)
 
     def test_each_category_1_set_traces_to_the_eager_verdicts(self) -> None:
         for name in _CATEGORY_1:
