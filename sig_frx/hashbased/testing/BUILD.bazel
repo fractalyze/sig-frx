@@ -287,9 +287,6 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
-# Every constructible parameter set against every published vector. Tagged
-# `slow_kat`, so .bazelrc.ci drops it from a PR run and the scheduled job puts it
-# back: it is the standards-exactness gate, and it is too slow to sit in review.
 # Verification under a tracer. Its own target because the cost is compilation
 # rather than hashing: the category 1 sets unroll the whole `d`-layer walk, which
 # would be most of `slh_dsa_test`'s runtime and none of what its assembly cases
@@ -314,13 +311,26 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# Every constructible parameter set against every published vector. Tagged
+# `slow_kat`, so .bazelrc.ci drops it from a PR run and the scheduled job puts it
+# back: it is the standards-exactness gate, and it is too slow to sit in review.
+#
+# Sharded rather than given a bigger budget, because no budget holds the whole
+# sweep for long: it is ~20 minutes on a dev workstation, and this package
+# measures 2.1-2.7x slower on the CI executor, so an undivided run spends most of
+# `enormous`'s hour with four more parameter sets still to become constructible.
+# The test cuts at the published operation, the longest of which is ~90 s of those
+# 20 minutes, so sixteen shards each sit well inside `large` and a parameter set
+# arriving adds cases rather than minutes to one budget.
 py_test(
     name = "slh_dsa_sweep_test",
     size = "large",
     srcs = ["slh_dsa_sweep_test.py"],
+    shard_count = 16,
     tags = ["slow_kat"],
     deps = [
         ":slh_dsa_vectors",
+        "//sig_frx/testing:kat",
         requirement("absl_py"),
     ] + GPU_PLUGIN_DEPS,
 )
