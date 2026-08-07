@@ -164,6 +164,30 @@ class KeyAndMaskTest(absltest.TestCase):
             a.with_key_and_mask(np.zeros((1, 22), dtype=np.uint8), 0)
 
 
+class ThirdWordTest(absltest.TestCase):
+    """The word a WOTS+ chain advances, against encoding the address that holds it."""
+
+    def _chain(self, hash_index: int) -> np.ndarray:
+        return np.asarray(a.encode_batch(a.ots(1, 2, 3, np.arange(4), hash_index)))
+
+    def test_it_agrees_with_encoding_the_step(self) -> None:
+        for step in (0, 1, 14):
+            with self.subTest(step=step):
+                np.testing.assert_array_equal(
+                    a.with_third_word(self._chain(0), step), self._chain(step)
+                )
+
+    def test_it_leaves_keyandmask_and_everything_before_it_alone(self) -> None:
+        # The word is in the middle of this layout, unlike FIPS 205's: the hash
+        # family sets `keyAndMask` on the address the chain hands it, so a
+        # replacement that ran past its own word would undo that.
+        encoded = a.with_key_and_mask(self._chain(0), 2)
+        rewritten = a.with_third_word(encoded, 6)
+        np.testing.assert_array_equal(rewritten[:, :24], encoded[:, :24])
+        np.testing.assert_array_equal(rewritten[:, 28:], encoded[:, 28:])
+        self.assertEqual(int.from_bytes(bytes(rewritten[0, 24:28]), "big"), 6)
+
+
 class BatchTest(absltest.TestCase):
     """The batched encoding against the per-address one, word by word.
 

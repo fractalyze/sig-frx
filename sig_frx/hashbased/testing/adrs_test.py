@@ -350,6 +350,91 @@ class TracedTest(absltest.TestCase):
         )
 
 
+class ThirdWordTest(absltest.TestCase):
+    """Replacing the word against encoding the address that holds it.
+
+    `encode_batch` is the reference here, since `BatchTest` above is what ties that
+    to §4.2: a WOTS+ chain walks `w − 1` steps off one encoded batch, and every one
+    of them has to tweak with the bytes the standard names for its step.
+    """
+
+    def _chain(self, hash_index: int, *, compressed: bool) -> np.ndarray:
+        return np.asarray(
+            a.encode_batch(
+                a.wots_hash(
+                    layer=1,
+                    tree=9,
+                    key_pair=np.arange(4),
+                    chain=np.arange(4) * 3 + 2,
+                    hash_index=hash_index,
+                ),
+                compressed=compressed,
+            )
+        )
+
+    def test_it_agrees_with_encoding_the_step(self) -> None:
+        for compressed in (False, True):
+            for step in (0, 1, 14):
+                with self.subTest(compressed=compressed, step=step):
+                    np.testing.assert_array_equal(
+                        a.with_third_word(
+                            self._chain(0, compressed=compressed),
+                            step,
+                            compressed=compressed,
+                        ),
+                        self._chain(step, compressed=compressed),
+                    )
+
+    def test_it_rewrites_only_the_word(self) -> None:
+        encoded = self._chain(0, compressed=True)
+        rewritten = a.with_third_word(encoded, 5, compressed=True)
+        np.testing.assert_array_equal(rewritten[:, :-4], encoded[:, :-4])
+        self.assertEqual(int.from_bytes(bytes(rewritten[0, -4:]), "big"), 5)
+
+    def test_it_leaves_the_callers_addresses_alone(self) -> None:
+        # The caller keeps its batch across the whole walk, so a step that wrote
+        # into it would give every later step its own hash address.
+        encoded = self._chain(0, compressed=True)
+        before = bytes(encoded[0])
+        a.with_third_word(encoded, 3, compressed=True)
+        self.assertEqual(bytes(encoded[0]), before)
+
+    def test_a_traced_batch_gives_the_host_bytes(self) -> None:
+        # Where the walk actually runs: the addresses are traced values on the
+        # verification path, so the replacement has to happen there too.
+        key_pair = np.arange(4, dtype=np.uint32)
+
+        def build(pairs):  # type: ignore[no-untyped-def]
+            return a.with_third_word(
+                a.encode_batch(
+                    a.wots_hash(
+                        layer=1,
+                        tree=9,
+                        key_pair=pairs,
+                        chain=np.arange(4) * 3 + 2,
+                        hash_index=0,
+                    ),
+                    compressed=True,
+                ),
+                7,
+                compressed=True,
+            )
+
+        np.testing.assert_array_equal(
+            np.asarray(frx.jit(build)(key_pair)), self._chain(7, compressed=True)
+        )
+
+    def test_a_wrongly_sized_address_is_an_error(self) -> None:
+        # The two encodings are the same fields in different slots, so a batch in
+        # the other one would take the word at the wrong offset.
+        with self.assertRaisesRegex(ValueError, "22 bytes"):
+            a.with_third_word(self._chain(0, compressed=False), 0, compressed=True)
+
+    def test_a_word_too_wide_for_its_slot_is_an_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not fit"):
+            a.with_third_word(self._chain(0, compressed=True), 1 << 32, compressed=True)
+
+
 class BroadcastRuleTest(absltest.TestCase):
     """`rows` is what a component asks before it lays out a batch."""
 

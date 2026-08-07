@@ -194,3 +194,23 @@ def encode_batch(adrs: Adrs, *, compressed: bool) -> np.ndarray | Array:
     return adrs_encoding.encode_batch(
         _fields(adrs), _slot_widths(compressed=compressed)
     )
+
+
+def with_third_word(
+    encoded: np.ndarray | Array, value: int, *, compressed: bool
+) -> np.ndarray | Array:
+    """The same encoded addresses with their third word replaced.
+
+    A WOTS+ chain is what asks for it: §5's `chain` advances the hash address a step
+    at a time and holds the layer, tree, key pair, chain and type across the whole
+    walk, so its `w − 1` addresses are one batch encoded and `w − 1` words written
+    into it. The result is what `encode_batch` produces for the same address, which
+    is what `adrs_test` pins — the walk tweaks with what the standard says it does.
+
+    Named for the slot rather than for what it holds, the way `Adrs.trailing` is:
+    the word is a hash address under `WOTS_HASH` and a tree index under `TREE`, and
+    a name from one of those would be a lie in the other. §4.2 lays it last, so the
+    replacement rewrites the tail of an address rather than the middle of one.
+    """
+    slots = _slot_widths(compressed=compressed)
+    return adrs_encoding.with_field(encoded, slots, len(slots) - 1, value)
