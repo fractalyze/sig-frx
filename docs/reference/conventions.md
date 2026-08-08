@@ -28,37 +28,61 @@ sampled in fixed-size blocks with a mask, or it runs on the host. Which one a
 scheme picks is a decision its page records, along with the timing consequence
 ([`security.md`](security.md)).
 
-## The lattice NTT is per-repo, and the shape is the shared part
+## The lattice NTT is hand-written per-repo, and the shape is the shared part
 
 ML-DSA's NTT lives here; ML-KEM's lives in
-[`enc-frx`](https://github.com/fractalyze/enc-frx). They are deliberately not
-shared, and the reason is not that sharing would be hard — it is that the two
-transforms disagree about the things a shared implementation would have to hold
-fixed.
+[`enc-frx`](https://github.com/fractalyze/enc-frx). Both are hand-written, and
+both duplicate a primitive this stack already ships — so the reason has to be
+stated precisely, because it is not the one the two schemes' parameters suggest.
+
+**Both schemes want the same transform, and `frx.lax.ntt` is it.** They multiply
+in the negacyclic ring `Z_q[X]/(X^n + 1)`, which is the op's `NEGACYCLIC_NTT`
+mode. They are not even different lengths in any deep sense: the 2-adicity of
+`q − 1` is 13 for ML-DSA and 8 for ML-KEM, and a length-`n` negacyclic transform
+needs a primitive `2n`-th root — so ML-DSA gets length 256 directly, and ML-KEM
+gets length 128 applied to the even and odd coefficient halves, which is exactly
+what FIPS 203's "incomplete" NTT and its degree-1 base case `mod (X² − ζ)`
+describe. Reframing, not a different algorithm.
+
+**What blocks the op is kernel dispatch, not the transform.** It resolves its
+kernels by *curated field family* — matching a runtime field against a
+compile-time list — and neither 8380417 nor 3329 is a curated family. A field
+minted from a modulus is reachable everywhere else in the frontend: it round-trips
+through `device_put`, it lowers with its algebra, and elementwise arithmetic on it
+is exact. The NTT is one of the few ops implemented as a hand-written templated
+library rather than emitted code, and that is the whole reason it is the one that
+refuses. So the duplication here is a workaround with a known expiry, not a design
+preference — say so, or the next reader assumes it was chosen.
+
+**The modulus widths are not the reason, and they look enough like it to be worth
+disarming.** A shared implementation is not blocked by 8380417 being 23-bit and
+3329 being 12-bit: a field dtype reduces internally, so `(q − 1)² mod q` is exact
+for both and no residue ever occupies a raw integer lane. The lane ceiling binds
+*hand-written* arithmetic over integer lanes and nothing else, so it cannot decide
+whether two schemes may share code.
+
+Where it does bind is one level down, inside the hand-written arithmetic it forces:
 
 | | ML-DSA (FIPS 204) | ML-KEM (FIPS 203) |
 | --- | --- | --- |
 | modulus | 8380417 (23-bit) | 3329 (12-bit) |
-| depth | 8 layers, complete | 7 layers, **incomplete** |
-| base case | pointwise | degree-1 products mod `X² − ζ` |
-| worst-case product | 2^46 — **exceeds a lane** | 2^24 — fits |
+| worst-case product of two residues | 2^46 | 2^24 |
+| in a 32-bit lane | **truncates** | exact |
+| representation this forces | 16-bit limbs | native |
 
-The last row decides it, and it is the repo's first non-negotiable applied to
-arithmetic: an integer array lane is 32 bits. A product of two ML-DSA residues is
-about 7·10^13, which a lane neither holds nor complains about — it returns a wrong
-number. ML-KEM's worst case is 11075584 and computes exactly. So ML-DSA needs a
-split representation that ML-KEM does not, and an NTT "parameterized over the
-modulus" would be parameterizing the representation of a field element rather than
-a constant.
+ML-DSA's Montgomery reduction needs the high half of that product, and there is no
+widening multiply in the frontend and no 64-bit lane to hold it (the repo's first
+non-negotiable, and note it truncates *silently* when the value arrives already
+64-bit rather than with the dtype named). So the limbs are 16-bit because a product
+of two of them must fit a lane — forced, not tuned. ML-KEM needs none of this. The
+two files genuinely differ there, which is worth recording on both sides so the
+second implementer does not read the limb split as gratuitous.
 
-The depth difference says the same thing about the algorithm rather than the
-arithmetic: ML-KEM stops one layer early and its base case multiplies degree-1
-polynomials, so that step is different code, not a different constant.
-
-What is genuinely common is the layer-walk skeleton — a few dozen lines, which is
-not enough to carry a cross-repo pin. `hash-frx` is the wrong home for it in any
-case, being the *symmetric* layer: a lattice NTT is not a hash and does not belong
-there merely because both repos already depend on it.
+Sharing the hand-written version across repos is separately not worth it: what is
+common is the layer-walk skeleton, a few dozen lines, which does not carry a
+cross-repo pin. `hash-frx` is the wrong home for it in any case, being the
+*symmetric* layer — a lattice NTT is not a hash and does not belong there merely
+because both repos already depend on it.
 
 So each repo implements its own, and the convention is that the two **look
 alike**: same module layout, the same names (`ntt`, `intt`, `base_mul`,
@@ -67,8 +91,12 @@ avoided is not duplicated lines — it is two implementations that look unrelate
 so a bug fixed in one is never looked for in the other. Whoever writes the second
 should be able to read the first.
 
-Revisit when a third lattice scheme appears. Two implementations are not evidence
-for an abstraction; three usually are.
+Two triggers to revisit, and the first is the real one: when `frx.lax.ntt`
+dispatches on a field minted from a modulus, both schemes collapse to one call and
+these implementations should be deleted rather than maintained — keeping the shape
+convention is what makes that a small change. Failing that, a third lattice scheme
+is the usual signal; two implementations are not evidence for an abstraction,
+three usually are.
 
 ## Keys and signatures are bytes at the seam
 
