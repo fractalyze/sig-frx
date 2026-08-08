@@ -23,7 +23,9 @@ this file is the map plus the rules every change must respect.
   the standards call it anyway (`toInt`/`toByte` pairs): see
   [`bytestring.py`](sig_frx/hashbased/bytestring.py). Host code hides this,
   because Python integers have no width — so a value that only ever lived on the
-  host is exactly where this bites when it is first traced.
+  host is exactly where this bites when it is first traced. The operational rule
+  that keeps a value out of the wrong lane is
+  [a value is used in the namespace it arrives in](docs/reference/conventions.md#a-value-is-used-in-the-namespace-it-arrives-in).
 - **Standards-exact, or it is not done.** Every scheme reproduces its
   specification byte for byte, gated on the published known-answer tests. A
   scheme that verifies its own signatures has demonstrated nothing — a
