@@ -20,6 +20,42 @@ This is the rule the `Signature` seam exists to enforce
 a slow path. Batch `keygen` and `sign` with `frx.vmap` when a caller needs it;
 they are not the hot path and do not get their own entry points.
 
+There is one implementation of verification and it is the traceable one. Eager is
+that same code run without `jit`, not a second path: a host-only verifier beside
+it buys a caller who never compiles about a third at `B = 64`, and a caller who
+does compile nothing at all — the traced path already beats eager at every batch
+size measured. What it costs is two verifiers that have to agree byte for byte,
+which is the divergence the known-answer gate is least able to catch: it is
+self-consistent on both sides and survives every round trip, so only the
+published vectors find it, and only if both paths are driven through them. The
+caller who cannot amortize a compile is answered by a persistent compilation
+cache, not by a second verifier.
+
+## A value is used in the namespace it arrives in
+
+Host values stay on numpy, traced values stay on frx, and a function does not
+decide for its caller. `namespace` in
+[`bytestring.py`](../../sig_frx/hashbased/bytestring.py) is that rule as code —
+it reads the namespace off the arguments instead of naming one — and
+`index_column` is the same question asked of the values that most invite a
+conversion, tree and leaf indices. Every boundary between key generation, signing
+and verification is one of its call sites.
+
+It is a rule rather than a preference because of what a lift costs. Key
+generation and signing are concrete on the host, where a Python integer has no
+width; verification is traced, where an integer array lane is 32 bits
+([`../../CLAUDE.md`](../../CLAUDE.md)). A callee that lifts its argument onto the
+device for its caller's convenience therefore drags a signing path onto a lane it
+was never on, and the hypertree's tree index — the value carried as bytes
+precisely because it does not fit one — arrives there with it. The failure lands
+in the caller, at a value the callee never saw.
+
+The opposite conversion announces itself: `np.asarray` on a traced value raises
+under `jit`, and it costs a signing path nothing because there is no tracer
+there. The lift onto the device is the one that needs a rule, because it succeeds
+everywhere except on the path that cannot afford it — and pays a dispatch per
+operation to batch a signature with itself even where it works.
+
 ## A rejection loop is not a `while` on secret data
 
 "Sample until the candidate is in range" — ML-DSA's signing loop, Falcon's
@@ -110,6 +146,26 @@ absent.
 The corollary is that refactoring a module days or hours old is normal here. The
 question is whether a real second caller is forcing the shape, not how recent the
 first version is.
+
+## A seam field ships with the call site that reads it
+
+Declaring a field on a Protocol and reading it nowhere does not create a seam. It
+creates a comment with a type, and nothing can notice: the one implementation
+returns exactly what every call site hardcodes, so each site is correct, the
+tests pass, and the docstring describes an indirection that is not wired. What
+finds it is a second implementation, and what it produces then is wrong output
+rather than an error — a key built against an encoding the family does not use.
+
+`TweakableHash.compressed_address`
+([`tweakable.py`](../../sig_frx/hashbased/tweakable.py)) is where this comes
+from. The SHA-2 sets compress an address to 22 bytes and the SHAKE sets keep the
+full 32; the field said so from the start, and every caller passed `compressed`
+by hand regardless until the SHAKE sets made the two disagree.
+
+So a field arrives with the call site that reads it, or it stays a comment and
+the value is hardcoded honestly until a second implementation forces the seam —
+which is the rule above, seen from the side of the code that would have consumed
+it.
 
 ## Known-answer tests are the gate
 
