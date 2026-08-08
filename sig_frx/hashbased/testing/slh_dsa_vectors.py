@@ -20,13 +20,22 @@ filter somewhere:
 
 `excluded_by_reason` reports what those two leave out, so a test asserts the size
 of its own coverage gap instead of silently shrinking.
+
+`operations` is the third such statement and the one a caller checks the files
+against: which operations each mode publishes, as the product of the interfaces
+it reaches and the signing modes it distinguishes. It is the constructive inverse
+of `group` — what the vectors should hold, against what they do — and it lives
+here rather than in one test because both the merge gate and the sweep ask, and a
+copy each is how the two come to disagree about what is runnable.
 """
 
 from __future__ import annotations
 
 import collections
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from frx import Array
@@ -56,6 +65,37 @@ PRE_HASHES: dict[str, Callable[[], slh_dsa.PreHash]] = {
     "SHA2-256": slh_dsa.sha256_pre_hash,
 }
 
+# The one interface a mode always has: the pure external one, no pre-hash.
+_PURE_EXTERNAL: tuple[str, str | None] = ("external", None)
+
+# How a signed case reaches the scheme — the pure external interface, the external
+# one under each pre-hash this repo can compute, and §9's internal one. Key
+# generation has only the first of them, since it takes a seed rather than a
+# message.
+_SIGNED_INTERFACES: tuple[tuple[str, str | None], ...] = (
+    _PURE_EXTERNAL,
+    *(("external", pre_hash) for pre_hash in PRE_HASHES),
+    ("internal", None),
+)
+
+
+@dataclass(frozen=True)
+class _Published:
+    """The two axes whose product is what one ACVP mode publishes."""
+
+    interfaces: tuple[tuple[str, str | None], ...]
+    # `sigGen` publishes the deterministic and the hedged case separately; the
+    # other two modes do not have the distinction — a key pair has no randomness
+    # in it, and a signature verifies the same way whichever mode made it.
+    signing_modes: tuple[bool | None, ...]
+
+
+_PUBLISHED: dict[str, _Published] = {
+    "keyGen": _Published((_PURE_EXTERNAL,), (None,)),
+    "sigGen": _Published(_SIGNED_INTERFACES, (True, False)),
+    "sigVer": _Published(_SIGNED_INTERFACES, (None,)),
+}
+
 
 @dataclass(frozen=True)
 class Operation:
@@ -71,13 +111,30 @@ class Operation:
     deterministic: bool | None
 
     def __str__(self) -> str:
+        return f"{self.parameter_set} {self._description}"
+
+    @property
+    def name(self) -> str:
+        """The same operation as an identifier, with the parameter set last.
+
+        What a caller that runs one operation per test names its cases after. The
+        field order differs from `__str__`'s deliberately: a sharded run assigns
+        cases round-robin over their sorted names, so trailing the parameter set
+        keeps one set's operations together in that order — and a set's cases in
+        few shards is a set's kernels compiled in few shards.
+        """
+        return re.sub(
+            r"[^0-9A-Za-z]+", "_", f"{self._description} {self.parameter_set}"
+        )
+
+    @property
+    def _description(self) -> str:
+        """Everything but the parameter set: the interface, pre-hash and mode."""
         mode = {True: "deterministic", False: "hedged", None: "either mode"}[
             self.deterministic
         ]
-        return (
-            f"{self.parameter_set} {self.interface}"
-            f"{'' if self.pre_hash is None else f'/{self.pre_hash}'} {mode}"
-        )
+        pre_hash = "" if self.pre_hash is None else f"/{self.pre_hash}"
+        return f"{self.interface}{pre_hash} {mode}"
 
 
 class InternalInterface:
@@ -245,6 +302,42 @@ def group(vectors: list[kat.KatVector]) -> dict[Operation, list[kat.KatVector]]:
         )
         grouped.setdefault(operation, []).append(vector)
     return grouped
+
+
+@lru_cache(maxsize=None)
+def runnable_groups(mode: str) -> dict[Operation, list[kat.KatVector]]:
+    """`load`, `runnable` and `group` as the one thing every caller wants.
+
+    Cached because the callers ask per test method, and the answer is a function
+    of the mode alone. Callers read the result and do not hold it, which is what
+    lets one parse serve all of them.
+    """
+    return group(runnable(load(mode)))
+
+
+def operations() -> dict[str, list[Operation]]:
+    """Every operation each mode publishes, for every constructible set.
+
+    The constructive inverse of `group`: what the vectors *should* contain, where
+    `group` reports what they do. Stated as the product of constants it is, for
+    the reason the two above it are — a caller comparing the two learns that a
+    boundary moved, where a caller reading the operations off the files would
+    silently run fewer of them and pass.
+    """
+    return {
+        mode: [
+            Operation(
+                parameter_set=parameter_set,
+                interface=interface,
+                pre_hash=pre_hash,
+                deterministic=deterministic,
+            )
+            for parameter_set in CONSTRUCTIBLE_SETS
+            for interface, pre_hash in published.interfaces
+            for deterministic in published.signing_modes
+        ]
+        for mode, published in _PUBLISHED.items()
+    }
 
 
 def implementation(operation: Operation) -> Signature:

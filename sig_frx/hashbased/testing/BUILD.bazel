@@ -320,17 +320,18 @@ py_test(
 # measures 2.1-2.7x slower on the CI executor, so an undivided run spends most of
 # `enormous`'s hour with four more parameter sets still to become constructible.
 # The test cuts at the published operation, the longest of which is ~90 s of those
-# 20 minutes, so sixteen shards each sit well inside `large` and a parameter set
-# arriving adds cases rather than minutes to one budget.
+# 20 minutes, and names its cases so that a shard draws the operations of one
+# parameter set. At thirty-two the worst shard is 121.6 s — a third of `large`
+# once the executor factor is paid — and every shard compiles one set's kernels
+# rather than several shards each compiling the same set's.
 py_test(
     name = "slh_dsa_sweep_test",
     size = "large",
     srcs = ["slh_dsa_sweep_test.py"],
-    shard_count = 16,
+    shard_count = 32,
     tags = ["slow_kat"],
     deps = [
         ":slh_dsa_vectors",
-        "//sig_frx/testing:kat",
         requirement("absl_py"),
     ] + GPU_PLUGIN_DEPS,
 )

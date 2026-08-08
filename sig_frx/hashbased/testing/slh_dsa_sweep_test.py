@@ -22,123 +22,62 @@ operation, which is what lets `shard_count` divide the run and gives each shard 
 budget that means something. A failure also names the operation rather than the
 sweep.
 
-Which operations exist is a product of constants here rather than whatever the
-vector files happen to contain, and `CoverageTest` is what keeps the two from
-drifting apart: an operation the vectors publish and this does not name would run
-nowhere at all, and a sweep that quietly got smaller reads exactly like one that
-passed.
+Which operations exist is `slh_dsa_vectors.operations`, a product of constants
+rather than whatever the vector files happen to contain, and `CoverageTest` is
+what keeps the two from drifting apart: an operation the vectors publish and that
+product does not name would run nowhere at all, and a sweep that quietly got
+smaller reads exactly like one that passed.
 """
 
 from __future__ import annotations
 
-import functools
-import re
-
 from absl.testing import absltest, parameterized
 
 from sig_frx.hashbased.testing import slh_dsa_vectors
-from sig_frx.testing import kat
 
-# How a case reaches the scheme: the pure external interface, the external one
-# under each pre-hash this repo can compute, and §9's internal one. Signing and
-# verifying publish all three; key generation has only the one.
-_INTERFACES: tuple[tuple[str, str | None], ...] = (
-    ("external", None),
-    *(("external", pre_hash) for pre_hash in slh_dsa_vectors.PRE_HASHES),
-    ("internal", None),
-)
-
-# What each ACVP mode publishes, as `slh_dsa_kat_test` states it for the merge
-# gate: which interfaces it reaches, and which signing modes it distinguishes.
-# `sigGen` publishes deterministic and hedged cases separately; the other two
-# modes do not have the distinction — a key pair has no randomness in it, and a
-# signature verifies the same way whichever mode made it.
-_MODES: dict[
-    str, tuple[tuple[tuple[str, str | None], ...], tuple[bool | None, ...]]
-] = {
-    "keyGen": ((("external", None),), (None,)),
-    "sigGen": (_INTERFACES, (True, False)),
-    "sigVer": (_INTERFACES, (None,)),
-}
-
-
-@functools.lru_cache(maxsize=None)
-def _groups(mode: str) -> dict[slh_dsa_vectors.Operation, list[kat.KatVector]]:
-    """One mode's runnable cases, grouped by the operation each belongs to.
-
-    Cached because a sharded run loads the same mode for several of its cases, and
-    parsing the published sets again per case would cost more than the shortest of
-    them takes to run.
-    """
-    return slh_dsa_vectors.group(slh_dsa_vectors.runnable(slh_dsa_vectors.load(mode)))
-
-
-def _operations(mode: str) -> list[slh_dsa_vectors.Operation]:
-    """Every operation `mode` publishes, for every constructible set."""
-    interfaces, signing_modes = _MODES[mode]
-    return [
-        slh_dsa_vectors.Operation(
-            parameter_set=parameter_set,
-            interface=interface,
-            pre_hash=pre_hash,
-            deterministic=deterministic,
-        )
-        for parameter_set in slh_dsa_vectors.CONSTRUCTIBLE_SETS
-        for interface, pre_hash in interfaces
-        for deterministic in signing_modes
-    ]
-
-
-def _cases() -> list[tuple[str, str, slh_dsa_vectors.Operation]]:
-    """The sweep as one named case per operation, the mode first.
-
-    The name leads with the mode because that is what orders the cases, and the
-    order is what a shard is cut out of: the operations of one mode sit together,
-    so consecutive shards take consecutive parameter sets rather than one shard
-    taking every expensive one.
-    """
-    return [
-        (re.sub(r"[^0-9A-Za-z]+", "_", f"{mode} {operation}"), mode, operation)
-        for mode in _MODES
-        for operation in _operations(mode)
-    ]
+# One case per published operation, named mode first and parameter set last. The
+# order is what the shards are cut out of — bazel assigns cases round-robin over
+# their sorted names — and trailing the set is what lands a shard on operations
+# of one parameter set: each then compiles that set's kernels once, where a set
+# scattered across eight shards compiles in all eight. Naming it the other way
+# round costs a third of the sweep's total processor time in repeated compiles.
+_CASES = [
+    (f"{mode}_{operation.name}", mode, operation)
+    for mode, published in slh_dsa_vectors.operations().items()
+    for operation in published
+]
 
 
 class SweepTest(parameterized.TestCase):
-    @parameterized.named_parameters(*_cases())
+    @parameterized.named_parameters(*_CASES)
     def test_the_published_cases_are_reproduced(
         self, mode: str, operation: slh_dsa_vectors.Operation
     ) -> None:
-        groups = _groups(mode)
-        self.assertIn(operation, groups)
-        slh_dsa_vectors.check(operation, groups[operation])
+        slh_dsa_vectors.check(
+            operation, slh_dsa_vectors.runnable_groups(mode)[operation]
+        )
 
 
 class CoverageTest(absltest.TestCase):
     """What makes the sweep a sweep, asserted apart from running it.
 
-    These are the claims the cases above cannot make one at a time — that every
-    set is present, that every published case is claimed by some case, and that
-    nothing was dropped between the vectors and the parameterization. They are
-    counting and set arithmetic, so they cost nothing next to a single signature.
+    These are the claims the cases above cannot make one at a time — that the
+    operations the vectors publish are the ones parameterized, and that nothing
+    was dropped between the files and the run. They are set and count arithmetic
+    over an already-parsed set of vectors, so they cost nothing next to a single
+    signature.
     """
 
-    def test_every_constructible_set_is_swept(self) -> None:
-        for mode in _MODES:
+    def test_every_published_operation_has_a_case(self) -> None:
+        # Both directions, which is what also makes this the statement that every
+        # constructible set is swept. An operation the vectors publish and the
+        # product does not name would run nowhere; one the product names and the
+        # vectors do not publish is a coverage boundary that moved.
+        for mode, published in slh_dsa_vectors.operations().items():
             with self.subTest(mode):
                 self.assertEqual(
-                    {operation.parameter_set for operation in _groups(mode)},
-                    set(slh_dsa_vectors.CONSTRUCTIBLE_SETS),
+                    set(slh_dsa_vectors.runnable_groups(mode)), set(published)
                 )
-
-    def test_every_published_operation_has_a_case(self) -> None:
-        # Both directions. An operation the vectors publish and the
-        # parameterization does not name would run nowhere; one the
-        # parameterization names and the vectors do not publish fails as a missing
-        # group, which is a coverage boundary that moved rather than a case.
-        for mode in _MODES:
-            with self.subTest(mode):
-                self.assertEqual(set(_groups(mode)), set(_operations(mode)))
 
     def test_every_published_case_is_reached(self) -> None:
         # 10 keyGen cases for each of the eight constructible sets. For sigGen, 7
@@ -149,8 +88,8 @@ class CoverageTest(absltest.TestCase):
         # multiple of eight.
         for mode, expected in (("keyGen", 80), ("sigGen", 240), ("sigVer", 233)):
             with self.subTest(mode):
-                cases = sum(len(group) for group in _groups(mode).values())
-                self.assertEqual(cases, expected)
+                groups = slh_dsa_vectors.runnable_groups(mode)
+                self.assertEqual(sum(len(group) for group in groups.values()), expected)
 
 
 if __name__ == "__main__":

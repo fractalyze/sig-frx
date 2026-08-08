@@ -101,20 +101,16 @@ class SignatureKatTest(absltest.TestCase):
     def test_the_published_signatures_are_reproduced(self) -> None:
         groups = self._groups("sigGen")
         # Every operation and both modes: the pure and pre-hash external
-        # interfaces and the internal one, deterministic and hedged.
+        # interfaces and the internal one, deterministic and hedged. Against
+        # `operations` rather than a list written here, so that the gate and the
+        # sweep cannot come to disagree about what a mode publishes — and so that
+        # a pre-hash arriving is a case this has to run rather than one it counts.
         self.assertEqual(
+            set(groups),
             {
-                (op.interface, op.pre_hash is not None, op.deterministic)
-                for op in groups
-            },
-            {
-                (interface, pre_hash, deterministic)
-                for interface, pre_hash in (
-                    ("external", False),
-                    ("external", True),
-                    ("internal", False),
-                )
-                for deterministic in (True, False)
+                operation
+                for operation in slh_dsa_vectors.operations()["sigGen"]
+                if operation.parameter_set == _MERGE_GATE_SET
             },
         )
         for operation, group in groups.items():
