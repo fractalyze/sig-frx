@@ -24,12 +24,13 @@ small by construction: a leaf index is `h'` bits, at most 9 at any defined set.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
-import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
+
+from sig_frx.arrays import namespace
 
 # A big-endian byte string per row: `[rows, width]` uint8, host or traced.
 ByteString: TypeAlias = np.ndarray | Array
@@ -37,17 +38,6 @@ ByteString: TypeAlias = np.ndarray | Array
 # The lane `low_bits` reads into. Deliberately the narrow one: it is what frx
 # gives without x64, so a value this refuses is one no traced caller could hold.
 _COLUMN_BITS = 32
-
-
-def namespace(*values: object) -> Any:
-    """Which array namespace these values belong to.
-
-    Host values stay on numpy rather than being lifted onto a device, which is
-    what keeps the signing path — one signature, all concrete — from paying for
-    a dispatch per operation. `adrs_encoding` asks the same question of address
-    fields, so the rule lives here rather than once per module.
-    """
-    return fnp if any(isinstance(value, Array) for value in values) else np
 
 
 def index_column(values: ArrayLike) -> ByteString:

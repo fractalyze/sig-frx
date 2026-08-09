@@ -22,6 +22,7 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
+from sig_frx import arrays
 from sig_frx.hashbased import adrs, bytestring, tree, wots
 from sig_frx.hashbased.tweakable import TweakableHash
 
@@ -158,7 +159,7 @@ def pk_from_sig(
     hypertree walk hands over a slice of what it was given, which is concrete when
     a signer climbs its own layers and traced when a verifier walks a batch.
     """
-    parts = bytestring.namespace(signatures).asarray(signatures)
+    parts = arrays.namespace(signatures).asarray(signatures)
     count = position.count
     if parts.ndim != 3 or parts.shape[0] != count:
         raise ValueError(

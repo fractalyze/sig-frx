@@ -56,6 +56,7 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 
+from sig_frx import arrays
 from sig_frx.hashbased import bytestring
 
 # One field of an address, in either of two forms. An **integer** field is a
@@ -121,7 +122,7 @@ def repeat_rows(value: Field, times: int) -> Field:
     """
     if times == 1 or np.ndim(value) == 0:
         return value
-    return bytestring.namespace(value).repeat(value, times, axis=0)
+    return arrays.namespace(value).repeat(value, times, axis=0)
 
 
 def encode(values: Sequence[Field], slots: tuple[Slot, ...]) -> bytes:
@@ -161,7 +162,7 @@ def encode_batch(
     implementation rather than a host one and a device one that must agree.
     """
     count = rows(values)
-    xnp = bytestring.namespace(*values)
+    xnp = arrays.namespace(*values)
     blocks = _field_bytes(values, count, xnp)
     if xnp is np:
         _reject_overflow(blocks, slots)
@@ -195,7 +196,7 @@ def with_field(
     shape = np.shape(encoded)
     if shape[-1] != width:
         raise ValueError(f"an encoded address is {width} bytes, got {shape[-1]}")
-    xnp = bytestring.namespace(encoded)
+    xnp = arrays.namespace(encoded)
     start = size(slots[:field])
     _, slot_width = slots[field]
     replacement = xnp.broadcast_to(

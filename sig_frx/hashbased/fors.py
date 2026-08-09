@@ -34,6 +34,7 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
+from sig_frx import arrays
 from sig_frx.hashbased import adrs, adrs_encoding, bytestring, tree, wots
 from sig_frx.hashbased.tweakable import TweakableHash, repeat_per_entry
 
@@ -193,7 +194,7 @@ def message_indices(params: ForsParams, digest: ArrayLike) -> bytestring.ByteStr
     The offsets are the parameter set's own, so they are a host constant the
     digits broadcast against either way.
     """
-    xnp = bytestring.namespace(digest)
+    xnp = arrays.namespace(digest)
     within = xnp.asarray(wots.base_2b(digest, params.a, params.k))
     indices = within + np.arange(params.k, dtype=np.uint32) * np.uint32(params.t)
     return indices[0] if np.ndim(digest) == 1 else indices
@@ -286,7 +287,7 @@ def pk_from_sig(
         raise ValueError(
             f"a FORS signature batch is {expected}, got {tuple(parts.shape)}"
         )
-    md = bytestring.namespace(digests).asarray(digests)
+    md = arrays.namespace(digests).asarray(digests)
     if md.ndim == 1:
         md = md[None, :]
     if md.shape[0] != batch:
