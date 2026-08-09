@@ -7,17 +7,14 @@
 # hash-frx — the symmetric layer every scheme here hashes through — is absent on
 # purpose: it is a Bazel module, pinned by commit in //MODULE.bazel, not a wheel.
 #
-# The frx build is pinned to the one hash-frx pins, and the two must move
-# together: hash-frx resolves frx from its own lock, so skew puts two different
-# frx copies on one test's sys.path. zk_dtypes (native finite-field dtypes)
-# arrives via frx but is pinned here directly — the frx extension-field lowering
-# reads `efinfo.modulus_low_coeffs` (zk_dtypes >= 0.0.6), and this frx build
-# registers the binary-field dtypes (tower t0..t7 + flat GHASH) in the frontend,
-# which requires zk_dtypes >= 0.0.10.
+# frx moves with the hash-frx pin, never alone: hash-frx resolves frx from its
+# own lock, so skew puts two frx copies on one test's sys.path and surfaces as a
+# dtype error rather than a version conflict. zk_dtypes is pinned here rather
+# than left to frx's resolution, so the floor this repo needs is stated.
 absl-py
 numpy
-frx==0.10.1.dev20260801051831
-frxlib==0.10.1.dev20260801051831
-frx-cuda12-pjrt==0.10.1.dev20260801051831
-frx-cuda12-plugin==0.10.1.dev20260801051831
-zk-dtypes==0.0.10
+frx==0.10.1.dev20260809035234
+frxlib==0.10.1.dev20260809035234
+frx-cuda12-pjrt==0.10.1.dev20260809035234
+frx-cuda12-plugin==0.10.1.dev20260809035234
+zk-dtypes==0.0.14

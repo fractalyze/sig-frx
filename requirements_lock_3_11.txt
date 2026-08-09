@@ -10,19 +10,19 @@ absl-py==2.5.0 \
     --hash=sha256:0c996f25c0490700fadabe6351630f6111534fa0ae252cc6d2014ea3b141135f \
     --hash=sha256:0f17b89f2a4eaaedc4f28c622998aa690564b3012a396a4ffad0821007fe03ba
     # via -r requirements.in
-frx==0.10.1.dev20260801051831 \
-    --hash=sha256:ecca8763ebd21a8f806fc3fd934a978e5a94c4af488fe87cf14d4da78f82ef84
+frx==0.10.1.dev20260809035234 \
+    --hash=sha256:2071d5f10313a65bc7641f31ace474cf4d8856891d1ed0fbf9cdcf521360544f
     # via -r requirements.in
-frx-cuda12-pjrt==0.10.1.dev20260801051831 \
-    --hash=sha256:d5fd9460d7ff47396ddc3927e51ef09debe79f3c868a2db5af5df015c60966f6
+frx-cuda12-pjrt==0.10.1.dev20260809035234 \
+    --hash=sha256:2d01dec75e089bf44312a1a45e71d2c0d56f9543184b43c3e1ea261538728200
     # via
     #   -r requirements.in
     #   frx-cuda12-plugin
-frx-cuda12-plugin==0.10.1.dev20260801051831 \
-    --hash=sha256:224e9e75b1df1bf93f83f1d268cb91dadb8f062047b90b09d6fade9739fe027e
+frx-cuda12-plugin==0.10.1.dev20260809035234 \
+    --hash=sha256:28e6f087c1aca81929410b5cbed40ea4c8968a1092ffed2b70025eb1d0e65870
     # via -r requirements.in
-frxlib==0.10.1.dev20260801051831 \
-    --hash=sha256:dd9717ceaa22cf5dfc7311dd4ef83f86d9a913c02765b354a48dc0a247e59268
+frxlib==0.10.1.dev20260809035234 \
+    --hash=sha256:3f84b4a29480327fb00754c529adb970e789bd014dc0d8d89bf0c4ef8452d31d
     # via
     #   -r requirements.in
     #   frx
@@ -218,10 +218,13 @@ scipy==1.17.1 \
     # via
     #   frx
     #   frxlib
-zk-dtypes==0.0.10 \
-    --hash=sha256:06b66ef88dd6394bf7b2a1183fc60c5679a1837fc1b223147807f0f961eac0f7 \
-    --hash=sha256:e462ab54e21ee3dec305854d857519749eef913d817355b75c9e67fbba2fbae3 \
-    --hash=sha256:f2edcaba0e920dddd8e77c86758d54d7e2d5df2bd1acfbadacf392a91e16b026
+zk-dtypes==0.0.14 \
+    --hash=sha256:08543c4428cdeb5a6f4b69b59b27b04bb18d0b790e442c5892f4966cc8912b1a \
+    --hash=sha256:3b462b871e325b4ce5c214fb3706d7ceebe42c0475b0b3e916d4162edb8bddb5 \
+    --hash=sha256:59540d4d4a9239888e01fdf826522cf5f98b38ca79ee3e0033be70477c552596 \
+    --hash=sha256:a9d7c3240c59f6e5d6b853811bf6c6b216dc00e045f3c712ed1eedbd9a6aa15b \
+    --hash=sha256:cddd3b6200ae6bf708b9cbe771eaecedfed3d04e9762a5da5b6394421527aee1 \
+    --hash=sha256:f7fff30e826ec9cdae97834cd3e79e0a26f524c6f0d1a84fae4ea558be4957dc
     # via
     #   -r requirements.in
     #   frx
