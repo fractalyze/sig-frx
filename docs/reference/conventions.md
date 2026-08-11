@@ -97,22 +97,19 @@ for both and no residue ever occupies a raw integer lane. The lane ceiling binds
 *hand-written* arithmetic over integer lanes and nothing else, so it cannot decide
 whether two schemes may share code.
 
-Where it does bind is one level down, inside the hand-written arithmetic it forces:
+And it does not bind anywhere else either, because neither repo hand-writes the
+arithmetic: `zk_dtypes.prime_field(q)` mints a field from any modulus, curated or
+not, so `+`, `-` and `*` are already modular. What that avoids is worth naming,
+since it is the shape the code would otherwise have — a product of two ML-DSA
+residues is 2^46 against a 32-bit lane, the frontend has no widening multiply and
+no 64-bit lane to hold it, so every operation becomes a limb split carrying a
+bound that has to be argued.
 
-| | ML-DSA (FIPS 204) | ML-KEM (FIPS 203) |
-| --- | --- | --- |
-| modulus | 8380417 (23-bit) | 3329 (12-bit) |
-| worst-case product of two residues | 2^46 | 2^24 |
-| in a 32-bit lane | **truncates** | exact |
-| representation this forces | 16-bit limbs | native |
-
-ML-DSA's Montgomery reduction needs the high half of that product, and there is no
-widening multiply in the frontend and no 64-bit lane to hold it (the repo's first
-non-negotiable, and note it truncates *silently* when the value arrives already
-64-bit rather than with the dtype named). So the limbs are 16-bit because a product
-of two of them must fit a lane — forced, not tuned. ML-KEM needs none of this. The
-two files genuinely differ there, which is worth recording on both sides so the
-second implementer does not read the limb split as gratuitous.
+The one thing the field dtype asks in return is that a residue is read out with
+`astype` and never a bitcast: its storage is a Montgomery representative, so
+reinterpreting the bytes gives a different number, and wrongly in a way no round
+trip reveals. That matters wherever a scheme leaves field arithmetic for bit
+manipulation — FIPS 204's rounding functions, FIPS 203's compression.
 
 Sharing the hand-written version across repos is separately not worth it: what is
 common is the layer-walk skeleton, a few dozen lines, which does not carry a
@@ -121,18 +118,34 @@ cross-repo pin. `hash-frx` is the wrong home for it in any case, being the
 because both repos already depend on it.
 
 So each repo implements its own, and the convention is that the two **look
-alike**: same module layout, the same names (`ntt`, `intt`, `base_mul`,
-`montgomery_reduce`), the same twiddle-table generation style. The cost being
-avoided is not duplicated lines — it is two implementations that look unrelated,
-so a bug fixed in one is never looked for in the other. Whoever writes the second
-should be able to read the first.
+alike**: same module layout, the same names for the transform and its base
+multiplication (`ntt`, `intt`, `base_mul`), the same twiddle-table generation
+style. The cost being avoided is not duplicated lines — it is two implementations
+that look unrelated, so a bug fixed in one is never looked for in the other.
+Whoever writes the second should be able to read the first.
 
-Two triggers to revisit, and the first is the real one: when `frx.lax.ntt`
-dispatches on a field minted from a modulus, both schemes collapse to one call and
-these implementations should be deleted rather than maintained — keeping the shape
-convention is what makes that a small change. Failing that, a third lattice scheme
-is the usual signal; two implementations are not evidence for an abstraction,
-three usually are.
+There is no shared name for a reduction because neither file performs one — that
+is the field dtype's job, and a wrapper named for it would be a function that
+exists only to be matched across repos.
+
+Two triggers to revisit, and the first is the real one: this file should go when
+`frx.lax.ntt` both becomes callable on a field minted from a modulus and has a
+generated CPU path. Both halves, because callable alone would make the code
+shorter and slower — the opcode's CPU path runs one transform at a time, which is
+a gap rather than a property of the backend, since every other heavy operation
+there is emitted and only the NTT still interprets.
+
+What to measure at that point is the batch axis, not the backend. This stack's
+NTT was built for one large transform, the shape a prover asks for; a scheme's
+NTT is hundreds of length-256 ones, and the layer walk above is fast precisely
+because ordinary array operations vectorize across the leading axes. An
+implementation that parallelizes *within* a transform and loops over transforms
+loses at this shape however well it is generated, so the question a measurement
+is really asking is whether the batch axis survived. Keeping the shape convention
+is what makes either outcome a small change.
+
+Failing that, a third lattice scheme is the usual signal; two implementations are
+not evidence for an abstraction, three usually are.
 
 ## Keys and signatures are bytes at the seam
 

@@ -28,6 +28,7 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
+from sig_frx import arrays
 from sig_frx.hashbased import bytestring, tree, wots, xmss
 from sig_frx.hashbased.tweakable import TweakableHash
 
@@ -154,7 +155,7 @@ def roots_from_sig(
     index. So the whole walk is one expression whether the batch is concrete or
     traced.
     """
-    parts = bytestring.namespace(signatures).asarray(signatures)
+    parts = arrays.namespace(signatures).asarray(signatures)
     batch = parts.shape[0]
     expected = (batch, params.layers, params.signature_values, params.wots.n)
     if parts.shape != expected:

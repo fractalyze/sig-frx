@@ -18,3 +18,15 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [requirement("frx")],
 )
+
+# Top level because both the hash-based and the lattice packages depend on it; in
+# either one it would be a cross-package dependency the other pays for.
+py_library(
+    name = "arrays",
+    srcs = ["arrays.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

@@ -26,6 +26,11 @@ this file is the map plus the rules every change must respect.
   host is exactly where this bites when it is first traced. The operational rule
   that keeps a value out of the wrong lane is
   [a value is used in the namespace it arrives in](docs/reference/conventions.md#a-value-is-used-in-the-namespace-it-arrives-in).
+  Bytes are the answer for a value with no arithmetic. A **field** element has a
+  second one: `zk_dtypes.prime_field(q)` mints a field from any modulus, curated
+  or not, and reduces internally — so a scheme's modular arithmetic is never
+  hand-written in limbs. Read a residue back with `astype`, never a bitcast: the
+  storage is a Montgomery representative.
 - **Standards-exact, or it is not done.** Every scheme reproduces its
   specification byte for byte, gated on the published known-answer tests. A
   scheme that verifies its own signatures has demonstrated nothing — a
