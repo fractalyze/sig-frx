@@ -13,8 +13,8 @@
 # than left to frx's resolution, so the floor this repo needs is stated.
 absl-py
 numpy
-frx==0.10.1.dev20260811213301
-frxlib==0.10.1.dev20260811213301
-frx-cuda12-pjrt==0.10.1.dev20260811213301
-frx-cuda12-plugin==0.10.1.dev20260811213301
+frx==0.10.2.dev20260812130529
+frxlib==0.10.2.dev20260812130529
+frx-cuda12-pjrt==0.10.2.dev20260812130529
+frx-cuda12-plugin==0.10.2.dev20260812130529
 zk-dtypes==0.0.14
