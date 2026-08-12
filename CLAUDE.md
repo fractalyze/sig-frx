@@ -14,6 +14,11 @@ this file is the map plus the rules every change must respect.
   [`sig_frx/signature.py`](sig_frx/signature.py)
 - **Detailed design & open decisions:** tracked on GitHub — epic issue
   [fractalyze/sig-frx#1](https://github.com/fractalyze/sig-frx/issues/1).
+- **Running the suite the way the merge gate does:**
+  `bazel --bazelrc=.bazelrc.ci test //...`. `.bazelrc.ci` is loaded explicitly,
+  never auto-imported, so the bare `bazel test //...` in the README additionally
+  runs the `slow_kat` sweeps — which are the scheduled gate, not the merge one,
+  and which starve a shared machine into TIMEOUTs that are not failures.
 
 ## Four non-negotiables
 
