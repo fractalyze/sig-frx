@@ -192,12 +192,22 @@ def _first_accepted(values: Any, accepted: Any, count: int, sampler: str) -> Any
     source of output `r` is where rank `r + 1` first appears, which is a
     `searchsorted`. The survivor count falls out of the same scan as its last
     entry, so the shortfall check costs nothing here.
+
+    **`clip` is not redundant**, even though `_require_enough` has just refused
+    the case it covers. Under a tracer that refusal cannot fire, and a shortfall
+    leaves `searchsorted` returning one past the end for every unfilled slot —
+    where `take`'s default is to fill with `INT32_MIN` rather than to clamp. The
+    mode pins the unreachable branch to the same wrong answer on every backend
+    instead of to whatever each one does at the edge, which is the property
+    enc-frx's `ml_kem.sampling._compact` states for the same reason.
     """
     ranks = fnp.cumsum(accepted, axis=-1, dtype=np.int32)
     _require_enough(ranks[..., -1], count, sampler)
     wanted = fnp.arange(1, count + 1, dtype=np.int32)
     return frx.vmap(
-        lambda row, rank: fnp.take(row, fnp.searchsorted(rank, wanted), axis=-1)
+        lambda row, rank: fnp.take(
+            row, fnp.searchsorted(rank, wanted), axis=-1, mode="clip"
+        )
     )(values, ranks)
 
 
