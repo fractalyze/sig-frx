@@ -117,9 +117,10 @@ def ntt(w: ArrayLike) -> Any:
     the same reason the rounding functions convert with `astype` and never a
     bitcast.
 
-    The result is a device array whichever namespace the input arrived in — the
-    transform is an opcode, so this is the one place a host value is lifted
-    rather than kept ([`conventions.md`](../../../docs/reference/conventions.md)).
+    The result is a device array whichever namespace the input arrived in: the
+    transform is an opcode with no host implementation, so the lift is forced
+    rather than chosen ([`conventions.md`](../../../docs/reference/conventions.md)).
+    `sampling.py` lifts too, for the different reason that it hashes.
     """
     hat = lax.ntt(w, ntt_type=lax.NttType.NEGACYCLIC_NTT, generator=GENERATOR)
     return namespace(hat).take(hat, _BIT_REV8, axis=-1)
