@@ -27,14 +27,16 @@ the shape rather than a claim — this repo makes no side-channel claim
 ([`security.md`](../../../docs/reference/security.md)) — and it is the shape the
 compiler wanted anyway.
 
-## Collection is a gather, and the sort is the schedule
+## Collection is a gather, and a running count is the schedule
 
 Keeping the accepted candidates and closing the gaps is a data-dependent
-permutation however it is written. It is written as a stable sort on the
-rejection flag: `False` sorts first and equal keys hold their order, so the
-survivors land contiguously at the front in stream order, and reading them off
-is one `take_along_axis`. The direction matters — the same permutation as a
-scatter serialises on a GPU, where a gather vectorises.
+permutation however it is written, and the direction it is written in matters:
+a gather vectorises where the same permutation as a scatter serialises on a GPU.
+So it is a gather — but of the two ways to reach one, the cheap one is a
+`cumsum`. Ranking the survivors by a running count and looking up where each
+rank first appears answers the question about 256 outputs; sorting the whole
+budget on a one-bit key answers it by computing a permutation of everything
+else as well, and measured 5-11x the cost of the scan at the shapes here.
 
 ## One-shot SHAKE, not the incremental one
 
@@ -61,6 +63,11 @@ FIPS 204 defines them; the axis inside each is over the streams that seed fans
 out into, which is where ExpandA's `k·ℓ` independent entries live. A batch of
 *signatures* is `frx.vmap` over these, per
 [`conventions.md`](../../../docs/reference/conventions.md).
+
+One of them should not be batched that way, and it is the expensive one: `Â`
+depends on the public key alone, so `vmap`ping ExpandA across signatures
+verified under one key recomputes the same matrix once per signature. It belongs
+outside the per-signature axis, sampled once and closed over.
 
 ## Â is already in the standard's order
 
@@ -102,8 +109,14 @@ _NTT_ACCEPT = (Q, 1 << 23)
 _NTT_PER_BLOCK = SHAKE128_RATE // 3
 
 # CoeffFromHalfByte (Algorithm 15) reads two candidates per byte and keeps a
-# nibble below 15 at `η = 2` and below 9 at `η = 4`.
-_BOUNDED_ACCEPT = {2: (15, 16), 4: (9, 16)}
+# nibble below 15 at `η = 2` and below 9 at `η = 4`. The threshold is written
+# once: `_rej_bounded_poly` rejects by it and `_budget` is sized against it, and
+# a divergence between those two is the one thing that could exhaust a budget
+# the tail says is safe.
+_BOUNDED_THRESHOLD = {2: 15, 4: 9}
+_BOUNDED_ACCEPT = {
+    eta: (threshold, 16) for eta, threshold in _BOUNDED_THRESHOLD.items()
+}
 _BOUNDED_PER_BLOCK = 2 * SHAKE256_RATE
 
 
@@ -135,7 +148,7 @@ def _budget(needed: int, accept: tuple[int, int], per_block: int) -> int:
     process, and because the tail is big-integer work that no caller should pay
     twice.
     """
-    blocks = max(1, -(-needed // per_block))
+    blocks = -(-needed // per_block)
     while _shortfall_exceeds_margin(blocks * per_block, needed, accept):
         blocks += 1
     return blocks
@@ -146,12 +159,18 @@ def _require_enough(survivors: Any, needed: int, sampler: str) -> None:
 
     The check runs wherever it can be run. Key generation and signing are
     concrete, so the count is a number there and a shortfall raises; under a
-    tracer it is not a number, no comparison on it can raise, and frx has no
-    `checkify` to defer one to. What stands in for the check on that path is
-    `_budget`: the count it sizes for cannot fall short more often than
-    `2^-256`, which is below the collision strength of the scheme being sampled
-    for. The alternative — returning a validity flag for every caller to thread
-    and most to drop — trades a guarantee for a convention.
+    tracer it is not a number and no comparison on it can raise. What stands in
+    for the check on that path is `_budget`: the count it sizes for cannot fall
+    short more often than `2^-256`, which is below the collision strength of the
+    scheme being sampled for.
+
+    `frx.experimental.checkify` would defer a real check into the traced path,
+    and it is deliberately not used. It functionalises the caller — `checkify`
+    turns `f` into one returning `(error, out)` — so the error has to be threaded
+    to the top of the enclosing zone and thrown there. That top is
+    `Signature.verify`, which returns `bool[B]` and nothing else, so adopting it
+    means a validity flag every caller threads and most drop: a guarantee traded
+    for a convention.
     """
     if isinstance(survivors, frx.core.Tracer):
         return
@@ -165,17 +184,21 @@ def _require_enough(survivors: Any, needed: int, sampler: str) -> None:
         )
 
 
-def _first_accepted(values: Any, accepted: Any, count: int) -> Any:
+def _first_accepted(values: Any, accepted: Any, count: int, sampler: str) -> Any:
     """The first `count` accepted values of each row, in stream order.
 
-    A stable sort on the rejection flag is the compaction: `False` sorts first
-    and equal keys keep their order, so a row's survivors arrive contiguously at
-    the front in the order the stream produced them, and the prefix is the
-    answer. One gather per row and no scatter — the same permutation written the
-    other way round serialises on a GPU.
+    `cumsum` over the acceptance flags gives each candidate the rank it would
+    have among the survivors, and that running count is non-decreasing — so the
+    source of output `r` is where rank `r + 1` first appears, which is a
+    `searchsorted`. The survivor count falls out of the same scan as its last
+    entry, so the shortfall check costs nothing here.
     """
-    order = fnp.argsort(~accepted, axis=-1, stable=True)[..., :count]
-    return fnp.take_along_axis(values, order, axis=-1)
+    ranks = fnp.cumsum(accepted, axis=-1, dtype=np.int32)
+    _require_enough(ranks[..., -1], count, sampler)
+    wanted = fnp.arange(1, count + 1, dtype=np.int32)
+    return frx.vmap(
+        lambda row, rank: fnp.take(row, fnp.searchsorted(rank, wanted), axis=-1)
+    )(values, ranks)
 
 
 def _seeds(rho: ArrayLike, width: int, tails: np.ndarray) -> Any:
@@ -211,24 +234,24 @@ def _rej_ntt_poly(seeds: Any, blocks: int) -> Any:
     # dropped, and the rest is a little-endian 23-bit integer.
     z = groups[..., 0] | (groups[..., 1] << 8) | ((groups[..., 2] & 0x7F) << 16)
     accepted = z < np.uint32(Q)
-    _require_enough(accepted.sum(axis=-1), N, "ExpandA")
-    return _first_accepted(z, accepted, N).astype(FIELD)
+    return _first_accepted(z, accepted, N, "ExpandA").astype(FIELD)
 
 
 def _rej_bounded_poly(seeds: Any, eta: int, blocks: int) -> Any:
     """Algorithm 31 over a batch of streams: uint8 `[B, 66]` -> int32 `[B, 256]`."""
     stream = Shake256(blocks * SHAKE256_RATE).digest(seeds).astype(np.int32)
     # `z mod 16` then `⌊z/16⌋`, which is the order the standard consumes them in.
-    nibbles = fnp.stack([stream & 0xF, stream >> 4], axis=-1)
-    nibbles = nibbles.reshape(stream.shape[0], -1)
-    # Algorithm 15. Both branches are evaluated over the whole stream and the
+    nibbles = fnp.stack([stream & 0xF, stream >> 4], axis=-1).reshape(
+        stream.shape[0], -1
+    )
+    # Algorithm 15. Both of its rules are evaluated over the whole stream and the
     # rejected slots are dropped by the compaction rather than by a branch.
+    accepted = nibbles < np.int32(_BOUNDED_THRESHOLD[eta])
     if eta == 2:
-        accepted, coefficients = nibbles < 15, np.int32(2) - nibbles % np.int32(5)
+        coefficients = np.int32(2) - nibbles % np.int32(5)
     else:
-        accepted, coefficients = nibbles < 9, np.int32(4) - nibbles
-    _require_enough(accepted.sum(axis=-1), N, "ExpandS")
-    return _first_accepted(coefficients, accepted, N)
+        coefficients = np.int32(4) - nibbles
+    return _first_accepted(coefficients, accepted, N, "ExpandS")
 
 
 def _bytes_to_bits(values: Any) -> Any:
@@ -240,33 +263,23 @@ def _bytes_to_bits(values: Any) -> Any:
 def _bit_unpack_field(v: Any, width: int) -> Any:
     """`v` read as 256 little-endian `width`-bit fields per row, as uint32.
 
-    The unsigned half of Algorithm 19 — the subtraction its last line performs is
-    the caller's, since only the caller knows `b`. Bit fields tile the byte
-    string with period `lcm(width, 8)`, and that period holds a whole number of
-    fields, so every field's window is a static slice and no field crosses a
-    period boundary. The general BitPack/BitUnpack pair belongs with the wire
-    formats that need both directions; this is the half ExpandMask needs, and it
-    is the piece to hoist when that second consumer arrives rather than a seam
-    guessed at now ([`conventions.md`](../../../docs/reference/conventions.md)).
-    """
-    period = int(np.lcm(width, 8)) // 8
-    per_period = period * 8 // width
-    # A field starting mid-byte reaches one byte further than its own width, and
-    # the last field of a period reaches past the period, so each period carries
-    # the padding that keeps its windows in range.
-    span = -(-(width + 7) // 8)
-    periods = v.reshape(v.shape[0], -1, period)
-    padding = fnp.zeros((periods.shape[0], periods.shape[1], span - 1), dtype=fnp.uint8)
-    padded = fnp.concatenate([periods, padding], axis=-1).astype(fnp.uint32)
+    The unsigned half of Algorithm 19 — the subtraction its last line performs
+    is the caller's, since only the caller knows `b`. Algorithm 19 is stated
+    over the bit string, and taken literally it needs no byte arithmetic at all:
+    `32·width` bytes is exactly `256·width` bits, so the fields are a reshape
+    and their values a weighted sum. `wots.base_2b` is the same mechanism at the
+    opposite bit order — FIPS 205 numbers from the high end — so neither can
+    stand in for the other, which is the distinction
+    [`bytestring.low_bits`](../../hashbased/bytestring.py) already records for
+    its own near-miss.
 
-    fields = []
-    for index in range(per_period):
-        start, shift = divmod(index * width, 8)
-        window = padded[..., start]
-        for byte in range(1, span):
-            window = window | (padded[..., start + byte] << np.uint32(8 * byte))
-        fields.append((window >> np.uint32(shift)) & np.uint32((1 << width) - 1))
-    return fnp.stack(fields, axis=-1).reshape(v.shape[0], -1)
+    The general BitPack/BitUnpack pair belongs with the wire formats that need
+    both directions; this is the half ExpandMask needs, and it is the piece to
+    hoist when that second consumer arrives rather than a seam guessed at now
+    ([`conventions.md`](../../../docs/reference/conventions.md)).
+    """
+    fields = _bytes_to_bits(v).astype(np.uint32).reshape(*v.shape[:-1], -1, width)
+    return (fields << np.arange(width, dtype=np.uint32)).sum(axis=-1)
 
 
 def expand_a(rho: ArrayLike, k: int, ell: int) -> Any:
@@ -356,8 +369,13 @@ def sample_in_ball(rho: ArrayLike, tau: int) -> Any:
 
     signs = _bytes_to_bits(stream[:8]).astype(np.int32)
     candidates = stream[8:].astype(np.int32)
-    position = fnp.arange(budget, dtype=np.int32)
-    slot = fnp.arange(N, dtype=np.int32)
+    position = np.arange(budget, dtype=np.int32)
+    slot = np.arange(N, dtype=np.int32)
+    # Position and byte in one sortable key, so that "the first admissible byte"
+    # is a single minimum rather than a running count and two masked sums. The
+    # byte is recovered from the low half because it is what the key ends in.
+    key = position * np.int32(N) + candidates
+    exhausted = np.int32(budget * N + N)
 
     c = fnp.zeros(N, dtype=np.int32)
     cursor = fnp.zeros((), dtype=np.int32)
@@ -365,14 +383,14 @@ def sample_in_ball(rho: ArrayLike, tau: int) -> Any:
     for step in range(tau):
         i = N - tau + step
         available = (position >= cursor) & (candidates <= np.int32(i))
-        # The first still-unread admissible byte, as a mask rather than an index.
-        first = available & (fnp.cumsum(available) == np.int32(1))
-        completed = completed + first.any().astype(np.int32)
-        j = fnp.sum(fnp.where(first, candidates, np.int32(0)))
-        cursor = fnp.sum(fnp.where(first, position + np.int32(1), np.int32(0)))
+        first = fnp.min(fnp.where(available, key, exhausted))
+        found = first < exhausted
+        completed = completed + found.astype(np.int32)
+        j = first % np.int32(N)
+        cursor = fnp.where(found, first // np.int32(N) + np.int32(1), cursor)
         # `c[i] ← c[j]` then `c[j] ← (−1)^h[i+τ−256]`, in that order.
-        at_j = fnp.sum(fnp.where(slot == j, c, np.int32(0)))
-        c = fnp.where(slot == np.int32(i), at_j, c)
-        c = fnp.where(slot == j, np.int32(1) - np.int32(2) * signs[step], c)
+        at_j = slot == j
+        c = fnp.where(slot == i, fnp.sum(fnp.where(at_j, c, np.int32(0))), c)
+        c = fnp.where(at_j, np.int32(1) - np.int32(2) * signs[step], c)
     _require_enough(completed, tau, "SampleInBall")
     return c

@@ -36,6 +36,7 @@ gate in `arith_test`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, TypeAlias
 from unittest import mock
 
@@ -48,7 +49,7 @@ from absl.testing import absltest, parameterized
 from sig_frx.lattice.mldsa import arith, sampling
 from sig_frx.lattice.mldsa.testing import fips204_reference as ref
 
-_Lift: TypeAlias = Any
+_Lift: TypeAlias = Callable[[np.ndarray], Any]
 
 # Every case runs both ways, as `arith_test` does: a host seed for the key
 # generation and signing paths, a traced one for verification.
@@ -56,7 +57,7 @@ _LIFT = {"host": np.asarray, "traced": fnp.asarray}
 _NAMESPACES = tuple(_LIFT.items())
 
 # FIPS 204 Table 1, the fields the samplers read.
-_PARAMETER_SETS = (
+_PARAMETER_SETS: tuple[dict[str, Any], ...] = (
     {
         "testcase_name": "ML_DSA_44",
         "k": 4,
@@ -142,7 +143,9 @@ class BudgetTest(parameterized.TestCase):
 
     def test_the_margin_is_the_strongest_parameter_set_s_strength(self) -> None:
         """`2^-256` is `λ` at ML-DSA-87 (Table 1), not a round number."""
-        self.assertEqual(sampling._LOG2_SHORTFALL, 256)
+        self.assertEqual(
+            sampling._LOG2_SHORTFALL, max(case["lam"] for case in _PARAMETER_SETS)
+        )
 
     def test_a_certain_acceptance_needs_no_slack(self) -> None:
         """The tail is exact, so `p = 1` sizes to exactly what is asked for."""
@@ -153,29 +156,42 @@ class ExpandATest(parameterized.TestCase):
     """Algorithm 32 — the public matrix, sampled straight into `T_q`."""
 
     @parameterized.named_parameters(*_NAMESPACES)
-    def test_matches_algorithm_32(self, lift: _Lift) -> None:
+    def test_host_and_traced_agree(self, lift: _Lift) -> None:
         rho = _seed(32, 20)
         got = _ints(sampling.expand_a(lift(rho), 8, 7).astype(np.uint32))
         self.assertEqual(got, ref.expand_a(bytes(rho), 8, 7))
 
     @parameterized.named_parameters(*_PARAMETER_SETS)
-    def test_matches_algorithm_32_at_every_parameter_set(
-        self, k: int, ell: int, **_: Any
-    ) -> None:
+    def test_matches_algorithm_32(self, k: int, ell: int, **_: Any) -> None:
         rho = _seed(32, k)
         got = _ints(sampling.expand_a(rho, k, ell).astype(np.uint32))
         self.assertEqual(got, ref.expand_a(bytes(rho), k, ell))
 
     def test_the_entries_are_one_batched_call(self) -> None:
-        """`k·ℓ` streams trace as one computation, not `k·ℓ` of them.
+        """The one case that puts `expand_a` through `frx.jit`.
 
-        The shape is what the seed fans out into, so the check is that the whole
-        matrix comes back from one traced call — a driver loop over entries
-        would not survive `jit` as a single zone.
+        The whole matrix comes back from one traced call, which is the fan-out
+        arriving whole. It does not distinguish a batched call from an unrolled
+        Python loop — nothing cheap does, and `k·ℓ` unrolled copies would still
+        return this shape.
         """
         rho = _seed(32, 21)
         compiled = frx.jit(lambda seed: sampling.expand_a(seed, 8, 7))
         self.assertEqual(compiled(fnp.asarray(rho)).shape, (8, 7, arith.N))
+
+    def test_batches_over_signatures_with_vmap(self) -> None:
+        """A second axis, over signatures, composes onto the fan-out axis.
+
+        `conventions.md` puts the signature batch on `vmap` for everything that
+        is not verification itself, and this is where that could break: the
+        sampler already batches `k·ℓ` streams through a `[B, L]` sponge call and
+        a `vmap`ped compaction, so an outer `vmap` is nesting one over another.
+        """
+        seeds = np.stack([_seed(32, 210 + index) for index in range(3)])
+        batched = frx.vmap(lambda seed: sampling.expand_a(seed, 4, 4))
+        got = frx.jit(batched)(fnp.asarray(seeds)).astype(np.uint32)
+        for index, seed in enumerate(seeds):
+            self.assertEqual(_ints(got[index]), ref.expand_a(bytes(seed), 4, 4))
 
     def test_the_entries_are_field_elements_below_q(self) -> None:
         hats = sampling.expand_a(_seed(32, 22), 6, 5)
@@ -272,7 +288,7 @@ class ExpandMaskTest(parameterized.TestCase):
     def test_coefficients_are_within_the_gamma1_window(
         self, ell: int, gamma1: int, **_: Any
     ) -> None:
-        y = np.asarray(sampling.expand_mask(_seed(64, gamma1 % 97), 3, ell, gamma1))
+        y = np.asarray(sampling.expand_mask(_seed(64, gamma1), 3, ell, gamma1))
         self.assertTrue((y >= -gamma1 + 1).all())
         self.assertTrue((y <= gamma1).all())
 
@@ -338,14 +354,6 @@ class ExhaustionTest(parameterized.TestCase):
     garbage that a round trip would never reveal.
     """
 
-    def test_rej_ntt_poly_raises_rather_than_padding(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "ran out of candidates"):
-            sampling._rej_ntt_poly(np.zeros((2, 34), dtype=np.uint8), blocks=1)
-
-    def test_rej_bounded_poly_raises_rather_than_padding(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "ran out of candidates"):
-            sampling._rej_bounded_poly(np.zeros((2, 66), dtype=np.uint8), 4, blocks=1)
-
     @parameterized.named_parameters(
         ("expand_a", lambda: sampling.expand_a(_seed(32, 60), 4, 4)),
         ("expand_s", lambda: sampling.expand_s(_seed(64, 61), 6, 5, 4)),
@@ -359,8 +367,9 @@ class ExhaustionTest(parameterized.TestCase):
     def test_the_message_names_the_budget_and_not_the_seed(self) -> None:
         """A shortfall is a wrong bound, and the message has to say so — the
         seed is the one thing that cannot be at fault."""
-        with self.assertRaises(RuntimeError) as raised:
-            sampling._rej_ntt_poly(np.zeros((1, 34), dtype=np.uint8), blocks=1)
+        with mock.patch.object(sampling, "_budget", return_value=1):
+            with self.assertRaises(RuntimeError) as raised:
+                sampling.expand_a(_seed(32, 63), 4, 4)
         self.assertIn("wrong budget rather than an unlucky seed", str(raised.exception))
 
 
