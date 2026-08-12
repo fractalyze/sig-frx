@@ -342,11 +342,16 @@ def _rounding_inputs(gamma2: int) -> np.ndarray:
 
 
 class ZetaTableTest(absltest.TestCase):
-    """The generated table against the one the standard publishes."""
+    """The reference's table against the one the standard publishes.
+
+    The reference is where a zeta table lives — the module under test derives its
+    twiddles inside the opcode — so this is the one place a transcription error
+    against Appendix B could hide.
+    """
 
     def test_matches_appendix_b(self) -> None:
         published = list(_APPENDIX_B_ZETAS)
-        generated = [int(value) for value in arith.ZETAS]
+        generated = ref.zetas()
         # Slot 0 is unused by both algorithms; the standard prints 0 there and
         # `zeta^BitRev8(0) = 1`, so the pin starts at 1.
         self.assertEqual(generated[1:], published[1:])
@@ -355,6 +360,17 @@ class ZetaTableTest(absltest.TestCase):
     def test_zeta_is_a_512th_root_of_unity(self) -> None:
         self.assertEqual(pow(arith.ZETA, 512, arith.Q), 1)
         self.assertNotEqual(pow(arith.ZETA, 256, arith.Q), 1)
+
+    def test_the_generator_lands_on_the_standard_s_zeta(self) -> None:
+        """`GENERATOR` is what makes the opcode agree with FIPS 204.
+
+        Unpinned it would find some other primitive 512th root and produce a
+        correct transform against the wrong root — which round-trips and
+        convolves, so this is the check that would catch a silent drift.
+        """
+        self.assertEqual(
+            pow(arith.GENERATOR, (arith.Q - 1) // 512, arith.Q), arith.ZETA
+        )
 
 
 class FieldSelectionTest(parameterized.TestCase):
@@ -448,9 +464,7 @@ class NttTest(parameterized.TestCase):
     def test_batches_over_the_polynomial_vector_axis(self, lift: _Lift) -> None:
         """A vector of `k` polynomials is one call and agrees with each alone."""
         rng = np.random.default_rng(5)
-        vector = rng.integers(0, arith.Q, size=(8, arith.N), dtype=np.uint64).astype(
-            np.uint32
-        )
+        vector = _field(rng.integers(0, arith.Q, size=(8, arith.N), dtype=np.uint64))
         batched = np.asarray(arith.ntt(lift(vector)))
         for index, row in enumerate(vector):
             alone = np.asarray(arith.ntt(lift(row)))

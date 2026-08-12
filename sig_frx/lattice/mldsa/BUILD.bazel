@@ -4,8 +4,9 @@ load("@sig_frx_pip//:requirements.bzl", "requirement")
 # `Z_q` arithmetic and the NTT over q = 8380417. Depends on no hash and on no
 # scheme logic: FIPS 204's rounding functions and its transform are testable
 # against the standard before any of keygen, sign or verify exists, which is why
-# they land on their own. frx is a dependency because the same code runs
-# concretely on the signing path and under a tracer on the verification one.
+# they land on their own. frx is a dependency because the transform is its
+# `lax.ntt` opcode, and because the same code runs concretely on the signing path
+# and under a tracer on the verification one.
 py_library(
     name = "arith",
     srcs = [

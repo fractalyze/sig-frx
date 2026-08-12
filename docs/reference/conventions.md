@@ -64,12 +64,12 @@ sampled in fixed-size blocks with a mask, or it runs on the host. Which one a
 scheme picks is a decision its page records, along with the timing consequence
 ([`security.md`](security.md)).
 
-## The lattice NTT is hand-written per-repo, and the shape is the shared part
+## The lattice NTT is `frx.lax.ntt`, and the adaptations are the shared part
 
-ML-DSA's NTT lives here; ML-KEM's lives in
-[`enc-frx`](https://github.com/fractalyze/enc-frx). Both are hand-written, and
-both duplicate a primitive this stack already ships — so the reason has to be
-stated precisely, because it is not the one the two schemes' parameters suggest.
+ML-DSA's transform lives here; ML-KEM's lives in
+[`enc-frx`](https://github.com/fractalyze/enc-frx). Both are the same op, and
+what each repo writes around it is small, identical in shape, and different in
+constants — which is the part worth keeping aligned.
 
 **Both schemes want the same transform, and `frx.lax.ntt` is it.** They multiply
 in the negacyclic ring `Z_q[X]/(X^n + 1)`, which is the op's `NEGACYCLIC_NTT`
@@ -80,72 +80,65 @@ gets length 128 applied to the even and odd coefficient halves, which is exactly
 what FIPS 203's "incomplete" NTT and its degree-1 base case `mod (X² − ζ)`
 describe. Reframing, not a different algorithm.
 
-**What blocks the op is kernel dispatch, not the transform.** It resolves its
-kernels by *curated field family* — matching a runtime field against a
-compile-time list — and neither 8380417 nor 3329 is a curated family. A field
-minted from a modulus is reachable everywhere else in the frontend: it round-trips
-through `device_put`, it lowers with its algebra, and elementwise arithmetic on it
-is exact. The NTT is one of the few ops implemented as a hand-written templated
-library rather than emitted code, and that is the whole reason it is the one that
-refuses. So the duplication here is a workaround with a known expiry, not a design
-preference — say so, or the next reader assumes it was chosen.
+**The op takes a field minted from a modulus.** Its generated kernel derives the
+root from the runtime modulus rather than matching a curated family, so neither
+8380417 nor 3329 needs to be curated, and neither repo hand-walks the layers.
 
-**The modulus widths are not the reason, and they look enough like it to be worth
-disarming.** A shared implementation is not blocked by 8380417 being 23-bit and
-3329 being 12-bit: a field dtype reduces internally, so `(q − 1)² mod q` is exact
-for both and no residue ever occupies a raw integer lane. The lane ceiling binds
-*hand-written* arithmetic over integer lanes and nothing else, so it cannot decide
-whether two schemes may share code.
+**What the op does not decide, and each scheme therefore pins.** Two things,
+and both are constants rather than code:
 
-And it does not bind anywhere else either, because neither repo hand-writes the
-arithmetic: `zk_dtypes.prime_field(q)` mints a field from any modulus, curated or
-not, so `+`, `-` and `*` are already modular. What that avoids is worth naming,
-since it is the shape the code would otherwise have — a product of two ML-DSA
-residues is 2^46 against a 32-bit lane, the frontend has no widening multiply and
-no 64-bit lane to hold it, so every operation becomes a limb split carrying a
-bound that has to be argued.
+- *Which root.* The `generator` argument is a generator of the multiplicative
+  group, not the root: the op derives `g^((q−1)/2n)` itself. A standard names
+  the root — FIPS 204's `ζ = 1753`, FIPS 203's `ζ = 17` — so each scheme pins
+  that root's preimage under that map, and searches for it rather than
+  transcribing it, for the same reason the standards' tables are generated in
+  these repos and not copied. Left unpinned the op finds *a* primitive `2n`-th
+  root: a correct negacyclic transform against the wrong root, which round-trips
+  and convolves like the right one, so only the published vectors catch it.
+- *Which order.* The op returns natural order, `out[k] = w(ζ^(2k+1))`; both
+  standards index the same values by bit-reversal. The conversion is
+  `lax.bit_reverse` on the transform axis and nothing else — it is an
+  involution, so both directions use the same call.
+
+**The modulus widths are not a reason to write anything by hand, and they look
+enough like it to be worth disarming.** 8380417 is 23-bit and 3329 is 12-bit,
+but a field dtype reduces internally, so `(q − 1)² mod q` is exact for both and
+no residue ever occupies a raw integer lane. `zk_dtypes.prime_field(q)` mints a
+field from any modulus, curated or not, so `+`, `-` and `*` are already modular.
+What that avoids is worth naming, since it is the shape the code would otherwise
+have — a product of two ML-DSA residues is 2^46 against a 32-bit lane, the
+frontend has no widening multiply and no 64-bit lane to hold it, so every
+operation becomes a limb split carrying a bound that has to be argued.
 
 The one thing the field dtype asks in return is that a residue is read out with
 `astype` and never a bitcast: its storage is a Montgomery representative, so
 reinterpreting the bytes gives a different number, and wrongly in a way no round
 trip reveals. That matters wherever a scheme leaves field arithmetic for bit
-manipulation — FIPS 204's rounding functions, FIPS 203's compression.
+manipulation — FIPS 204's rounding functions, FIPS 203's compression. It is also
+why the transform takes `FIELD` and refuses a raw integer array: the op reads the
+algebra, not the bytes.
 
-Sharing the hand-written version across repos is separately not worth it: what is
-common is the layer-walk skeleton, a few dozen lines, which does not carry a
-cross-repo pin. `hash-frx` is the wrong home for it in any case, being the
-*symmetric* layer — a lattice NTT is not a hash and does not belong there merely
-because both repos already depend on it.
-
-So each repo implements its own, and the convention is that the two **look
-alike**: same module layout, the same names for the transform and its base
-multiplication (`ntt`, `intt`, `base_mul`), the same twiddle-table generation
-style. The cost being avoided is not duplicated lines — it is two implementations
-that look unrelated, so a bug fixed in one is never looked for in the other.
-Whoever writes the second should be able to read the first.
+The convention across the two repos is that they **look alike**: same module
+layout, the same names for the transform and its base multiplication (`ntt`,
+`intt`, `base_mul`), the same two pins above in the same shape. The cost being
+avoided is not duplicated lines — there are barely any left — but two
+adaptations that look unrelated, so a mistake understood in one is never looked
+for in the other.
 
 There is no shared name for a reduction because neither file performs one — that
 is the field dtype's job, and a wrapper named for it would be a function that
 exists only to be matched across repos.
 
-Two triggers to revisit, and the first is the real one: this file should go when
-`frx.lax.ntt` both becomes callable on a field minted from a modulus and has a
-generated CPU path. Both halves, because callable alone would make the code
-shorter and slower — the opcode's CPU path runs one transform at a time, which is
-a gap rather than a property of the backend, since every other heavy operation
-there is emitted and only the NTT still interprets.
-
-What to measure at that point is the batch axis, not the backend. This stack's
-NTT was built for one large transform, the shape a prover asks for; a scheme's
-NTT is hundreds of length-256 ones, and the layer walk above is fast precisely
-because ordinary array operations vectorize across the leading axes. An
-implementation that parallelizes *within* a transform and loops over transforms
-loses at this shape however well it is generated, so the question a measurement
-is really asking is whether the batch axis survived. Keeping the shape convention
-is what makes either outcome a small change.
-
-Failing that, a third lattice scheme is the usual signal; two implementations are
-not evidence for an abstraction, three usually are.
+The measurement that governs this choice is the batch axis, not the backend.
+This stack's NTT was built for one large transform, the shape a prover asks for;
+a scheme's NTT is hundreds of length-256 ones. An implementation that
+parallelizes *within* a transform and loops over transforms loses at that shape
+however well it is generated, so what a measurement here is really asking is
+whether the batch axis survived. The op's CPU path spreads a batch of transforms
+across work groups, which is what makes it competitive with ordinary array
+operations vectorized over the leading axes; a backend that regressed on that
+would be a reason to revisit, and the shared shape is what keeps either outcome
+a small change.
 
 ## Keys and signatures are bytes at the seam
 

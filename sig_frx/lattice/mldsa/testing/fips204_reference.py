@@ -1,18 +1,18 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """FIPS 204's arithmetic algorithms, transcribed the way the standard writes them.
 
-The module under test reshapes every one of these: the NTT's two nested `while`
-loops become eight batched layers, a product becomes four limb products and a
-fold, and the rounding functions run over whole arrays. Each of those is a change
-made for the compiler, and it is the only thing about `arith.py` a reader has to
-take on trust — so this file takes it back, looping one coefficient at a time over
-Python integers, and the test requires the two to agree
+The module under test reshapes every one of these: the transform becomes one
+opcode call plus an ordering conversion, and the rounding functions run over
+whole arrays. Each of those is a change made for the compiler, and it is the only
+thing about `arith.py` a reader has to take on trust — so this file takes it
+back, looping one coefficient at a time over Python integers, and the test
+requires the two to agree
 ([`conventions.md`](../../../../docs/reference/conventions.md)).
 
 Transcribed from the published document (§7.4, §7.5, Appendix A), not from memory
 or from another implementation. Nothing here is written for speed: Python integers
 have no width, which is exactly why this side is trustworthy and the other side
-needs the limb split.
+delegates its arithmetic to a field dtype.
 """
 
 from __future__ import annotations
