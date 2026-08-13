@@ -13,6 +13,15 @@ published, which makes a suite of positives alone evidence of nothing. `check`
 derives a tampered batch from whatever positives it is handed and requires the
 rejection, so a scheme never gets the choice.
 
+**The batch axis is gated on a batch `check` builds, because no validation
+program publishes one.** A batch needs one static shape and the published sets
+vary the message length per case, so grouping them yields singletons and a
+per-entry check has no second entry to pin — which leaves the one property the
+seam exists for ungated by exactly the vectors that are supposed to gate a
+scheme. So `check` replicates an accepted case and moves a bit in some entries:
+the multiplicity is the only invented part, since the accepting entries carry the
+standard's own signature and the rejecting ones carry it corrupted.
+
 **A vector the harness cannot run faithfully is an error, not a skip.** Silently
 dropping a field — a published failure verdict, a mode marker selecting a
 different operation — reports a pass for a case that was never run, which is the
@@ -318,6 +327,13 @@ _TAMPERINGS: tuple[tuple[str, Callable[[KatVector], KatVector]], ...] = (
     ("public key", _corrupt_public_key),
 )
 
+# The batch `_check_batch_axis` builds, and which of its entries carry a moved
+# bit. Two of each, so a `verify` that reduced over the batch fails whichever way
+# it reduced: `all` rejects the entries carrying the published signature, `any`
+# accepts the ones carrying it corrupted.
+_BATCH_AXIS_ENTRIES = 4
+_BATCH_AXIS_TAMPERED = frozenset({1, 2})
+
 
 def check(
     scheme: Signature,
@@ -451,7 +467,9 @@ def _check_verify(scheme: Signature, vectors: Sequence[KatVector]) -> None:
     """Verification agrees with every published verdict, and rejects tampering.
 
     The batch is the unit: one call per equal-length group, never a loop over
-    cases, so the harness exercises the path a consumer actually runs.
+    cases, so the harness exercises the path a consumer actually runs. What those
+    groups cannot reach is the batch axis itself, which is why the pass they feed
+    is followed by one over a batch built here.
     """
     runnable = [
         v
@@ -473,6 +491,53 @@ def _check_verify(scheme: Signature, vectors: Sequence[KatVector]) -> None:
                     f"the scheme returned {'accept' if verdict else 'reject'}"
                 )
         _check_tampering(scheme, [v for v in group if v.valid])
+
+    _check_batch_axis(scheme, runnable)
+
+
+def _check_batch_axis(scheme: Signature, vectors: Sequence[KatVector]) -> None:
+    """One accepted case replicated, with a bit moved in some of the entries.
+
+    The pass above already requires a verdict per entry, and on published data it
+    never gets to ask for one: every shape group is a singleton, so there is no
+    second entry whose verdict a reduction could take. That leaves the seam's
+    whole reason to exist — `verify` decides the batch rather than a loop over it
+    — gated by nothing NIST published.
+
+    The batch is therefore built rather than found, and its multiplicity is the
+    only invented part: the accepting entries carry the standard's own signature
+    over its own key and message, and the rejecting ones carry that signature
+    with a bit moved. A `verify` that reduced over the batch fails, and so does
+    one that ignored its input and accepted everything.
+
+    Only the signature is moved, because which input broke the case is what the
+    tampering pass covers, across all three of them; what is under test here is
+    the axis the verdicts come back on.
+    """
+    accepted = next((v for v in vectors if v.valid), None)
+    if accepted is None:
+        return
+    corrupted = _corrupt_signature(accepted)
+    batch = [
+        corrupted if index in _BATCH_AXIS_TAMPERED else accepted
+        for index in range(_BATCH_AXIS_ENTRIES)
+    ]
+    for index, verdict in enumerate(_verify_batch(scheme, batch)):
+        if verdict == (index not in _BATCH_AXIS_TAMPERED):
+            continue
+        replicated = (
+            f"{accepted.case_id}: replicated across a batch of "
+            f"{_BATCH_AXIS_ENTRIES}, entry {index} "
+        )
+        if index in _BATCH_AXIS_TAMPERED:
+            raise KatError(
+                f"{replicated}was accepted after a bit flip in the signature"
+            )
+        raise KatError(
+            f"{replicated}carries the published signature and was rejected "
+            f"because a different entry of the batch was tampered with — verify "
+            f"is not deciding per entry"
+        )
 
 
 def _check_tampering(scheme: Signature, group: Sequence[KatVector]) -> None:
