@@ -36,6 +36,12 @@ this file is the map plus the rules every change must respect.
   or not, and reduces internally — so a scheme's modular arithmetic is never
   hand-written in limbs. Read a residue back with `astype`, never a bitcast: the
   storage is a Montgomery representative.
+  The same rule has a quieter form in any function that runs in **both**
+  namespaces: numpy promotes a reduction's accumulator and frx does not, so a
+  bare `.sum()` returns `uint64` on the host and `uint32` traced from one source
+  line. The values agree, so a round trip, a reference comparison and a
+  known-answer test all pass — pin it (`.sum(axis=-1, dtype=np.uint32)`), and
+  assert the *dtype* in the host-vs-traced case, not only the values.
 - **Standards-exact, or it is not done.** Every scheme reproduces its
   specification byte for byte, gated on the published known-answer tests. A
   scheme that verifies its own signatures has demonstrated nothing — a
