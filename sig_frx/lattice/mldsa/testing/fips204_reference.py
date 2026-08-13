@@ -503,7 +503,12 @@ def w1_encode(w1: list[list[int]], gamma2: int) -> bytes:
     return b"".join(simple_bit_pack(row, bound) for row in w1)
 
 
-def matrix_vector_ntt(
+def base_mul(a_hat: list[int], b_hat: list[int]) -> list[int]:
+    """Algorithm 45 — multiplication in `T_q`, which is pointwise."""
+    return [(a_hat[n] * b_hat[n]) % Q for n in range(N)]
+
+
+def matrix_vector(
     a_hat: list[list[list[int]]], v_hat: list[list[int]]
 ) -> list[list[int]]:
     """`Â ∘ v̂` — §2.4.1's matrix-vector product, pointwise and summed."""
@@ -522,7 +527,7 @@ def keygen_internal(xi: bytes, params: dict[str, int]) -> tuple[bytes, bytes]:
     rho, rho_prime, key = expanded[:32], expanded[32:96], expanded[96:]
     a_hat = expand_a(rho, k, ell)
     s1, s2 = expand_s(rho_prime, k, ell, eta)
-    products = matrix_vector_ntt(a_hat, [ntt(row) for row in s1])
+    products = matrix_vector(a_hat, [ntt(row) for row in s1])
     t = [
         [(value + s2[i][n]) % Q for n, value in enumerate(intt(products[i]))]
         for i in range(k)
@@ -555,12 +560,12 @@ def sign_internal(
     kappa = 0
     while True:
         y = expand_mask(rho_pp, kappa, ell, gamma1)
-        w = [intt(row) for row in matrix_vector_ntt(a_hat, [ntt(poly) for poly in y])]
+        w = [intt(row) for row in matrix_vector(a_hat, [ntt(poly) for poly in y])]
         w1 = [[high_bits(value, gamma2) for value in row] for row in w]
         c_tilde = hashlib.shake_256(mu + w1_encode(w1, gamma2)).digest(lam // 4)
         c_hat = ntt(sample_in_ball(c_tilde, tau))
-        cs1 = [intt([c_hat[n] * row[n] % Q for n in range(N)]) for row in s1_hat]
-        cs2 = [intt([c_hat[n] * row[n] % Q for n in range(N)]) for row in s2_hat]
+        cs1 = [intt(base_mul(c_hat, row)) for row in s1_hat]
+        cs2 = [intt(base_mul(c_hat, row)) for row in s2_hat]
         z = [[(y[i][n] + cs1[i][n]) % Q for n in range(N)] for i in range(ell)]
         difference = [[(w[i][n] - cs2[i][n]) % Q for n in range(N)] for i in range(k)]
         r0 = [[low_bits(value, gamma2) for value in row] for row in difference]
@@ -569,7 +574,7 @@ def sign_internal(
             continue
         if max(infinity_norm(row) for row in r0) >= gamma2 - beta:
             continue
-        ct0 = [intt([c_hat[n] * row[n] % Q for n in range(N)]) for row in t0_hat]
+        ct0 = [intt(base_mul(c_hat, row)) for row in t0_hat]
         hint = [
             [
                 int(
@@ -607,11 +612,9 @@ def verify_internal(
     mu = hashlib.shake_256(tr + m_prime).digest(64)
     c_hat = ntt(sample_in_ball(c_tilde, tau))
     scaled = [ntt([(value << D) % Q for value in row]) for row in t1]
-    az = matrix_vector_ntt(a_hat, [ntt(row) for row in z])
-    approx = [
-        intt([(az[i][n] - c_hat[n] * scaled[i][n]) % Q for n in range(N)])
-        for i in range(k)
-    ]
+    az = matrix_vector(a_hat, [ntt(row) for row in z])
+    ct1 = [base_mul(c_hat, row) for row in scaled]
+    approx = [intt([(az[i][n] - ct1[i][n]) % Q for n in range(N)]) for i in range(k)]
     w1 = [
         [use_hint(bool(hint[i][n]), approx[i][n], gamma2) for n in range(N)]
         for i in range(k)

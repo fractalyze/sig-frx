@@ -29,7 +29,7 @@ tests above already drive all three sets.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 
 import frx
@@ -115,8 +115,9 @@ def _corrupt(batch: Array, entry: int, index: int = 0) -> Array:
     return fnp.asarray(values)
 
 
-def _verdicts(scheme: ml_dsa.MlDsa, *args: Array) -> list[bool]:
-    return [bool(verdict) for verdict in scheme.verify(*args)]
+def _verdicts(values: Array) -> list[bool]:
+    """One verdict per entry as Python bools, which read better in a failure."""
+    return [bool(verdict) for verdict in values]
 
 
 class ParameterSetTest(parameterized.TestCase):
@@ -125,16 +126,7 @@ class ParameterSetTest(parameterized.TestCase):
     def test_table_1_matches_the_reference_s_copy(self) -> None:
         """One table per side, compared — not one table transcribed twice."""
         got = {
-            name.replace("-", "_"): {
-                "k": params.k,
-                "ell": params.ell,
-                "eta": params.eta,
-                "tau": params.tau,
-                "lam": params.lam,
-                "gamma1": params.gamma1,
-                "gamma2": params.gamma2,
-                "omega": params.omega,
-            }
+            name.replace("-", "_"): asdict(params)
             for name, params in ml_dsa.PARAMETER_SETS.items()
         }
         self.assertEqual(got, ref.PARAMETER_SETS)
@@ -286,7 +278,7 @@ class VerificationTest(absltest.TestCase):
         signed = _signed(_DEFAULT)
         keys, messages, signatures = _batch(signed)
         self.assertEqual(
-            _verdicts(signed.scheme, keys, messages, _corrupt(signatures, 1)),
+            _verdicts(signed.scheme.verify(keys, messages, _corrupt(signatures, 1))),
             [True, False, True],
         )
 
@@ -294,7 +286,7 @@ class VerificationTest(absltest.TestCase):
         signed = _signed(_DEFAULT)
         keys, messages, signatures = _batch(signed)
         self.assertEqual(
-            _verdicts(signed.scheme, keys, _corrupt(messages, 2), signatures),
+            _verdicts(signed.scheme.verify(keys, _corrupt(messages, 2), signatures)),
             [True, True, False],
         )
 
@@ -304,7 +296,9 @@ class VerificationTest(absltest.TestCase):
         # Past `rho`, so the corruption lands in `t1` rather than in the seed the
         # matrix is expanded from — the half of the key the hint corrects around.
         self.assertEqual(
-            _verdicts(signed.scheme, _corrupt(keys, 0, index=64), messages, signatures),
+            _verdicts(
+                signed.scheme.verify(_corrupt(keys, 0, index=64), messages, signatures)
+            ),
             [False, True, True],
         )
 
@@ -313,7 +307,7 @@ class VerificationTest(absltest.TestCase):
         computation for `B` signatures, not a driver loop around a traced body."""
         signed = _signed(_DEFAULT)
         verdicts = frx.jit(signed.scheme.verify)(*_batch(signed))
-        self.assertEqual([bool(verdict) for verdict in verdicts], [True] * _BATCH)
+        self.assertEqual(_verdicts(verdicts), [True] * _BATCH)
 
     def test_a_wrong_length_input_verifies_as_false(self) -> None:
         """§3.6.2: a signature or a public key of any other length is a verdict and
@@ -321,11 +315,11 @@ class VerificationTest(absltest.TestCase):
         signed = _signed(_DEFAULT)
         keys, messages, signatures = _batch(signed)
         self.assertEqual(
-            _verdicts(signed.scheme, keys, messages, signatures[:, :-1]),
+            _verdicts(signed.scheme.verify(keys, messages, signatures[:, :-1])),
             [False] * _BATCH,
         )
         self.assertEqual(
-            _verdicts(signed.scheme, keys[:, :-1], messages, signatures),
+            _verdicts(signed.scheme.verify(keys[:, :-1], messages, signatures)),
             [False] * _BATCH,
         )
 
@@ -362,7 +356,7 @@ class MalformedHintTest(absltest.TestCase):
         for offset, byte in edits.items():
             values[1, start + offset] = byte
         self.assertEqual(
-            _verdicts(signed.scheme, keys, messages, fnp.asarray(values)),
+            _verdicts(signed.scheme.verify(keys, messages, fnp.asarray(values))),
             [True, False, True],
         )
 
@@ -402,7 +396,7 @@ class ContextTest(absltest.TestCase):
         verdicts = signed.scheme.verify(
             keys, messages, signatures, context=np.array([7], dtype=np.uint8)
         )
-        self.assertEqual([bool(verdict) for verdict in verdicts], [False] * _BATCH)
+        self.assertEqual(_verdicts(verdicts), [False] * _BATCH)
 
     def test_a_context_the_signer_used_verifies(self) -> None:
         signed = _signed(_DEFAULT)
@@ -415,10 +409,10 @@ class ContextTest(absltest.TestCase):
         )
         batch = fnp.asarray(np.tile(np.asarray(signature), (_BATCH, 1)))
         self.assertEqual(
-            _verdicts(signed.scheme, keys, messages, batch), [False] * _BATCH
+            _verdicts(signed.scheme.verify(keys, messages, batch)), [False] * _BATCH
         )
         verdicts = signed.scheme.verify(keys, messages, batch, context=context)
-        self.assertEqual([bool(verdict) for verdict in verdicts], [True] * _BATCH)
+        self.assertEqual(_verdicts(verdicts), [True] * _BATCH)
 
     def test_a_context_longer_than_its_length_byte_is_an_error(self) -> None:
         signed = _signed(_DEFAULT)
@@ -439,15 +433,15 @@ class InternalInterfaceTest(absltest.TestCase):
     """§6's pair, which signs `M′` as given — a different operation from §5's."""
 
     def _one(self, signature: Array) -> list[bool]:
+        """The verdict on a batch of one, which is what `B = 1` means here."""
         signed = _signed(_DEFAULT)
-        return [
-            bool(verdict)
-            for verdict in signed.scheme.verify_internal(
-                fnp.asarray(np.asarray(signed.public_key)[None, :]),
-                fnp.asarray(np.frombuffer(_MESSAGE, dtype=np.uint8)[None, :]),
-                fnp.asarray(np.asarray(signature)[None, :]),
+        return _verdicts(
+            signed.scheme.verify_internal(
+                signed.public_key[None],
+                fnp.asarray(np.frombuffer(_MESSAGE, dtype=np.uint8))[None],
+                fnp.asarray(signature)[None],
             )
-        ]
+        )
 
     def test_the_internal_pair_round_trips_without_the_context_framing(self) -> None:
         signed = _signed(_DEFAULT)
@@ -481,20 +475,25 @@ class InstanceTest(absltest.TestCase):
 
 
 class IterationBoundTest(absltest.TestCase):
-    """The signing loop's cap, which Appendix C leaves optional and this derives."""
+    """The signing loop's cap, which Appendix C leaves optional and this derives.
+
+    It is `sampling.budget` asked for one success from one attempt per trial, so
+    what is worth pinning here is the number that comes back rather than a second
+    copy of the tail: the same two-sided check the samplers' budget gets, written
+    against the acceptance rate this scheme claims.
+    """
 
     def test_is_the_smallest_bound_that_meets_the_margin(self) -> None:
-        accept = ml_dsa._WORST_ACCEPTANCE
-        margin = ml_dsa._LOG2_UNREACHABLE
-        bound = ml_dsa._iteration_bound(accept, margin)
-        num, den = accept
+        bound = ml_dsa._MAX_ITERATIONS
+        margin = sampling.LOG2_SHORTFALL
+        num, den = ml_dsa._WORST_ACCEPTANCE
         self.assertLessEqual((den - num) ** bound << margin, den**bound)
         self.assertGreater((den - num) ** (bound - 1) << margin, den ** (bound - 1))
 
-    def test_the_margin_is_the_one_the_samplers_are_sized_against(self) -> None:
-        """One strength for both safety arguments in the scheme, rather than two
-        numbers that can drift apart."""
-        self.assertEqual(ml_dsa._LOG2_UNREACHABLE, sampling._LOG2_SHORTFALL)
+    def test_the_acceptance_rate_is_table_1_s_worst_repetition_count(self) -> None:
+        """5.1 repetitions at ML-DSA-65 — the fraction, so no float rounds it."""
+        num, den = ml_dsa._WORST_ACCEPTANCE
+        self.assertEqual(den / num, 5.1)
 
 
 if __name__ == "__main__":

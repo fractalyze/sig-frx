@@ -67,7 +67,7 @@ from hash_frx.keccak.byte_hashes import Shake256
 from sig_frx import context as ctx
 from sig_frx.arrays import namespace
 from sig_frx.lattice.mldsa import arith, encoding, sampling
-from sig_frx.lattice.mldsa.arith import FIELD, D, Q
+from sig_frx.lattice.mldsa.arith import D, Q
 from sig_frx.signature import Signature
 
 # §5.2's domain separator for the pure variant. §5.4's pre-hash variant uses one,
@@ -77,42 +77,20 @@ _PURE_DOMAIN = 0
 # The 32-byte `rnd` of Algorithm 2 line 5, zero for the deterministic variant.
 _RANDOMIZER_SIZE = 32
 
-# The margin `_MAX_ITERATIONS` is sized against — the same `2^-256` the samplers'
-# budget is sized against (`sampling._LOG2_SHORTFALL`), so the two safety
-# arguments in this scheme are made at one strength.
-_LOG2_UNREACHABLE = 256
-
 # Table 1's largest expected repetition count, as the fraction it is: ML-DSA-65
 # runs the loop 5.1 times on average, so an iteration succeeds with probability
 # at least 1/5.1 at every parameter set.
 _WORST_ACCEPTANCE = (10, 51)
 
-
-def _iteration_bound(accept: tuple[int, int], log2_margin: int) -> int:
-    """The fewest iterations whose failure probability is below `2^-log2_margin`.
-
-    Appendix C leaves an iteration cap optional, and this is the argument for the
-    one below: with acceptance `num/den`, `n` consecutive rejections have
-    probability `((den−num)/den)^n`, and the bound is the smallest `n` that puts
-    it under the margin. Computed rather than chosen, and in integers rather than
-    logarithms — §3.6.4 bars floating-point arithmetic from this scheme, and a cap
-    that a reader cannot regenerate is a cap nobody can check.
-    """
-    num, den = accept
-    rejections, trials, iterations = den - num, den, 1
-    while (rejections << log2_margin) > trials:
-        rejections, trials, iterations = (
-            rejections * (den - num),
-            trials * den,
-            iterations + 1,
-        )
-    return iterations
-
-
-# Reaching it means the loop cannot terminate — a wrong bound or a wrong sampler
-# — rather than an unlucky seed, which is what `sampling._require_enough` says
-# about its own budget in the same words.
-_MAX_ITERATIONS = _iteration_bound(_WORST_ACCEPTANCE, _LOG2_UNREACHABLE)
+# Appendix C leaves an iteration cap optional, and this is the argument for
+# having one: `sampling.budget` asked for a single success from one attempt per
+# trial is the fewest iterations whose chance of producing nothing at all falls
+# below the margin the samplers are sized against. One derivation of the tail
+# for both loops, rather than a second one to check. Reaching it means the loop
+# cannot terminate — a wrong bound or a wrong sampler — rather than an unlucky
+# seed, which is what `sampling._require_enough` says about its own budget in
+# the same words.
+_MAX_ITERATIONS = sampling.budget(1, _WORST_ACCEPTANCE, 1)
 
 
 @dataclass(frozen=True)
@@ -246,34 +224,16 @@ def _h(*parts: ArrayLike, size: int) -> Any:
     return Shake256(size).digest(message[None, :])[0]
 
 
-def _field(values: ArrayLike) -> Any:
-    """Signed coefficients as `FIELD` residues.
+def _exceeds(values: Any, bound: int) -> Any:
+    """`||values||∞ ≥ bound` over a whole vector, in the caller's namespace.
 
-    The samplers and the decoders speak the standard's own ranges — `[−η, η]`,
-    `[−γ1+1, γ1]`, a `mod±` half — and the transform speaks `T_q`, so this is the
-    one conversion between them. The reduction comes first: a negative coefficient
-    is not a residue the field dtype can read.
+    The rejection bounds and the verifier's `||z||∞` check are the same
+    comparison read in opposite directions, so they are one expression: signing
+    reads it as a host `bool`, which is what lets its loop be a loop, and
+    verification reads it as a mask.
     """
     xnp = namespace(values)
-    return (xnp.asarray(values, dtype=np.int32) % np.int32(Q)).astype(FIELD)
-
-
-def _exceeds(values: Any, bound: int) -> bool:
-    """`||values||∞ ≥ bound` over a whole vector, as a host branch.
-
-    Signing is concrete, so this is a Python `bool` and not a mask — which is the
-    whole reason the rejection loop can be a loop at all.
-    """
-    return bool(np.max(np.asarray(arith.infinity_norm(values))) >= bound)
-
-
-def _matrix_vector(a_hat: Any, v_hat: Any) -> Any:
-    """`Â ∘ v̂` — a matrix-vector product in `T_q`, `[k, ℓ, 256]` by `[ℓ, 256]`.
-
-    The ring multiplication is `base_mul`'s pointwise one; the sum over `ℓ` is the
-    field's, which is why nothing here reduces by hand.
-    """
-    return arith.base_mul(a_hat, v_hat[..., None, :, :]).sum(axis=-2)
+    return xnp.max(arith.infinity_norm(values)) >= bound
 
 
 class MlDsa:
@@ -310,7 +270,7 @@ class MlDsa:
         cannot be gated on published bytes.
         """
         params = self.params
-        xi = fnp.asarray(seed, dtype=fnp.uint8)
+        xi = namespace(seed).asarray(seed, dtype=np.uint8)
         if xi.shape != (params.seed_size,):
             raise ValueError(
                 f"keygen takes ξ, {params.seed_size} bytes, got shape "
@@ -323,7 +283,8 @@ class MlDsa:
         a_hat = sampling.expand_a(rho, params.k, params.ell)
         s1, s2 = sampling.expand_s(rho_prime, params.k, params.ell, params.eta)
         # Lines 5 and 6: t = A·s1 + s2, then split off the d low bits.
-        t = arith.intt(_matrix_vector(a_hat, arith.ntt(_field(s1)))) + _field(s2)
+        products = arith.matrix_vector(a_hat, arith.ntt(arith.to_field(s1)))
+        t = arith.intt(products) + arith.to_field(s2)
         t1, t0 = arith.power2round(t)
         public_key = encoding.pk_encode(rho, t1)
         return public_key, encoding.sk_encode(
@@ -371,9 +332,9 @@ class MlDsa:
         params = self.params
         key = self._parse_secret_key(secret_key)
         a_hat = sampling.expand_a(key.rho, params.k, params.ell)
-        s1_hat = arith.ntt(_field(key.s1))
-        s2_hat = arith.ntt(_field(key.s2))
-        t0_hat = arith.ntt(_field(key.t0))
+        s1_hat = arith.ntt(arith.to_field(key.s1))
+        s2_hat = arith.ntt(arith.to_field(key.s2))
+        t0_hat = arith.ntt(arith.to_field(key.t0))
         # Lines 6 and 7. `tr` binds the signature to the public key, and `rnd` is
         # the only difference between the hedged and deterministic variants.
         mu = _h(key.tr, message, size=64)
@@ -382,18 +343,21 @@ class MlDsa:
         kappa = 0
         for _ in range(_MAX_ITERATIONS):
             y = sampling.expand_mask(rho_prime, kappa, params.ell, params.gamma1)
-            w = arith.intt(_matrix_vector(a_hat, arith.ntt(_field(y))))
+            y_field = arith.to_field(y)
+            w = arith.intt(arith.matrix_vector(a_hat, arith.ntt(y_field)))
             c_tilde = _h(
                 mu,
                 encoding.w1_encode(arith.high_bits(w, params.gamma2), params.gamma2),
                 size=params.commitment_hash_size,
             )
-            c_hat = arith.ntt(_field(sampling.sample_in_ball(c_tilde, params.tau)))
+            c_hat = arith.ntt(
+                arith.to_field(sampling.sample_in_ball(c_tilde, params.tau))
+            )
             # Line 31 increments at the end of the loop body; here it happens
             # before the rejections, where a `continue` cannot skip it.
             kappa += params.ell
 
-            z = _field(y) + arith.intt(arith.base_mul(c_hat, s1_hat))
+            z = y_field + arith.intt(arith.base_mul(c_hat, s1_hat))
             low = w - arith.intt(arith.base_mul(c_hat, s2_hat))
             r0 = arith.low_bits(low, params.gamma2)
             # Line 23: both bounds are on `mod±` representatives, which is what
@@ -419,8 +383,8 @@ class MlDsa:
 
         raise RuntimeError(
             f"signing rejected {_MAX_ITERATIONS} consecutive candidates, which "
-            f"Table 1 puts below 2^-{_LOG2_UNREACHABLE} — the bounds or the "
-            f"samplers are wrong rather than the seed being unlucky"
+            f"Table 1 puts below 2^-{sampling.LOG2_SHORTFALL} — the bounds or "
+            f"the samplers are wrong rather than the seed being unlucky"
         )
 
     def _randomizer(self, randomness: ArrayLike | None) -> Any:
@@ -522,12 +486,12 @@ class MlDsa:
         # Lines 6 and 7: the verifier recomputes `tr` from the key it was handed,
         # which is what binds a signature to that key rather than to any other.
         mu = _h(_h(public_key, size=64), message, size=64)
-        c_hat = arith.ntt(_field(sampling.sample_in_ball(c_tilde, params.tau)))
+        c_hat = arith.ntt(arith.to_field(sampling.sample_in_ball(c_tilde, params.tau)))
         # Line 9: `w′Approx = Az − c·t1·2^d`, the commitment as the verifier can
         # reconstruct it. `t1·2^d` is below q, so the scaling is the field's.
         approx = arith.intt(
-            _matrix_vector(a_hat, arith.ntt(_field(z)))
-            - arith.base_mul(c_hat, arith.ntt(_field(t1 * np.int32(1 << D))))
+            arith.matrix_vector(a_hat, arith.ntt(arith.to_field(z)))
+            - arith.base_mul(c_hat, arith.ntt(arith.to_field(t1 * np.int32(1 << D))))
         )
         c_tilde_prime = _h(
             mu,
@@ -540,7 +504,7 @@ class MlDsa:
         # about the input, so it lands in the same `bool` rather than raising.
         return (
             ok
-            & (fnp.max(arith.infinity_norm(z)) < params.gamma1 - params.beta)
+            & ~_exceeds(z, params.gamma1 - params.beta)
             & fnp.all(c_tilde == c_tilde_prime)
         )
 

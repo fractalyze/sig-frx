@@ -96,6 +96,20 @@ def _generator() -> int:
 GENERATOR = _generator()
 
 
+def to_field(w: ArrayLike) -> Any:
+    """Signed coefficients as `FIELD` residues — the inverse of `centered`.
+
+    The module's two representations meet here and in `centered`, so both
+    directions of that boundary live in the module that draws it. The samplers
+    and the decoders speak the standard's own ranges — `[−η, η]`, `[−γ1+1, γ1]`,
+    a `mod±` half — and the transform speaks `T_q`, so a scheme converts on the
+    way in. The reduction comes first: a negative coefficient is not a residue
+    the field dtype can read.
+    """
+    xnp = namespace(w)
+    return (xnp.asarray(w, dtype=np.int32) % np.int32(Q)).astype(FIELD)
+
+
 def base_mul(a_hat: ArrayLike, b_hat: ArrayLike) -> Any:
     """FIPS 204 Algorithm 45 — multiplication in `T_q`, which is pointwise.
 
@@ -106,6 +120,19 @@ def base_mul(a_hat: ArrayLike, b_hat: ArrayLike) -> Any:
     """
     xnp = namespace(a_hat, b_hat)
     return xnp.asarray(a_hat) * xnp.asarray(b_hat)
+
+
+def matrix_vector(a_hat: ArrayLike, v_hat: ArrayLike) -> Any:
+    """`Â ∘ v̂` — §2.4.1's matrix-vector product, `[k, ℓ, 256]` by `[ℓ, 256]`.
+
+    The ring multiplication is `base_mul`'s pointwise one and the sum over `ℓ`
+    is the field's, so nothing here reduces by hand. It carries no scheme logic,
+    which is why it sits with the transform rather than with the assembly that
+    calls it — the fourth name the two lattice repos keep aligned
+    ([`conventions.md`](../../../docs/reference/conventions.md)).
+    """
+    xnp = namespace(a_hat, v_hat)
+    return base_mul(a_hat, xnp.asarray(v_hat)[..., None, :, :]).sum(axis=-2)
 
 
 def ntt(w: ArrayLike) -> Any:

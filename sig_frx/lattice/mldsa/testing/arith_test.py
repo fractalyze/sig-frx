@@ -612,6 +612,51 @@ class RoundingTest(parameterized.TestCase):
         self.assertTrue(np.array_equal(np.asarray(recovered), np.asarray(expected)))
 
 
+class RepresentationTest(parameterized.TestCase):
+    """The two conversions across the module's `FIELD`-versus-integer boundary."""
+
+    @parameterized.named_parameters(*_NAMESPACES)
+    def test_centered_matches_mod_plus_minus(self, lift: _Lift) -> None:
+        values = _field(np.array(_EDGE_INPUTS, dtype=np.uint64))
+        self.assertEqual(
+            [int(v) for v in np.asarray(arith.centered(lift(values)))],
+            [ref.mod_plus_minus(v, arith.Q) for v in _ints(values)],
+        )
+
+    @parameterized.named_parameters(*_NAMESPACES)
+    def test_centered_leaves_an_already_signed_argument_alone(
+        self, lift: _Lift
+    ) -> None:
+        """`LowBits` produces one, and signing measures its bounds against it."""
+        signed = np.array([-(1 << 17), -5, 0, 5, 1 << 17], dtype=np.int32)
+        self.assertEqual(
+            [int(v) for v in np.asarray(arith.centered(lift(signed)))],
+            [int(v) for v in signed],
+        )
+
+    @parameterized.named_parameters(*_NAMESPACES)
+    def test_to_field_inverts_centered(self, lift: _Lift) -> None:
+        signed = np.array([-(arith.Q // 2), -1, 0, 1, arith.Q // 2], dtype=np.int32)
+        residues = arith.to_field(lift(signed))
+        self.assertEqual(_ints(residues), [int(v) % arith.Q for v in signed])
+        self.assertEqual(
+            [int(v) for v in np.asarray(arith.centered(residues))],
+            [int(v) for v in signed],
+        )
+
+    @parameterized.named_parameters(*_NAMESPACES)
+    def test_matrix_vector_matches_the_reference(self, lift: _Lift) -> None:
+        """`Â ∘ v̂` over the `ℓ` axis, which is the product keygen and signing take."""
+        rng = np.random.default_rng(11)
+        matrix = rng.integers(0, arith.Q, size=(3, 2, arith.N), dtype=np.uint64)
+        vector = rng.integers(0, arith.Q, size=(2, arith.N), dtype=np.uint64)
+        got = arith.matrix_vector(lift(_field(matrix)), lift(_field(vector)))
+        self.assertEqual(
+            np.asarray(got).astype(np.uint32).tolist(),
+            ref.matrix_vector(matrix.tolist(), vector.tolist()),
+        )
+
+
 class InfinityNormTest(parameterized.TestCase):
     """`||w||∞` over the trailing axis, against the centered representative."""
 
