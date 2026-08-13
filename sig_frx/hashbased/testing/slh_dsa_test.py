@@ -32,6 +32,7 @@ from frx import Array
 from frx.typing import ArrayLike
 from hash_frx.sha256 import Sha256
 
+from sig_frx.context import MAX_SIZE as MAX_CONTEXT_SIZE
 from sig_frx.hashbased import fors, hypertree, slh_dsa, tree, xmss
 from sig_frx.hashbased.tweakable import Sha2TweakableHash
 
@@ -379,7 +380,7 @@ class SignTest(absltest.TestCase):
             self.scheme.sign(self.secret_key[:-1], _MESSAGE)
 
     def test_a_context_longer_than_its_length_byte_is_an_error(self) -> None:
-        longest = np.zeros(slh_dsa.MAX_CONTEXT_SIZE, dtype=np.uint8)
+        longest = np.zeros(MAX_CONTEXT_SIZE, dtype=np.uint8)
         self.scheme.sign(self.secret_key, _MESSAGE, context=longest)
         with self.assertRaisesRegex(ValueError, "context string is at most"):
             self.scheme.sign(

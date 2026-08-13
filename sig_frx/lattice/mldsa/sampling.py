@@ -13,19 +13,16 @@ get right are how large the budget is and how the survivors are collected.
 A generous static bound is only as good as the argument that it is generous
 enough, and "5 blocks is what everyone uses" is not one — the implementations
 that use 5 also loop when 5 is not enough, which is the part this cannot do. So
-`_budget` computes the smallest budget whose *exact* binomial shortfall
+`budget` computes the smallest budget whose *exact* binomial shortfall
 probability is at most `2^-256`, the collision strength of the strongest
 parameter set. It is integer arithmetic over the acceptance probability the
 standard's own rejection rule defines, evaluated once per parameterisation on
 the host, and it means the bound-exhausted path is unreachable rather than
 merely unlikely (see `_require_enough` for what happens if it is reached anyway).
 
-A fixed budget also settles the question `conventions.md` asks of every rejection
-loop: how many blocks are squeezed and how many candidates are examined is the
-same for every seed, so the trip count leaks nothing. That is a consequence of
-the shape rather than a claim — this repo makes no side-channel claim
-([`security.md`](../../../docs/reference/security.md)) — and it is the shape the
-compiler wanted anyway.
+Which loop shape a rejection gets is the scheme's decision to record, and
+[`ml-dsa.md`](../../../docs/schemes/ml-dsa.md) records this one alongside the
+signing loop that went the other way.
 
 ## Collection is a gather, and a running count is the schedule
 
@@ -55,19 +52,6 @@ None of which is an argument against the incremental sponge. It is what a
 `while_loop` on the acceptance count needs, and that is the design this one is
 weighed against — the budget is what makes the incremental surface unnecessary
 here, not the other way round.
-
-## The batch axis
-
-The samplers take one seed and return one matrix, vector, or polynomial, the way
-FIPS 204 defines them; the axis inside each is over the streams that seed fans
-out into, which is where ExpandA's `k·ℓ` independent entries live. A batch of
-*signatures* is `frx.vmap` over these, per
-[`conventions.md`](../../../docs/reference/conventions.md).
-
-One of them should not be batched that way, and it is the expensive one: `Â`
-depends on the public key alone, so `vmap`ping ExpandA across signatures
-verified under one key recomputes the same matrix once per signature. It belongs
-outside the per-signature axis, sampled once and closed over.
 
 ## Â is already in the standard's order
 
@@ -102,7 +86,7 @@ from sig_frx.lattice.mldsa.encoding import bytes_to_bits, unpack_fields
 # collision strength `λ` of the strongest parameter set (Table 1), so a budget
 # that meets it is not the weakest part of any set — and the margin is cheap,
 # since the tail falls off fast enough that buying it costs one further block.
-_LOG2_SHORTFALL = 256
+LOG2_SHORTFALL = 256
 
 # CoeffFromThreeBytes reads 23 uniform bits and keeps them when they land below
 # `q` (Algorithm 14); the three bytes it reads divide `G`'s rate exactly.
@@ -111,7 +95,7 @@ _NTT_PER_BLOCK = SHAKE128_RATE // 3
 
 # CoeffFromHalfByte (Algorithm 15) reads two candidates per byte and keeps a
 # nibble below 15 at `η = 2` and below 9 at `η = 4`. The threshold is written
-# once: `_rej_bounded_poly` rejects by it and `_budget` is sized against it, and
+# once: `_rej_bounded_poly` rejects by it and `budget` is sized against it, and
 # a divergence between those two is the one thing that could exhaust a budget
 # the tail says is safe.
 _BOUNDED_THRESHOLD = {2: 15, 4: 9}
@@ -138,12 +122,17 @@ def _shortfall_exceeds_margin(
         comb(trials, survivors) * num**survivors * (den - num) ** (trials - survivors)
         for survivors in range(needed)
     )
-    return (shortfall << _LOG2_SHORTFALL) > den**trials
+    return (shortfall << LOG2_SHORTFALL) > den**trials
 
 
 @lru_cache(maxsize=None)
-def _budget(needed: int, accept: tuple[int, int], per_block: int) -> int:
+def budget(needed: int, accept: tuple[int, int], per_block: int) -> int:
     """The fewest blocks of `per_block` candidates that safely yield `needed`.
+
+    Public because the sizing is the scheme's too, not only the samplers': at
+    `needed = 1` and one candidate per block it answers how many independent
+    attempts make failing altogether unreachable, which is what `ml_dsa` bounds
+    its rejection loop by. One derivation of the tail for the whole scheme.
 
     Cached because it is the same handful of parameterisations for the life of a
     process, and because the tail is big-integer work that no caller should pay
@@ -161,7 +150,7 @@ def _require_enough(survivors: Any, needed: int, sampler: str) -> None:
     The check runs wherever it can be run. Key generation and signing are
     concrete, so the count is a number there and a shortfall raises; under a
     tracer it is not a number and no comparison on it can raise. What stands in
-    for the check on that path is `_budget`: the count it sizes for cannot fall
+    for the check on that path is `budget`: the count it sizes for cannot fall
     short more often than `2^-256`, which is below the collision strength of the
     scheme being sampled for.
 
@@ -180,7 +169,7 @@ def _require_enough(survivors: Any, needed: int, sampler: str) -> None:
         raise RuntimeError(
             f"{sampler}: {int(short.sum())} of {short.size} streams ran out of "
             f"candidates before {needed} survived rejection. The budget is sized "
-            f"for a shortfall probability below 2^-{_LOG2_SHORTFALL}, so this is "
+            f"for a shortfall probability below 2^-{LOG2_SHORTFALL}, so this is "
             f"a wrong budget rather than an unlucky seed."
         )
 
@@ -284,7 +273,7 @@ def expand_a(rho: ArrayLike, k: int, ell: int) -> Any:
         ],
         dtype=np.uint8,
     )
-    blocks = _budget(N, _NTT_ACCEPT, _NTT_PER_BLOCK)
+    blocks = budget(N, _NTT_ACCEPT, _NTT_PER_BLOCK)
     hats = _rej_ntt_poly(_seeds(rho, 32, tails), blocks)
     return hats.reshape(k, ell, N)
 
@@ -302,7 +291,7 @@ def expand_s(rho: ArrayLike, k: int, ell: int, eta: int) -> tuple[Any, Any]:
     if eta not in _BOUNDED_ACCEPT:
         raise ValueError(f"eta ({eta}) must be 2 or 4 — FIPS 204 Table 1")
     tails = np.array([_integer_to_bytes(r, 2) for r in range(ell + k)], dtype=np.uint8)
-    blocks = _budget(N, _BOUNDED_ACCEPT[eta], _BOUNDED_PER_BLOCK)
+    blocks = budget(N, _BOUNDED_ACCEPT[eta], _BOUNDED_PER_BLOCK)
     coefficients = _rej_bounded_poly(_seeds(rho, 64, tails), eta, blocks)
     return coefficients[:ell], coefficients[ell:]
 
@@ -351,18 +340,18 @@ def sample_in_ball(rho: ArrayLike, tau: int) -> Any:
     # A step's byte is accepted when it is at most `i`, and `i` is smallest at
     # the first step — so every step accepts at least as often as `(257−τ)/256`,
     # and one budget sized at that rate covers all of them.
-    budget = _budget(tau, (N - tau + 1, N), 1)
-    stream = Shake256(8 + budget).digest(seed[None, :])[0]
+    allowance = budget(tau, (N - tau + 1, N), 1)
+    stream = Shake256(8 + allowance).digest(seed[None, :])[0]
 
     signs = bytes_to_bits(stream[:8]).astype(np.int32)
     candidates = stream[8:].astype(np.int32)
-    position = np.arange(budget, dtype=np.int32)
+    position = np.arange(allowance, dtype=np.int32)
     slot = np.arange(N, dtype=np.int32)
     # Position and byte in one sortable key, so that "the first admissible byte"
     # is a single minimum rather than a running count and two masked sums. The
     # byte is recovered from the low half because it is what the key ends in.
     key = position * np.int32(N) + candidates
-    exhausted = np.int32(budget * N + N)
+    exhausted = np.int32(allowance * N + N)
 
     c = fnp.zeros(N, dtype=np.int32)
     cursor = fnp.zeros((), dtype=np.int32)

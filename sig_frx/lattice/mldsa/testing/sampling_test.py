@@ -101,7 +101,7 @@ class BudgetTest(parameterized.TestCase):
     def test_is_the_smallest_budget_that_meets_the_margin(
         self, needed: int, accept: tuple[int, int], per_block: int
     ) -> None:
-        blocks = sampling._budget(needed, accept, per_block)
+        blocks = sampling.budget(needed, accept, per_block)
         self.assertFalse(
             sampling._shortfall_exceeds_margin(blocks * per_block, needed, accept),
             "the chosen budget does not meet the margin",
@@ -116,12 +116,12 @@ class BudgetTest(parameterized.TestCase):
     def test_the_margin_is_the_strongest_parameter_set_s_strength(self) -> None:
         """`2^-256` is `λ` at ML-DSA-87 (Table 1), not a round number."""
         self.assertEqual(
-            sampling._LOG2_SHORTFALL, max(case["lam"] for case in _PARAMETER_SETS)
+            sampling.LOG2_SHORTFALL, max(case["lam"] for case in _PARAMETER_SETS)
         )
 
     def test_a_certain_acceptance_needs_no_slack(self) -> None:
         """The tail is exact, so `p = 1` sizes to exactly what is asked for."""
-        self.assertEqual(sampling._budget(256, (1, 1), 8), 32)
+        self.assertEqual(sampling.budget(256, (1, 1), 8), 32)
 
 
 class ExpandATest(parameterized.TestCase):
@@ -332,14 +332,14 @@ class ExhaustionTest(parameterized.TestCase):
         ("sample_in_ball", lambda: sampling.sample_in_ball(_seed(32, 62), 39)),
     )
     def test_a_shrunken_budget_is_loud(self, sample: Any) -> None:
-        with mock.patch.object(sampling, "_budget", return_value=1):
+        with mock.patch.object(sampling, "budget", return_value=1):
             with self.assertRaisesRegex(RuntimeError, "ran out of candidates"):
                 sample()
 
     def test_the_message_names_the_budget_and_not_the_seed(self) -> None:
         """A shortfall is a wrong bound, and the message has to say so — the
         seed is the one thing that cannot be at fault."""
-        with mock.patch.object(sampling, "_budget", return_value=1):
+        with mock.patch.object(sampling, "budget", return_value=1):
             with self.assertRaises(RuntimeError) as raised:
                 sampling.expand_a(_seed(32, 63), 4, 4)
         self.assertIn("wrong budget rather than an unlucky seed", str(raised.exception))

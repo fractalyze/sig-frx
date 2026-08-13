@@ -40,6 +40,30 @@ py_library(
     ],
 )
 
+# FIPS 204 §5 and §6 — the scheme itself, over the three libraries above. The
+# `Signature` seam and the shared context framing are the only dependencies that
+# are not ML-DSA's own: everything else the assembly needs is `:arith`,
+# `:encoding` and `:sampling`, and the hash it reaches for directly is `H`.
+py_library(
+    name = "ml_dsa",
+    srcs = [
+        "__init__.py",
+        "ml_dsa.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":arith",
+        ":encoding",
+        ":sampling",
+        "//sig_frx:arrays",
+        "//sig_frx:context",
+        "//sig_frx:signature",
+        "@hash_frx//hash_frx/keccak",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
 # FIPS 204 §7.3's pseudorandom sampling. The keccak dependency is the whole of
 # it — every sampler is a SHAKE squeezed to a fixed length and rejection-sampled
 # — and `:arith` supplies the field and the modulus the accepted candidates land
