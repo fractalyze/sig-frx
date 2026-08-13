@@ -155,6 +155,18 @@ def _centered_mod(xnp: Any, r: Any, modulus: int) -> Any:
     return xnp.where(low > modulus // 2, low - np.int32(modulus), low)
 
 
+def centered(r: ArrayLike) -> Any:
+    """`r mod± q` — §2.3's representative in `(-q/2, q/2]`, as int32.
+
+    Signing needs it twice over: the bounds it rejects on are stated against this
+    representative, and `sigEncode` packs `z mod± q` rather than `z`. It takes a
+    residue in either form — a `FIELD` element or a canonical integer — because
+    `_canonical` reads both, and a value already centered is its own `mod±`.
+    """
+    xnp = namespace(r)
+    return _centered_mod(xnp, _canonical(xnp, r), Q)
+
+
 def power2round(r: ArrayLike) -> tuple[Any, Any]:
     """FIPS 204 Algorithm 35: `r ≡ r1·2^d + r0 mod q`, returning `(r1, r0)`.
 
@@ -215,8 +227,9 @@ def infinity_norm(w: ArrayLike) -> Any:
 
     The rejection bounds in signing are all stated against this, and it is a
     reduction rather than a comparison so that a caller can compare it to `beta`
-    or `gamma1` itself.
+    or `gamma1` itself. Expressed through `centered` so that the norm and the
+    representative it is defined over cannot drift — and so that it answers for
+    an already-signed argument, which `LowBits` produces and signing measures.
     """
     xnp = namespace(w)
-    canonical = _canonical(xnp, w)
-    return xnp.max(xnp.minimum(canonical, np.int32(Q) - canonical), axis=-1)
+    return xnp.max(xnp.abs(centered(w)), axis=-1)
