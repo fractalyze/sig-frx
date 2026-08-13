@@ -3,17 +3,22 @@
 
 The modules under test reshape every one of these: the transform becomes one
 opcode call plus an ordering conversion, the rounding functions run over whole
-arrays, and a rejection loop that squeezes until enough candidates survive
-becomes a fixed block schedule with a mask. Each of those is a change made for
-the compiler, and it is the only thing about `arith.py` and `sampling.py` a
-reader has to take on trust — so this file takes it back, looping one
-coefficient at a time over Python integers, and the tests require the two to
-agree ([`conventions.md`](../../../../docs/reference/conventions.md)).
+arrays, a rejection loop that squeezes until enough candidates survive becomes a
+fixed block schedule with a mask, and verification becomes one `vmap`ped
+computation over a batch. Each of those is a change made for the compiler, and it
+is the only thing about `arith.py`, `sampling.py` and `ml_dsa.py` a reader has to
+take on trust — so this file takes it back, looping one coefficient at a time over
+Python integers, and the tests require the two to agree
+([`conventions.md`](../../../../docs/reference/conventions.md)).
 
-Transcribed from the published document (§7.1–§7.5, Appendix A), not from memory
-or from another implementation. Nothing here is written for speed: Python integers
-have no width, which is exactly why this side is trustworthy and the other side
-delegates its arithmetic to a field dtype.
+The scheme's own three algorithms are here for the same reason and one more: the
+signing loop's trip count is not observable from the outside, so the only way to
+check it is to require the two loops to produce the same bytes.
+
+Transcribed from the published document (§5, §6, §7.1–§7.5, Appendix A), not from
+memory or from another implementation. Nothing here is written for speed: Python
+integers have no width, which is exactly why this side is trustworthy and the
+other side delegates its arithmetic to a field dtype.
 
 The sampling half needs a SHAKE, and it takes the standard library's — which is
 the point. Squeezing here is a `while` loop that asks for one more byte whenever
@@ -459,7 +464,159 @@ def sig_encode(
     return out + hint_bit_pack(h, omega)
 
 
+def sk_decode(
+    sk: bytes, k: int, ell: int, eta: int
+) -> tuple[bytes, bytes, bytes, list[list[int]], list[list[int]], list[list[int]]]:
+    """Algorithm 25."""
+    packed = 32 * (2 * eta).bit_length()
+    t0_packed = 32 * D
+    rho, key, tr, body = sk[:32], sk[32:64], sk[64:128], sk[128:]
+    s1 = [bit_unpack(body[i * packed : (i + 1) * packed], eta, eta) for i in range(ell)]
+    body = body[ell * packed :]
+    s2 = [bit_unpack(body[i * packed : (i + 1) * packed], eta, eta) for i in range(k)]
+    body = body[k * packed :]
+    low = 1 << (D - 1)
+    t0 = [
+        bit_unpack(body[i * t0_packed : (i + 1) * t0_packed], low - 1, low)
+        for i in range(k)
+    ]
+    return rho, key, tr, s1, s2, t0
+
+
+def sig_decode(
+    sigma: bytes, lam: int, ell: int, k: int, gamma1: int, omega: int
+) -> tuple[bytes, list[list[int]], list[list[int]] | None]:
+    """Algorithm 27 — the hint is `None` where the standard returns `⊥`."""
+    c_size = lam // 4
+    z_size = 32 * (1 + (gamma1 - 1).bit_length())
+    c_tilde, body = sigma[:c_size], sigma[c_size:]
+    z = [
+        bit_unpack(body[i * z_size : (i + 1) * z_size], gamma1 - 1, gamma1)
+        for i in range(ell)
+    ]
+    return c_tilde, z, hint_bit_unpack(body[ell * z_size :], k, omega)
+
+
 def w1_encode(w1: list[list[int]], gamma2: int) -> bytes:
     """Algorithm 28."""
     bound = (Q - 1) // (2 * gamma2) - 1
     return b"".join(simple_bit_pack(row, bound) for row in w1)
+
+
+def matrix_vector_ntt(
+    a_hat: list[list[list[int]]], v_hat: list[list[int]]
+) -> list[list[int]]:
+    """`Â ∘ v̂` — §2.4.1's matrix-vector product, pointwise and summed."""
+    return [
+        [sum(row[j][n] * v_hat[j][n] for j in range(len(v_hat))) % Q for n in range(N)]
+        for row in a_hat
+    ]
+
+
+def keygen_internal(xi: bytes, params: dict[str, int]) -> tuple[bytes, bytes]:
+    """Algorithm 6, line for line."""
+    k, ell, eta = params["k"], params["ell"], params["eta"]
+    expanded = hashlib.shake_256(
+        xi + integer_to_bytes(k, 1) + integer_to_bytes(ell, 1)
+    ).digest(128)
+    rho, rho_prime, key = expanded[:32], expanded[32:96], expanded[96:]
+    a_hat = expand_a(rho, k, ell)
+    s1, s2 = expand_s(rho_prime, k, ell, eta)
+    products = matrix_vector_ntt(a_hat, [ntt(row) for row in s1])
+    t = [
+        [(value + s2[i][n]) % Q for n, value in enumerate(intt(products[i]))]
+        for i in range(k)
+    ]
+    rounded = [[power2round(value) for value in row] for row in t]
+    t1 = [[value[0] for value in row] for row in rounded]
+    t0 = [[value[1] for value in row] for row in rounded]
+    pk = pk_encode(rho, t1)
+    tr = hashlib.shake_256(pk).digest(64)
+    return pk, sk_encode(rho, key, tr, s1, s2, t0, eta)
+
+
+def sign_internal(
+    sk: bytes, m_prime: bytes, rnd: bytes, params: dict[str, int]
+) -> bytes:
+    """Algorithm 7, line for line — the `while` included."""
+    k, ell, eta = params["k"], params["ell"], params["eta"]
+    tau, lam = params["tau"], params["lam"]
+    gamma1, gamma2, omega = params["gamma1"], params["gamma2"], params["omega"]
+    beta = tau * eta
+
+    rho, key, tr, s1, s2, t0 = sk_decode(sk, k, ell, eta)
+    s1_hat = [ntt(row) for row in s1]
+    s2_hat = [ntt(row) for row in s2]
+    t0_hat = [ntt(row) for row in t0]
+    a_hat = expand_a(rho, k, ell)
+    mu = hashlib.shake_256(tr + m_prime).digest(64)
+    rho_pp = hashlib.shake_256(key + rnd + mu).digest(64)
+
+    kappa = 0
+    while True:
+        y = expand_mask(rho_pp, kappa, ell, gamma1)
+        w = [intt(row) for row in matrix_vector_ntt(a_hat, [ntt(poly) for poly in y])]
+        w1 = [[high_bits(value, gamma2) for value in row] for row in w]
+        c_tilde = hashlib.shake_256(mu + w1_encode(w1, gamma2)).digest(lam // 4)
+        c_hat = ntt(sample_in_ball(c_tilde, tau))
+        cs1 = [intt([c_hat[n] * row[n] % Q for n in range(N)]) for row in s1_hat]
+        cs2 = [intt([c_hat[n] * row[n] % Q for n in range(N)]) for row in s2_hat]
+        z = [[(y[i][n] + cs1[i][n]) % Q for n in range(N)] for i in range(ell)]
+        difference = [[(w[i][n] - cs2[i][n]) % Q for n in range(N)] for i in range(k)]
+        r0 = [[low_bits(value, gamma2) for value in row] for row in difference]
+        kappa += ell
+        if max(infinity_norm(row) for row in z) >= gamma1 - beta:
+            continue
+        if max(infinity_norm(row) for row in r0) >= gamma2 - beta:
+            continue
+        ct0 = [intt([c_hat[n] * row[n] % Q for n in range(N)]) for row in t0_hat]
+        hint = [
+            [
+                int(
+                    make_hint(
+                        (-ct0[i][n]) % Q, (difference[i][n] + ct0[i][n]) % Q, gamma2
+                    )
+                )
+                for n in range(N)
+            ]
+            for i in range(k)
+        ]
+        if max(infinity_norm(row) for row in ct0) >= gamma2:
+            continue
+        if sum(sum(row) for row in hint) > omega:
+            continue
+        centered = [[mod_plus_minus(value, Q) for value in row] for row in z]
+        return sig_encode(c_tilde, centered, hint, gamma1, omega)
+
+
+def verify_internal(
+    pk: bytes, m_prime: bytes, sigma: bytes, params: dict[str, int]
+) -> bool:
+    """Algorithm 8, line for line."""
+    k, ell, eta = params["k"], params["ell"], params["eta"]
+    tau, lam = params["tau"], params["lam"]
+    gamma1, gamma2, omega = params["gamma1"], params["gamma2"], params["omega"]
+    beta = tau * eta
+
+    rho, t1 = pk_decode(pk, k)
+    c_tilde, z, hint = sig_decode(sigma, lam, ell, k, gamma1, omega)
+    if hint is None:
+        return False
+    a_hat = expand_a(rho, k, ell)
+    tr = hashlib.shake_256(pk).digest(64)
+    mu = hashlib.shake_256(tr + m_prime).digest(64)
+    c_hat = ntt(sample_in_ball(c_tilde, tau))
+    scaled = [ntt([(value << D) % Q for value in row]) for row in t1]
+    az = matrix_vector_ntt(a_hat, [ntt(row) for row in z])
+    approx = [
+        intt([(az[i][n] - c_hat[n] * scaled[i][n]) % Q for n in range(N)])
+        for i in range(k)
+    ]
+    w1 = [
+        [use_hint(bool(hint[i][n]), approx[i][n], gamma2) for n in range(N)]
+        for i in range(k)
+    ]
+    c_tilde_prime = hashlib.shake_256(mu + w1_encode(w1, gamma2)).digest(lam // 4)
+    if max(infinity_norm(row) for row in z) >= gamma1 - beta:
+        return False
+    return c_tilde == c_tilde_prime
