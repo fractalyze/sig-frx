@@ -277,6 +277,25 @@ input. It sits in the harness rather than in a scheme's tests because the gap is
 a property of how the vectors are published, not of any one scheme — a
 per-scheme fix would be written once per scheme for one cause.
 
+### An operation with no accepted case declares it
+
+Everything the harness derives starts from a case the standard accepts, the
+tampering pass and the batch axis alike, because a moved bit is evidence only
+against something that verified before it moved. The validation program draws
+each verification case's pre-hash function at random and publishes mostly
+deliberate failures, so whole operations arrive with nothing accepted in them —
+and there both passes no-op, leaving a run that compares the published verdicts
+and goes green having derived nothing.
+
+So `check` refuses such a set unless the call site declares it, one entry per
+operation with its reason. The declaration buys no coverage: an operation gated
+on failures alone cannot separate a verifier that rejects for the right reason
+from one that rejects everything, and what holds those paths up is the scheme's
+own round trip, which this page already says is not evidence. What it buys is
+that the boundary is written down where a regenerated set will trip over it — a
+declaration that stops describing its set fails the same way a wrong interface
+does, so an accepted case arriving deletes the entry rather than going unnoticed.
+
 ### A standard that publishes no vectors still gets gated
 
 Not every standard ships known-answer tests, and the validation program does not

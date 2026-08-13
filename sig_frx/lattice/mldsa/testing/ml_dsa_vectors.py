@@ -55,6 +55,38 @@ COVERAGE = vector_sets.Coverage(
     pre_hashes=PRE_HASHES,
 )
 
+# The sigVer operations that publish no case the standard accepts, one entry
+# each. ACVP draws every sigVer case's pre-hash function at random from twelve
+# and publishes mostly deliberate failures, so a function that came up once or
+# twice can easily have come up rejected every time — which is what happened
+# here, and only here, since the pure and internal groups hold fifteen cases and
+# three accepted ones apiece.
+#
+# Where it happened, everything `kat.check` derives has nothing to start from and
+# the operation is gated on its published verdicts alone. That is a real hole and
+# not a small one: it cannot separate a `hash_verify` that rejects for the right
+# reason from one that rejects everything under this function. What separates
+# them is `ml_dsa_test`'s pre-hash round trip, which is self-consistency and
+# therefore no evidence about the standard — so this is the boundary of what the
+# published bytes gate, stated where a regenerated set will trip over it. An
+# accepted case arriving is what deletes the entry, and `kat.check` is what makes
+# that a failure rather than a decision nobody revisits.
+NO_ACCEPTED_VERIFY_CASE: dict[Operation, str] = {
+    Operation(parameter_set, "external", pre_hash, None): reason
+    for parameter_set, pre_hash, reason in (
+        ("ML-DSA-44", "SHA2-256", "the one case drawn for it is a failure"),
+        ("ML-DSA-44", "SHA3-512", "both cases drawn for it are failures"),
+        ("ML-DSA-44", "SHAKE-256", "the one case drawn for it is a failure"),
+        ("ML-DSA-65", "SHA2-256", "the one case drawn for it is a failure"),
+        ("ML-DSA-65", "SHA3-256", "the one case drawn for it is a failure"),
+        ("ML-DSA-65", "SHA3-512", "the one case drawn for it is a failure"),
+        ("ML-DSA-65", "SHAKE-256", "the one case drawn for it is a failure"),
+        ("ML-DSA-87", "SHA2-256", "the one case drawn for it is a failure"),
+        ("ML-DSA-87", "SHA3-256", "the one case drawn for it is a failure"),
+        ("ML-DSA-87", "SHAKE-256", "the one case drawn for it is a failure"),
+    )
+}
+
 
 def load(mode: str) -> list[kat.KatVector]:
     """One published set, by ACVP mode name: `keyGen`, `sigGen` or `sigVer`."""
@@ -115,4 +147,5 @@ def check(operation: Operation, vectors: list[kat.KatVector]) -> None:
         vectors,
         interface=operation.interface,
         pre_hash=operation.pre_hash,
+        no_accepted_case=NO_ACCEPTED_VERIFY_CASE.get(operation),
     )

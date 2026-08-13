@@ -22,6 +22,17 @@ scheme. So `check` replicates an accepted case and moves a bit in some entries:
 the multiplicity is the only invented part, since the accepting entries carry the
 standard's own signature and the rejecting ones carry it corrupted.
 
+**Both derived passes need a case the standard accepts, so an operation that
+publishes none says so at the call site.** A moved bit is evidence only against
+something that verified before it moved, which is what makes the accepted case
+the starting point of the tampering pass and of the batch axis alike. ACVP's
+sigVer sets are mostly deliberate failures and draw each case's pre-hash function
+at random, so whole operations arrive with nothing accepted in them — and there
+both passes no-op, leaving a green run that cannot be told apart from one where
+they ran. `check` refuses that instead of shrinking quietly; a caller that means
+it declares it, and the declaration is itself an error once the set stops
+matching it.
+
 **A vector the harness cannot run faithfully is an error, not a skip.** Silently
 dropping a field — a published failure verdict, a mode marker selecting a
 different operation — reports a pass for a case that was never run, which is the
@@ -341,6 +352,7 @@ def check(
     *,
     interface: str = "external",
     pre_hash: str | None = None,
+    no_accepted_case: str | None = None,
 ) -> None:
     """Run every check the standard requires, plus the tampering it does not.
 
@@ -354,6 +366,13 @@ def check(
     scheme's own entry point. Declaring it at the call site is what keeps the
     harness from running one operation against vectors published for another,
     which would report a pass for a case nobody ran.
+
+    `no_accepted_case` is the caller's statement that this operation publishes
+    nothing the standard accepts, and why. Everything the harness derives starts
+    from an accepted case, so a set without one runs the published verdicts and
+    nothing else — which the caller knows to expect and a green run cannot say.
+    It is declared for the same reason `interface` is, and like a wrong interface
+    it fails once it stops describing the set.
     """
     if not vectors:
         raise KatError("no vectors: an empty set passes trivially and proves nothing")
@@ -361,7 +380,22 @@ def check(
     _reject_unrunnable(scheme, vectors, interface, pre_hash)
     _check_keygen(scheme, vectors)
     _check_sign(scheme, vectors)
-    _check_verify(scheme, vectors)
+    _check_verify(
+        scheme, vectors, _operation(vectors, interface, pre_hash), no_accepted_case
+    )
+
+
+def _operation(
+    vectors: Sequence[KatVector], interface: str, pre_hash: str | None
+) -> str:
+    """The operation this call runs, for a message about the call as a whole.
+
+    Read off the first vector because `_reject_unrunnable` has already required
+    every one of them to agree: one parameter set, and the declared interface and
+    pre-hash function.
+    """
+    variant = "" if pre_hash is None else f"/{pre_hash}"
+    return f"{vectors[0].parameter_set} {interface}{variant}"
 
 
 def _reject_unrunnable(
@@ -463,13 +497,25 @@ def _check_sign(scheme: Signature, vectors: Sequence[KatVector]) -> None:
             raise KatError(f"{vector.case_id}: signing produced the wrong signature")
 
 
-def _check_verify(scheme: Signature, vectors: Sequence[KatVector]) -> None:
+def _check_verify(
+    scheme: Signature,
+    vectors: Sequence[KatVector],
+    operation: str,
+    no_accepted_case: str | None,
+) -> None:
     """Verification agrees with every published verdict, and rejects tampering.
 
     The batch is the unit: one call per equal-length group, never a loop over
     cases, so the harness exercises the path a consumer actually runs. What those
     groups cannot reach is the batch axis itself, which is why the pass they feed
     is followed by one over a batch built here.
+
+    Both of the passes below the published verdicts start from a case the
+    standard accepts, so an operation that publishes none reduces to comparing
+    verdicts — and the two things a comparison alone cannot separate are a
+    verifier that rejects for the right reason and one that rejects everything.
+    That is a property of the published set rather than of the scheme, which is
+    why the declaration that expects it comes from the call site.
     """
     runnable = [
         v
@@ -478,6 +524,35 @@ def _check_verify(scheme: Signature, vectors: Sequence[KatVector]) -> None:
         and v.message is not None
         and v.signature is not None
     ]
+    accepted = [v for v in runnable if v.valid]
+
+    if no_accepted_case is None and runnable and not accepted:
+        plural = "" if len(runnable) == 1 else "s"
+        raise KatError(
+            f"{operation}: {len(runnable)} verify case{plural} and not one the "
+            f"standard accepts, so the tampering pass and the batch axis have "
+            f"nothing to move a bit in and neither runs — this call compares the "
+            f"published verdicts and derives nothing from them. Declare it at the "
+            f"call site if the set is meant to look like this; a green run cannot "
+            f"say so on its own."
+        )
+    # A declaration describes the published set, so it is wrong in both the
+    # direction where an accepted case arrived and the one where the call has no
+    # verify case to make the claim about.
+    if no_accepted_case is not None and (accepted or not runnable):
+        found = (
+            f"the set has an accepted case ({accepted[0].case_id}; "
+            f"{len(accepted)} of {len(runnable)})"
+            if accepted
+            else "this call has no verify case at all"
+        )
+        raise KatError(
+            f"{operation}: declared as publishing no accepted case "
+            f"({no_accepted_case}), and {found}. The declaration is what stands in "
+            f"for the derived checks, so drop it rather than leave it describing a "
+            f"set it no longer matches."
+        )
+
     if not runnable:
         return
 

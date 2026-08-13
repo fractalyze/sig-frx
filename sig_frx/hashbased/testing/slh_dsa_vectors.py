@@ -61,6 +61,34 @@ COVERAGE = vector_sets.Coverage(
     parameter_set_reason="parameter set needs SHA-512",
 )
 
+# The sigVer operations that publish no case the standard accepts, one entry
+# each. ACVP draws every sigVer case's pre-hash function at random from twelve
+# and publishes mostly deliberate failures, so the single function these sets are
+# approved to use draws one case per set and it is usually a rejection. The pure
+# and internal groups are unaffected — fourteen cases and two accepted ones
+# apiece — which is why every entry below is a pre-hash one.
+#
+# Where it happened, everything `kat.check` derives has nothing to start from and
+# the operation is gated on its published verdict alone. That is a real hole: it
+# cannot separate a `hash_verify` that rejects for the right reason from one that
+# rejects everything. What separates them is `slh_dsa_test`'s round trip, which
+# is self-consistency and therefore no evidence about the standard — so this is
+# the boundary of what the published bytes gate, stated where a regenerated set
+# will trip over it. An accepted case arriving is what deletes the entry, and
+# `kat.check` is what makes that a failure rather than a decision nobody
+# revisits.
+NO_ACCEPTED_VERIFY_CASE: dict[Operation, str] = {
+    Operation(parameter_set, "external", pre_hash, None): reason
+    for parameter_set, pre_hash, reason in (
+        ("SLH-DSA-SHA2-128s", "SHA2-256", "the one case drawn for it is a failure"),
+        ("SLH-DSA-SHAKE-128f", "SHA2-256", "the one case drawn for it is a failure"),
+        ("SLH-DSA-SHAKE-128s", "SHA2-256", "the one case drawn for it is a failure"),
+        ("SLH-DSA-SHAKE-192f", "SHA2-256", "the one case drawn for it is a failure"),
+        ("SLH-DSA-SHAKE-192s", "SHA2-256", "the one case drawn for it is a failure"),
+        ("SLH-DSA-SHAKE-256s", "SHA2-256", "the one case drawn for it is a failure"),
+    )
+}
+
 
 def load(mode: str) -> list[kat.KatVector]:
     """One published set, by ACVP mode name: `keyGen`, `sigGen` or `sigVer`."""
@@ -120,4 +148,5 @@ def check(operation: Operation, vectors: list[kat.KatVector]) -> None:
         vectors,
         interface=operation.interface,
         pre_hash=operation.pre_hash,
+        no_accepted_case=NO_ACCEPTED_VERIFY_CASE.get(operation),
     )
