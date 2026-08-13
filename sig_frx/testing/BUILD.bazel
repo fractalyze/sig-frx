@@ -35,6 +35,26 @@ py_library(
     ],
 )
 
+# What sits between `:kat` and a scheme: a published set covers several operations
+# and the harness runs one, so the cases get split by operation and each is handed
+# the thing that performs it. Shared because FIPS 204 and FIPS 205 publish the
+# same shape.
+py_library(
+    name = "vector_sets",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "vector_sets.py",
+    ],
+    visibility = ["//sig_frx:__subpackages__"],
+    deps = [
+        ":kat",
+        "//sig_frx:prehash",
+        "//sig_frx:signature",
+        requirement("frx"),
+    ],
+)
+
 py_test(
     name = "signature_test",
     size = "small",
