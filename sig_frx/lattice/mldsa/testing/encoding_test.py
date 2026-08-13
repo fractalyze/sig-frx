@@ -36,39 +36,8 @@ _Lift: TypeAlias = Callable[[np.ndarray], Any]
 _LIFT = {"host": np.asarray, "traced": fnp.asarray}
 _NAMESPACES = tuple(_LIFT.items())
 
-# FIPS 204 Table 1.
-_PARAMETER_SETS: tuple[dict[str, Any], ...] = (
-    {
-        "testcase_name": "ML_DSA_44",
-        "k": 4,
-        "ell": 4,
-        "eta": 2,
-        "lam": 128,
-        "gamma1": 1 << 17,
-        "gamma2": (arith.Q - 1) // 88,
-        "omega": 80,
-    },
-    {
-        "testcase_name": "ML_DSA_65",
-        "k": 6,
-        "ell": 5,
-        "eta": 4,
-        "lam": 192,
-        "gamma1": 1 << 19,
-        "gamma2": (arith.Q - 1) // 32,
-        "omega": 55,
-    },
-    {
-        "testcase_name": "ML_DSA_87",
-        "k": 8,
-        "ell": 7,
-        "eta": 2,
-        "lam": 256,
-        "gamma1": 1 << 19,
-        "gamma2": (arith.Q - 1) // 32,
-        "omega": 75,
-    },
-)
+# FIPS 204 Table 1, from the reference so the two test modules cannot drift.
+_PARAMETER_SETS = ref.parameter_cases()
 
 # Every `(a, b)` pair the scheme packs at: `t1`, `s1`/`s2` at both etas, `t0`,
 # and `z` at both gamma1s.
@@ -93,17 +62,17 @@ def _bytes(width: int, salt: int) -> np.ndarray:
     )
 
 
-def _hint(k: int, omega: int, salt: int, weight: int | None = None) -> np.ndarray:
-    """A hint with at most `omega` nonzero coefficients spread over `k` rows."""
+def _hint(k: int, omega: int, salt: int) -> np.ndarray:
+    """Half of `omega`'s budget of nonzero coefficients, spread over `k` rows.
+
+    Deliberately under budget: the encoding then has an unused tail, which is
+    what the tail rejection mutates. Leaving the weight to chance would make
+    that test's premise an accident of the seed.
+    """
+    flat = np.zeros(k * arith.N, dtype=np.int32)
     rng = np.random.default_rng(salt)
-    h = np.zeros((k, arith.N), dtype=np.int32)
-    budget = omega if weight is None else weight
-    for row in range(k):
-        take = int(rng.integers(0, min(budget // max(k - row, 1) + 2, budget + 1)))
-        for position in rng.choice(arith.N, size=take, replace=False):
-            h[row, position] = 1
-        budget -= take
-    return h
+    flat[rng.choice(k * arith.N, size=omega // 2, replace=False)] = 1
+    return flat.reshape(k, arith.N)
 
 
 class BitPackingTest(parameterized.TestCase):
@@ -213,28 +182,22 @@ class HintTest(parameterized.TestCase):
         self.assertFalse(bool(encoding.hint_bit_unpack(bad, k, omega)[1]))
         self.assertIsNone(ref.hint_bit_unpack(bytes(bad), k, omega))
 
-    def test_rejects_positions_that_do_not_strictly_increase(self) -> None:
+    @parameterized.named_parameters(("decreasing", (9, 5)), ("repeated", (5, 5)))
+    def test_rejects_positions_that_do_not_strictly_increase(
+        self, replacement: tuple[int, int]
+    ) -> None:
         """Algorithm 21 line 9 — what makes the encoding canonical.
 
         Without it the same hint has many encodings, which is signature
-        malleability rather than a decoding nicety.
+        malleability rather than a decoding nicety. Line 9 says `>=` and not
+        `>`, so a repeated position is malformed for the same reason a
+        decreasing one is.
         """
         k, omega = 4, 80
         h = np.zeros((k, arith.N), dtype=np.int32)
         h[0, 5] = h[0, 9] = 1
-        packed = np.asarray(encoding.hint_bit_pack(h, omega))
-        bad = packed.copy()
-        bad[0], bad[1] = 9, 5
-        self.assertFalse(bool(encoding.hint_bit_unpack(bad, k, omega)[1]))
-        self.assertIsNone(ref.hint_bit_unpack(bytes(bad), k, omega))
-
-    def test_rejects_a_repeated_position(self) -> None:
-        """The `>=` in line 9, not `>`: equal positions are malformed too."""
-        k, omega = 4, 80
-        h = np.zeros((k, arith.N), dtype=np.int32)
-        h[0, 5] = h[0, 9] = 1
         bad = np.asarray(encoding.hint_bit_pack(h, omega)).copy()
-        bad[1] = bad[0]
+        bad[0], bad[1] = replacement
         self.assertFalse(bool(encoding.hint_bit_unpack(bad, k, omega)[1]))
         self.assertIsNone(ref.hint_bit_unpack(bytes(bad), k, omega))
 
@@ -254,6 +217,17 @@ class HintTest(parameterized.TestCase):
         compiled = frx.jit(lambda y: encoding.hint_bit_unpack(y, k, omega)[1])
         self.assertFalse(bool(compiled(fnp.asarray(bad))))
         self.assertTrue(bool(compiled(fnp.asarray(packed))))
+
+    def test_hint_bit_pack_survives_a_tracer(self) -> None:
+        """The packer is built around a masked sum rather than a scatter so it
+        can be traced; nothing pinned that it actually can."""
+        k, omega = 4, 80
+        h = _hint(k, omega, 42)
+        compiled = frx.jit(lambda flags: encoding.hint_bit_pack(flags, omega))
+        self.assertEqual(
+            np.asarray(compiled(fnp.asarray(h))).tolist(),
+            np.asarray(encoding.hint_bit_pack(h, omega)).tolist(),
+        )
 
     def test_rejection_batches_over_signatures(self) -> None:
         """`B` signatures decode in one call, and each gets its own verdict."""
@@ -278,7 +252,9 @@ class WireFormatTest(parameterized.TestCase):
         self.assertEqual(got.tolist(), list(ref.pk_encode(bytes(rho), t1.tolist())))
         self.assertEqual(got.shape[-1], 32 + 32 * k * encoding.T1_BITS)
         back_rho, back_t1 = encoding.pk_decode(got, k)
-        self.assertEqual(np.asarray(back_rho).tolist(), rho.tolist())
+        want_rho, want_t1 = ref.pk_decode(bytes(got), k)
+        self.assertEqual(np.asarray(back_rho).tolist(), list(want_rho))
+        self.assertEqual(np.asarray(back_t1).tolist(), want_t1)
         self.assertTrue(np.array_equal(np.asarray(back_t1), t1))
 
     @parameterized.named_parameters(*_PARAMETER_SETS)

@@ -32,6 +32,49 @@ ZETA = 1753
 D = 13
 N = 256
 
+# Table 1, in full and in one place. Transcribing it per test module is how the
+# copies start disagreeing about which columns they carry, and every value here
+# is one the standard already determines.
+PARAMETER_SETS = {
+    "ML_DSA_44": {
+        "k": 4,
+        "ell": 4,
+        "eta": 2,
+        "tau": 39,
+        "lam": 128,
+        "gamma1": 1 << 17,
+        "gamma2": (Q - 1) // 88,
+        "omega": 80,
+    },
+    "ML_DSA_65": {
+        "k": 6,
+        "ell": 5,
+        "eta": 4,
+        "tau": 49,
+        "lam": 192,
+        "gamma1": 1 << 19,
+        "gamma2": (Q - 1) // 32,
+        "omega": 55,
+    },
+    "ML_DSA_87": {
+        "k": 8,
+        "ell": 7,
+        "eta": 2,
+        "tau": 60,
+        "lam": 256,
+        "gamma1": 1 << 19,
+        "gamma2": (Q - 1) // 32,
+        "omega": 75,
+    },
+}
+
+
+def parameter_cases() -> tuple[dict, ...]:
+    """`PARAMETER_SETS` as `absltest` named-parameter records."""
+    return tuple(
+        {"testcase_name": name, **values} for name, values in PARAMETER_SETS.items()
+    )
+
 
 def bit_rev8(m: int) -> int:
     """Algorithm 43."""

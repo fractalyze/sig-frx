@@ -56,36 +56,8 @@ _Lift: TypeAlias = Callable[[np.ndarray], Any]
 _LIFT = {"host": np.asarray, "traced": fnp.asarray}
 _NAMESPACES = tuple(_LIFT.items())
 
-# FIPS 204 Table 1, the fields the samplers read.
-_PARAMETER_SETS: tuple[dict[str, Any], ...] = (
-    {
-        "testcase_name": "ML_DSA_44",
-        "k": 4,
-        "ell": 4,
-        "eta": 2,
-        "tau": 39,
-        "lam": 128,
-        "gamma1": 1 << 17,
-    },
-    {
-        "testcase_name": "ML_DSA_65",
-        "k": 6,
-        "ell": 5,
-        "eta": 4,
-        "tau": 49,
-        "lam": 192,
-        "gamma1": 1 << 19,
-    },
-    {
-        "testcase_name": "ML_DSA_87",
-        "k": 8,
-        "ell": 7,
-        "eta": 2,
-        "tau": 60,
-        "lam": 256,
-        "gamma1": 1 << 19,
-    },
-)
+# FIPS 204 Table 1, from the reference so the two test modules cannot drift.
+_PARAMETER_SETS = ref.parameter_cases()
 
 
 def _seed(width: int, salt: int) -> np.ndarray:

@@ -15,14 +15,21 @@ there unchanged, since a bit shift does not care which namespace it is in.
 
 ## The rejection has somewhere to go
 
-`HintBitUnpack` is specified to reject malformed input, and the standard is
-explicit that this one matters: a verifier that accepts a malformed hint
-encoding is exploitable. Under a tracer nothing can raise — but unlike the
-samplers, this has a channel to report into, because `verify` already returns
-`bool[B]`. So `hint_bit_unpack` returns `(h, ok)` and a caller ANDs `ok` into
-its verdict. That is not a flag invented for the convenience of this module; it
-is the ⊥ the standard specifies, carried in the only shape a traced verifier
-can carry it.
+`HintBitUnpack` is specified to reject malformed input, and FIPS 204 §D.2 says
+what skipping it costs: the *draft* standard omitted this very check, and
+"failure to perform this check results in a signature scheme that is not
+strongly existentially unforgeable". A published standard got this wrong once.
+
+`hint_bit_unpack` therefore returns `(h, ok)` and a caller ANDs `ok` into its
+verdict — not a flag invented here but Algorithm 8 line 3, `if h = ⊥ then
+return false`, with the branch removed.
+
+**Why this reports where `sampling._require_enough` raises**, when both cite
+the same `bool[B]`: they answer different questions. A malformed hint is a
+*verdict about the input*, and `bool[B]` is exactly where the standard puts it.
+A sampler shortfall is a claim about *our own budget* — the input is fine — so
+folding it into `bool[B]` would report a valid signature as invalid, which is
+worse than the raise. The channel is the same one; it only accepts verdicts.
 
 The three conditions Algorithm 21 rejects on, each of which is a real encoding
 a real attacker can send:
@@ -43,10 +50,6 @@ a real attacker can send:
 plus a constant. Bit fields tile a byte string exactly — `32·c` bytes is
 `256·c` bits — so both directions are a reshape and a weighted sum, with no
 byte-window arithmetic and no traced index anywhere.
-
-`sampling.expand_mask` was the first consumer of the unpacking half and carried
-it privately; this is the second, so it lives here now and sampling imports it
-([`conventions.md`](../../../docs/reference/conventions.md)).
 """
 
 from __future__ import annotations
@@ -81,14 +84,23 @@ def bits_to_bytes(bits: ArrayLike) -> Any:
 def unpack_fields(v: ArrayLike, width: int) -> Any:
     """`v` read as little-endian `width`-bit fields, as uint32.
 
-    The unsigned core of Algorithms 18 and 19 — what each of them adds is a
-    constant. Stated over the bit string the way the standard states it, which
-    needs no byte-window arithmetic: `32·width` bytes is exactly `256·width`
-    bits, so the fields are a reshape and their values a weighted sum.
+    The unsigned core Algorithms 18 and 19 share; each adds its own constant.
+
+    **`wots.base_2b` is this at the opposite bit order** and neither can stand
+    in for the other: FIPS 205 numbers a digit's bits from the high end of the
+    stream, FIPS 204 from the low end, so they agree only at whole-byte widths
+    and disagree at every width either scheme uses. That is the near-miss
+    [`bytestring.low_bits`](../../hashbased/bytestring.py) already records
+    against `base_2b`, one level further out — and a "unification" of the two
+    round-trips forever while being wrong.
+
+    The sum's dtype is pinned rather than inferred: numpy promotes it to
+    `uint64` and frx does not, so leaving it open makes the host and traced
+    paths differ in a width — the divergence `CLAUDE.md`'s lane rule exists
+    for, and one no round trip can see.
     """
-    xnp = namespace(v)
     fields = bytes_to_bits(v).astype(np.uint32).reshape(*np.shape(v)[:-1], -1, width)
-    return (fields << np.arange(width, dtype=np.uint32)).sum(axis=-1)
+    return (fields << np.arange(width, dtype=np.uint32)).sum(axis=-1, dtype=np.uint32)
 
 
 def pack_fields(values: ArrayLike, width: int) -> Any:
@@ -96,7 +108,7 @@ def pack_fields(values: ArrayLike, width: int) -> Any:
     xnp = namespace(values)
     data = xnp.asarray(values, dtype=np.uint32)
     bits = (data[..., None] >> np.arange(width, dtype=np.uint32)) & np.uint32(1)
-    return bits_to_bytes(bits.reshape(*data.shape[:-1], -1).astype(np.uint8))
+    return bits_to_bytes(bits.reshape(*data.shape[:-1], -1))
 
 
 def simple_bit_pack(w: ArrayLike, b: int) -> Any:
@@ -131,19 +143,19 @@ def hint_bit_pack(h: ArrayLike, omega: int) -> Any:
     per-polynomial cut is the running count at each polynomial's end.
     """
     xnp = namespace(h)
-    flags = (xnp.asarray(h) != 0).astype(np.int32)
     k = np.shape(h)[-2]
-    ranks = xnp.cumsum(flags.reshape(-1), axis=-1)
+    flags = (xnp.asarray(h) != 0).reshape(-1)
+    ranks = xnp.cumsum(flags.astype(np.int32), axis=-1)
     cuts = ranks.reshape(k, N)[:, -1]
 
-    # Slot `t` of the position block holds the coefficient index whose rank is
-    # `t + 1` — a masked sum rather than a scatter, one column per slot.
+    # Slot `t` holds the coefficient index whose rank is `t + 1` — a masked sum
+    # rather than a scatter, one column per slot. `index` stays a host constant:
+    # `where` broadcasts it, and lifting it would put it on a device the signing
+    # path never wanted to be on.
     slot = np.arange(omega, dtype=np.int32)
-    index = xnp.asarray(np.tile(np.arange(N, dtype=np.int32), k))
-    chosen = (ranks[:, None] == slot[None, :] + np.int32(1)) & (
-        flags.reshape(-1)[:, None] == np.int32(1)
-    )
-    positions = (xnp.where(chosen, index[:, None], np.int32(0))).sum(axis=0)
+    index = np.tile(np.arange(N, dtype=np.int32), k)
+    chosen = flags[:, None] & (ranks[:, None] == slot + np.int32(1))
+    positions = xnp.where(chosen, index[:, None], np.int32(0)).sum(axis=0)
     return xnp.concatenate([positions, cuts]).astype(np.uint8)
 
 
@@ -154,6 +166,15 @@ def hint_bit_unpack(y: ArrayLike, k: int, omega: int) -> tuple[Any, Any]:
     Algorithm 21's three rejections is evaluated over the whole buffer rather
     than short-circuited, because a tracer has no branch to take and because a
     verifier must not have a data-dependent exit here anyway.
+
+    The membership test broadcasts to `[k, omega, 256]`, which is the module's
+    largest intermediate: measured at ML-DSA-87 it is 86% of `sig_decode`'s
+    378 us at `B = 64` and all of its 10 MB of scratch, scaling linearly to
+    164 MB at `B = 1024`. Factoring the one-hot out of the `k` axis as an f32
+    matmul measures 1.6x faster on half the memory, and is not taken: the whole
+    of `sig_decode` is 0.8% of `expand_a` at the same batch, so it buys ~0.5% of
+    a verify in exchange for float arithmetic in a bit-manipulation module. The
+    number to watch is the memory, not the time.
 
     `h` is returned even when `ok` is false. It is meaningless in that case, and
     a caller that ignores `ok` has accepted a forged hint — which is why `ok` is
@@ -177,9 +198,10 @@ def hint_bit_unpack(y: ArrayLike, k: int, omega: int) -> tuple[Any, Any]:
     ok = ok & (~interior | rises[None, :]).all()
 
     # Lines 16-18: the tail past the last cut is zero, the same uniqueness
-    # requirement at the end of the buffer.
-    used = covered.any(axis=0)
-    ok = ok & (used | (positions == np.int32(0))).all()
+    # requirement at the end of the buffer. Algorithm 21 line 16 starts at the
+    # index its walk ended on, which is `cuts[-1]` — so the bound is a scalar
+    # rather than a reduction over `covered`.
+    ok = ok & ((slot < cuts[-1]) | (positions == np.int32(0))).all()
 
     h = (
         covered[:, :, None]
@@ -240,21 +262,18 @@ def sk_decode(sk: ArrayLike, k: int, ell: int, eta: int) -> tuple[Any, ...]:
     """
     xnp = namespace(sk)
     data = xnp.asarray(sk, dtype=np.uint8)
-    eta_bits = (2 * eta).bit_length()
-    rho, key, tr = data[:32], data[32:64], data[64:128]
-    cursor = 128
-    s1_size = 32 * eta_bits * ell
-    s2_size = 32 * eta_bits * k
-    s1 = bit_unpack(data[cursor : cursor + s1_size].reshape(ell, -1), eta, eta)
-    cursor += s1_size
-    s2 = bit_unpack(data[cursor : cursor + s2_size].reshape(k, -1), eta, eta)
-    cursor += s2_size
-    t0 = bit_unpack(
-        data[cursor : cursor + 32 * D * k].reshape(k, -1),
-        (1 << (D - 1)) - 1,
-        1 << (D - 1),
+    low = 1 << (D - 1)
+    packed = 32 * (2 * eta).bit_length()
+    s1_end = 128 + packed * ell
+    s2_end = s1_end + packed * k
+    return (
+        data[:32],
+        data[32:64],
+        data[64:128],
+        bit_unpack(data[128:s1_end].reshape(ell, -1), eta, eta),
+        bit_unpack(data[s1_end:s2_end].reshape(k, -1), eta, eta),
+        bit_unpack(data[s2_end:].reshape(k, -1), low - 1, low),
     )
-    return rho, key, tr, s1, s2, t0
 
 
 def sig_encode(

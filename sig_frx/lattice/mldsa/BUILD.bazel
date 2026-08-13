@@ -22,16 +22,9 @@ py_library(
     ],
 )
 
-# FIPS 204 §7.3's pseudorandom sampling. The keccak dependency is the whole of
-# it — every sampler is a SHAKE squeezed to a fixed length and rejection-sampled
-# — and `:arith` supplies the field and the modulus the accepted candidates land
-# in. No scheme logic above it, so the samplers are gated against the standard
-# before keygen, sign or verify exists.
-# FIPS 204 §7.1-7.2's wire formats. No cryptography in it — bit manipulation
-# over byte strings — but it is traced anyway, because `pkDecode` and
-# `sigDecode` run on a verifier's untrusted input and verification is the batch
-# path. `HintBitUnpack`'s rejection rides out as a flag rather than a raise for
-# the same reason.
+# FIPS 204 §7.1-7.2's conversions and wire formats. Depends on `:arith` for the
+# modulus the widths are derived from and on nothing else — no hash, no sampler
+# — which is what lets `:sampling` depend on *it* for §7.1 without a cycle.
 py_library(
     name = "encoding",
     srcs = [
@@ -47,6 +40,11 @@ py_library(
     ],
 )
 
+# FIPS 204 §7.3's pseudorandom sampling. The keccak dependency is the whole of
+# it — every sampler is a SHAKE squeezed to a fixed length and rejection-sampled
+# — and `:arith` supplies the field and the modulus the accepted candidates land
+# in. No scheme logic above it, so the samplers are gated against the standard
+# before keygen, sign or verify exists.
 py_library(
     name = "sampling",
     srcs = [
