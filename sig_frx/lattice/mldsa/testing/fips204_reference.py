@@ -623,3 +623,71 @@ def verify_internal(
     if max(infinity_norm(row) for row in z) >= gamma1 - beta:
         return False
     return c_tilde == c_tilde_prime
+
+
+# Algorithm 4's `switch PH`, transcribed a second time and independently of
+# `prehash.py`'s table, because the OID has no other check: it is bytes inside the
+# signed message rather than a value any round trip reads back, so a wrong one is
+# self-consistent everywhere except against a published signature.
+#
+# The keys are the names the validation program's files carry, since those are
+# what selects a case. The standard enumerates three of these (SHA-256, SHA-512
+# and SHAKE128) and writes `case …` for the rest; each entry is the `hashlib`
+# function, its OID DER-encoded with tag and length, and the bytes read out.
+PRE_HASHES: dict[str, tuple[str, str, int]] = {
+    "SHA2-256": ("sha256", "0609608648016503040201", 32),
+    "SHA3-256": ("sha3_256", "0609608648016503040208", 32),
+    "SHA3-512": ("sha3_512", "060960864801650304020a", 64),
+    "SHAKE-128": ("shake_128", "060960864801650304020b", 32),
+    "SHAKE-256": ("shake_256", "060960864801650304020c", 64),
+}
+
+
+def pre_hash_message(m: bytes, context: bytes, pre_hash: str) -> bytes:
+    """`M′` — Algorithm 4 lines 10 to 23, which Algorithm 5 line 18 repeats.
+
+    The one place the two differ is what they do with it, so both variants of the
+    pre-hash pair build their message here.
+    """
+    name, oid, digest_size = PRE_HASHES[pre_hash]
+    # A XOF reads out a length the caller names and a hash has one of its own;
+    # `hashlib` distinguishes them by whether `digest` takes an argument.
+    hashed = hashlib.new(name, m)
+    ph_m = (
+        hashed.digest(digest_size)  # type: ignore[call-arg]
+        if name.startswith("shake_")
+        else hashed.digest()
+    )
+    if len(ph_m) != digest_size:
+        raise ValueError(f"{pre_hash} produced {len(ph_m)} bytes, not {digest_size}")
+    return (
+        integer_to_bytes(1, 1)
+        + integer_to_bytes(len(context), 1)
+        + context
+        + bytes.fromhex(oid)
+        + ph_m
+    )
+
+
+def hash_sign(
+    sk: bytes,
+    m: bytes,
+    rnd: bytes,
+    context: bytes,
+    pre_hash: str,
+    params: dict[str, int],
+) -> bytes:
+    """Algorithm 4 — pre-hash signing, over Algorithm 7."""
+    return sign_internal(sk, pre_hash_message(m, context, pre_hash), rnd, params)
+
+
+def hash_verify(
+    pk: bytes,
+    m: bytes,
+    sigma: bytes,
+    context: bytes,
+    pre_hash: str,
+    params: dict[str, int],
+) -> bool:
+    """Algorithm 5 — the counterpart of `hash_sign`."""
+    return verify_internal(pk, pre_hash_message(m, context, pre_hash), sigma, params)

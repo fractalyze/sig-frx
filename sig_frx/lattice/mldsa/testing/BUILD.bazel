@@ -60,12 +60,82 @@ py_test(
     deps = [
         ":fips204_reference",
         "//sig_frx:context",
+        "//sig_frx:prehash",
         "//sig_frx:signature",
         "//sig_frx/lattice/mldsa:ml_dsa",
         "//sig_frx/lattice/mldsa:sampling",
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# Vectors are fetched and sha256-pinned in //MODULE.bazel rather than committed.
+py_library(
+    name = "ml_dsa_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "ml_dsa_vectors.py",
+    ],
+    data = [
+        "@acvp_ml_dsa_keygen_expected//file",
+        "@acvp_ml_dsa_keygen_prompt//file",
+        "@acvp_ml_dsa_siggen_expected//file",
+        "@acvp_ml_dsa_siggen_prompt//file",
+        "@acvp_ml_dsa_sigver_expected//file",
+        "@acvp_ml_dsa_sigver_prompt//file",
+    ],
+    deps = [
+        "//sig_frx:prehash",
+        "//sig_frx:signature",
+        "//sig_frx/lattice/mldsa:ml_dsa",
+        "//sig_frx/testing:kat",
+        "//sig_frx/testing:vector_sets",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+# The gate on published bytes: reproducing what NIST published is what confirms
+# every reading the modules beneath ML-DSA were written from. Key generation runs
+# at all three parameter sets and signing at ML-DSA-44, so a review waits on
+# Table 1's smallest `A`; `ml_dsa_sweep_test` is the exhaustive run.
+py_test(
+    name = "ml_dsa_kat_test",
+    # 52 s locally. `large` for the backend it is slowest on rather than for what
+    # it does on CPU, the same reason `ml_dsa_test` carries it: signing is the
+    # concrete path, a per-operation dispatch is what a GPU is worst at, and the
+    # size a target carries has to cover the slowest leg it runs on.
+    size = "large",
+    srcs = ["ml_dsa_kat_test.py"],
+    deps = [
+        ":ml_dsa_vectors",
+        "//sig_frx/lattice/mldsa:ml_dsa",
+        "//sig_frx/testing:kat",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The exhaustive run: all three parameter sets, every published operation.
+#
+# Unsharded, which is the opposite of what `slh_dsa_sweep_test` needs and worth
+# saying why. Its cases are minutes each, so dividing them buys nearly all of the
+# wall-clock back; these are seconds each on top of a fixed cost that is not — the
+# frx import plus parsing 10 MB of prompts and expected results, which every shard
+# pays in full. Measured: 108 s undivided, against 16 shards of 44 s each, so the
+# division turns 108 s of work into 707 s of it to halve the wall clock. The
+# per-operation cases stay, because that is what names the operation in a failure
+# and what lets shards be added if a set ever grows enough to want them.
+py_test(
+    name = "ml_dsa_sweep_test",
+    size = "large",
+    srcs = ["ml_dsa_sweep_test.py"],
+    tags = ["slow_kat"],
+    deps = [
+        ":ml_dsa_vectors",
+        requirement("absl_py"),
     ] + GPU_PLUGIN_DEPS,
 )
 

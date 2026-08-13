@@ -57,6 +57,7 @@ py_library(
         ":sampling",
         "//sig_frx:arrays",
         "//sig_frx:context",
+        "//sig_frx:prehash",
         "//sig_frx:signature",
         "@hash_frx//hash_frx/keccak",
         requirement("frx"),
