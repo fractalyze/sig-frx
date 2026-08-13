@@ -258,6 +258,25 @@ An exhaustive sweep — every parameter set against every published vector — i
 tagged `slow_kat`, which drops it from the per-PR run and keeps it in the
 scheduled one.
 
+### The batch axis is gated on a batch the harness builds
+
+The published sets cannot gate the property the seam exists for. A batch axis
+needs one static shape, and both validation programs vary the message length per
+case — deliberately — so grouping the published cases yields nothing but `B = 1`
+groups, and a check that a verdict belongs to its own entry has no second entry
+to compare against. What is left covering it is each scheme verifying signatures
+it produced itself, which is the self-consistency this page already says is not
+evidence.
+
+So [`kat.py`](../../sig_frx/testing/kat.py) replicates an accepted case across a
+batch and moves a bit in some of the entries. The multiplicity is the only
+invented part: the accepting entries carry the standard's own signature over its
+own key and message, and the rejecting ones carry that signature corrupted, so a
+`verify` that reduced over the batch fails and so does one that ignored its
+input. It sits in the harness rather than in a scheme's tests because the gap is
+a property of how the vectors are published, not of any one scheme — a
+per-scheme fix would be written once per scheme for one cause.
+
 ### A standard that publishes no vectors still gets gated
 
 Not every standard ships known-answer tests, and the validation program does not

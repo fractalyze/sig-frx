@@ -32,7 +32,6 @@ length verdict has no published exercise — `ml_dsa_test` is what covers it.
 
 from __future__ import annotations
 
-import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
 
@@ -189,77 +188,25 @@ class SignatureKatTest(absltest.TestCase):
         ]
         self.assertEmpty(wrong_length)
 
-
-class BatchAxisTest(absltest.TestCase):
-    """The one thing the published sets cannot gate: the batch axis itself.
-
-    A batch needs one static message length, and every ML-DSA case is published
-    with its own — so the harness's shape grouping yields nothing but `B = 1`
-    groups, and the per-entry check inside its tampering pass never runs. That
-    leaves the repo's batch-first requirement ungated by exactly the vectors that
-    are supposed to gate the scheme.
-
-    So the batch is built here from a published case instead of invented: the
-    accepting entries carry NIST's own signature, and the rejecting ones carry it
-    with a bit moved. A `verify` that reduced over the batch rather than deciding
-    per entry returns all-false and fails, and one that ignored its input entirely
-    returns all-true and fails.
-    """
-
-    _BATCH = 4
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.operation = ml_dsa_vectors.Operation(
-            _MERGE_GATE_SET, "external", None, None
-        )
-        self.published = ml_dsa_vectors.runnable_groups("sigVer")[self.operation]
-        self.vectors = [v for v in self.published if v.valid]
-        self.assertNotEmpty(self.vectors)
-
-    def test_the_published_groups_really_are_all_singletons(self) -> None:
-        # The premise this class exists for. If a regenerated set ever published
-        # two cases of one shape, the harness would batch them and this would be
-        # the place that says so.
-        shapes = {
-            (len(v.public_key or b""), len(v.message or b""), len(v.signature or b""))
-            for v in self.published
-        }
-        self.assertLen(shapes, len(self.published))
-
-    def test_a_batch_of_published_cases_decides_per_entry(self) -> None:
-        vector = self.vectors[0]
-        assert (
-            vector.public_key is not None
-            and vector.message is not None
-            and vector.signature is not None
-        )
-        signatures = np.tile(
-            np.frombuffer(vector.signature, dtype=np.uint8), (self._BATCH, 1)
-        )
-        tampered = (1, 2)
-        for entry in tampered:
-            signatures[entry, 0] ^= 1
-        verdicts = ml_dsa_vectors.implementation(self.operation).verify(
-            fnp.asarray(
-                np.tile(
-                    np.frombuffer(vector.public_key, dtype=np.uint8), (self._BATCH, 1)
-                )
-            ),
-            fnp.asarray(
-                np.tile(np.frombuffer(vector.message, dtype=np.uint8), (self._BATCH, 1))
-            ),
-            fnp.asarray(signatures),
-            context=(
-                None
-                if vector.context is None
-                else fnp.asarray(np.frombuffer(vector.context, dtype=np.uint8))
-            ),
-        )
-        self.assertEqual(
-            [bool(verdict) for verdict in np.asarray(verdicts)],
-            [entry not in tampered for entry in range(self._BATCH)],
-        )
+    def test_no_published_group_holds_two_cases_of_one_shape(self) -> None:
+        # Why `kat.check` builds a batch instead of finding one: a batch needs a
+        # static shape and every case here is published with a message length of
+        # its own, so the harness's shape grouping yields nothing but `B = 1`
+        # groups and its per-entry check has no second entry to pin. Asserted
+        # rather than assumed — a regenerated set that published two cases of one
+        # shape would be a published batch, and this is what says so.
+        for operation, group in self._groups("sigVer").items():
+            with self.subTest(str(operation)):
+                shapes = {
+                    (
+                        len(v.public_key or b""),
+                        len(v.message or b""),
+                        len(v.signature or b""),
+                        v.context,
+                    )
+                    for v in group
+                }
+                self.assertLen(shapes, len(group))
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ does not change that.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 import frx.numpy as fnp
@@ -30,15 +31,21 @@ from sig_frx.testing.checksum_scheme import KEY_SIZE, ChecksumScheme
 _BATCH = 4
 _MESSAGE_LEN = 16
 
+# What both published sets look like to the harness's shape grouping: a message
+# length per case, so no two cases share a batch and every group is a singleton.
+_SINGLETON_MESSAGE_LENS = (13, 14, 15, 16)
 
-def _reference_vectors() -> list[kat.KatVector]:
+
+def _reference_vectors(
+    message_lens: Sequence[int] = (_MESSAGE_LEN,) * _BATCH,
+) -> list[kat.KatVector]:
     """Cases the reference scheme satisfies, in the harness's normalized form."""
     scheme = ChecksumScheme(domain=7)
     rng = np.random.default_rng(0)
     vectors = []
-    for index in range(_BATCH):
+    for index, message_len in enumerate(message_lens):
         seed = bytes(rng.integers(0, 256, KEY_SIZE, dtype=np.uint8))
-        message = bytes(rng.integers(0, 256, _MESSAGE_LEN, dtype=np.uint8))
+        message = bytes(rng.integers(0, 256, message_len, dtype=np.uint8))
         public_key, secret_key = scheme.keygen(fnp.asarray(bytearray(seed)))
         signature = scheme.sign(
             secret_key,
@@ -159,6 +166,23 @@ class KatHarnessTest(absltest.TestCase):
     def test_catches_a_verdict_decided_for_the_whole_batch(self) -> None:
         with self.assertRaisesRegex(kat.KatError, "not deciding per entry"):
             kat.check(_VerdictForTheWholeBatch(domain=7), _reference_vectors())
+
+    def test_catches_a_batch_verdict_where_no_published_group_batches(self) -> None:
+        # The case above is caught by the tampering pass, which needs a group of
+        # more than one case to compare entries across — and no published set has
+        # one, because they vary the message length per case. These vectors are
+        # that set: at `B = 1` a verifier that decides once for the batch is
+        # indistinguishable from a correct one, so what catches it is the batch
+        # the harness builds by replicating a published case.
+        vectors = _reference_vectors(_SINGLETON_MESSAGE_LENS)
+        self.assertLen({len(v.message or b"") for v in vectors}, len(vectors))
+        with self.assertRaisesRegex(kat.KatError, "replicated across a batch"):
+            kat.check(_VerdictForTheWholeBatch(domain=7), vectors)
+
+    def test_the_reference_scheme_passes_where_nothing_batches(self) -> None:
+        # The premise of the case above: the constructed batch is a check the
+        # correct scheme still passes, not one that fails on singleton sets.
+        kat.check(ChecksumScheme(domain=7), _reference_vectors(_SINGLETON_MESSAGE_LENS))
 
     def test_catches_a_wrong_signature(self) -> None:
         with self.assertRaisesRegex(kat.KatError, "wrong signature"):
