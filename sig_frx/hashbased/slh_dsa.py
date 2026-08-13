@@ -56,6 +56,7 @@ from hash_frx.byte_hash import ByteHash
 from hash_frx.keccak.byte_hashes import Shake256
 from hash_frx.sha256 import Sha256
 
+from sig_frx import context as ctx
 from sig_frx.hashbased import bytestring, fors, hypertree, tree, wots, xmss
 from sig_frx.hashbased.tweakable import (
     Sha2TweakableHash,
@@ -70,8 +71,6 @@ from sig_frx.signature import Signature
 _PURE_DOMAIN = 0
 _PREHASH_DOMAIN = 1
 
-# Algorithm 22 line 1: the context length is encoded in one byte.
-MAX_CONTEXT_SIZE = 255
 
 # The DER encoding of SHA-256's OID, tag and length included — Algorithm 23 line
 # 10, `2.16.840.1.101.3.4.2.1`.
@@ -246,42 +245,6 @@ class _SecretKey:
     pk_root: Array
 
 
-def _context_prefix(domain: int, context: ArrayLike | None) -> np.ndarray:
-    """`toByte(domain, 1) ‖ toByte(|ctx|, 1) ‖ ctx` — Algorithm 22 line 8.
-
-    A context longer than one byte can encode is refused rather than truncated:
-    §10.2 gives it one length byte, and truncating would sign a different context
-    from the one the caller named.
-    """
-    ctx = (
-        np.zeros(0, dtype=np.uint8)
-        if context is None
-        else np.asarray(context, dtype=np.uint8).reshape(-1)
-    )
-    if ctx.shape[0] > MAX_CONTEXT_SIZE:
-        raise ValueError(
-            f"a context string is at most {MAX_CONTEXT_SIZE} bytes, "
-            f"got {ctx.shape[0]}"
-        )
-    return np.concatenate([np.array([domain, ctx.shape[0]], dtype=np.uint8), ctx])
-
-
-def _prepend(prefix: np.ndarray, messages: ArrayLike) -> Array:
-    """`prefix ‖ M`, for one message or for a whole batch of them.
-
-    The prefix is one value per call — the domain separator and the context, which
-    a verifier serves one of at a time — so a batch broadcasts it rather than
-    carrying a copy per entry.
-    """
-    head = fnp.asarray(prefix, dtype=fnp.uint8)
-    body = fnp.asarray(messages, dtype=fnp.uint8)
-    if body.ndim == 1:
-        return fnp.concatenate([head, body])
-    return fnp.concatenate(
-        [fnp.broadcast_to(head, (body.shape[0], head.shape[0])), body], axis=-1
-    )
-
-
 class SlhDsa:
     """SLH-DSA over an injected tweakable hash family — FIPS 205 §9 and §10.
 
@@ -372,7 +335,7 @@ class SlhDsa:
         """`slh_sign` — Algorithm 22: pure signing, over Algorithm 19."""
         return self.sign_internal(
             secret_key,
-            _prepend(_context_prefix(_PURE_DOMAIN, context), message),
+            ctx.prepend(ctx.prefix(_PURE_DOMAIN, context), message),
             randomness=randomness,
         )
 
@@ -394,7 +357,9 @@ class SlhDsa:
         """
         return self.sign_internal(
             secret_key,
-            _prepend(self._prehash_prefix(pre_hash, context), pre_hash.digest(message)),
+            ctx.prepend(
+                self._prehash_prefix(pre_hash, context), pre_hash.digest(message)
+            ),
             randomness=randomness,
         )
 
@@ -499,7 +464,7 @@ class SlhDsa:
         """`slh_verify` — Algorithm 24 over Algorithm 20, for the whole batch."""
         return self.verify_internal(
             public_key,
-            _prepend(_context_prefix(_PURE_DOMAIN, context), message),
+            ctx.prepend(ctx.prefix(_PURE_DOMAIN, context), message),
             signature,
         )
 
@@ -515,7 +480,9 @@ class SlhDsa:
         """`hash_slh_verify` — Algorithm 25: the counterpart of `hash_sign`."""
         return self.verify_internal(
             public_key,
-            _prepend(self._prehash_prefix(pre_hash, context), pre_hash.digest(message)),
+            ctx.prepend(
+                self._prehash_prefix(pre_hash, context), pre_hash.digest(message)
+            ),
             signature,
         )
 
@@ -633,7 +600,7 @@ class SlhDsa:
         """Algorithm 23 line 24, everything before `PH_M`."""
         return np.concatenate(
             [
-                _context_prefix(_PREHASH_DOMAIN, context),
+                ctx.prefix(_PREHASH_DOMAIN, context),
                 np.frombuffer(pre_hash.oid, dtype=np.uint8),
             ]
         )

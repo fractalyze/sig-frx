@@ -30,3 +30,16 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# The message framing FIPS 204 and FIPS 205 share. Top level for the same reason
+# as `:arrays` — one scheme family per package, and both standards frame a
+# context the same way.
+py_library(
+    name = "context",
+    srcs = ["context.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
