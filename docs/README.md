@@ -18,6 +18,7 @@ scheme is held to, **[`schemes/`](schemes)** is one design-notes page per scheme
 | Question                                                | Where                          |
 | --------------------------------------------------------- | ------------------------------ |
 | What a scheme page must answer, and the shared machinery | [`README.md`](schemes/README.md) |
+| Module-lattice signatures — the two rejection loops, batch axis, what leaks | [`ml-dsa.md`](schemes/ml-dsa.md) |
 | Hash-based signatures over a hypertree — parameter sets, batch axis, what leaks | [`slh-dsa.md`](schemes/slh-dsa.md) |
 | Stateful hash-based signatures, single- and multi-tree — the index discipline, and who owns persistence | [`xmss.md`](schemes/xmss.md) |
 

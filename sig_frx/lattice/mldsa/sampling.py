@@ -20,12 +20,9 @@ standard's own rejection rule defines, evaluated once per parameterisation on
 the host, and it means the bound-exhausted path is unreachable rather than
 merely unlikely (see `_require_enough` for what happens if it is reached anyway).
 
-A fixed budget also settles the question `conventions.md` asks of every rejection
-loop: how many blocks are squeezed and how many candidates are examined is the
-same for every seed, so the trip count leaks nothing. That is a consequence of
-the shape rather than a claim — this repo makes no side-channel claim
-([`security.md`](../../../docs/reference/security.md)) — and it is the shape the
-compiler wanted anyway.
+Which loop shape a rejection gets is the scheme's decision to record, and
+[`ml-dsa.md`](../../../docs/schemes/ml-dsa.md) records this one alongside the
+signing loop that went the other way.
 
 ## Collection is a gather, and a running count is the schedule
 
@@ -55,19 +52,6 @@ None of which is an argument against the incremental sponge. It is what a
 `while_loop` on the acceptance count needs, and that is the design this one is
 weighed against — the budget is what makes the incremental surface unnecessary
 here, not the other way round.
-
-## The batch axis
-
-The samplers take one seed and return one matrix, vector, or polynomial, the way
-FIPS 204 defines them; the axis inside each is over the streams that seed fans
-out into, which is where ExpandA's `k·ℓ` independent entries live. A batch of
-*signatures* is `frx.vmap` over these, per
-[`conventions.md`](../../../docs/reference/conventions.md).
-
-One of them should not be batched that way, and it is the expensive one: `Â`
-depends on the public key alone, so `vmap`ping ExpandA across signatures
-verified under one key recomputes the same matrix once per signature. It belongs
-outside the per-signature axis, sampled once and closed over.
 
 ## Â is already in the standard's order
 
