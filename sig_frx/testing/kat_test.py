@@ -92,6 +92,30 @@ def _reference_vectors_with_context() -> list[kat.KatVector]:
     return vectors
 
 
+def _rejected_vectors() -> list[kat.KatVector]:
+    """An all-failure group, as a published set with no accepted case is one.
+
+    The signature is moved along with the verdict, so the reference scheme
+    reproduces the rejection rather than failing the comparison — these are cases
+    a correct implementation passes, which is what makes them the shape under
+    test rather than a broken set.
+    """
+    vectors = []
+    for vector in _reference_vectors():
+        assert vector.signature is not None
+        vectors.append(
+            kat.KatVector(
+                **{
+                    **vars(vector),
+                    "valid": False,
+                    "signature": bytes([vector.signature[0] ^ 1])
+                    + vector.signature[1:],
+                }
+            )
+        )
+    return vectors
+
+
 class _AlwaysAccepts(ChecksumScheme):
     """The failure mode positive-only KAT suites cannot see."""
 
@@ -104,6 +128,20 @@ class _AlwaysAccepts(ChecksumScheme):
         context: ArrayLike | None = None,
     ) -> Array:
         return fnp.ones(np.shape(public_key)[0], dtype=fnp.bool_)
+
+
+class _AlwaysRejects(ChecksumScheme):
+    """The mirror of `_AlwaysAccepts`, and the one an all-failure set cannot see."""
+
+    def verify(
+        self,
+        public_key: ArrayLike,
+        message: ArrayLike,
+        signature: ArrayLike,
+        *,
+        context: ArrayLike | None = None,
+    ) -> Array:
+        return fnp.zeros(np.shape(public_key)[0], dtype=fnp.bool_)
 
 
 class _VerdictForTheWholeBatch(ChecksumScheme):
@@ -237,6 +275,63 @@ class KatHarnessTest(absltest.TestCase):
         vectors[0] = kat.KatVector(**{**vars(vectors[0]), "valid": False})
         with self.assertRaisesRegex(kat.KatError, "published verdict is reject"):
             kat.check(ChecksumScheme(domain=7), vectors)
+
+    def test_refuses_a_set_with_no_accepted_case(self) -> None:
+        # Everything the harness derives moves a bit in a case the standard
+        # accepts, so a set without one runs the verdict comparison and nothing
+        # else. The reference scheme passes that comparison, which is exactly why
+        # the shrinkage is invisible without this.
+        with self.assertRaisesRegex(kat.KatError, "not one the standard accepts"):
+            kat.check(ChecksumScheme(domain=7), _rejected_vectors())
+
+    def test_a_verifier_that_rejects_everything_is_what_the_declaration_costs(
+        self,
+    ) -> None:
+        # The mirror image of the always-accepting verifier, and the reason the
+        # refusal is about the set rather than the scheme: rejecting
+        # unconditionally agrees with every verdict an all-failure group
+        # publishes, and the pass that would separate the two needs an accepted
+        # case to move a bit in. So the declaration is not free — it is the
+        # statement that this operation cannot tell those apart, and this is that
+        # statement under test rather than described.
+        vectors = _rejected_vectors()
+        with self.assertRaisesRegex(kat.KatError, "not one the standard accepts"):
+            kat.check(_AlwaysRejects(domain=7), vectors)
+        kat.check(_AlwaysRejects(domain=7), vectors, no_accepted_case="under test")
+
+    def test_a_declared_set_still_compares_its_published_verdicts(self) -> None:
+        # What the declaration switches off is the derived half, not the
+        # published one: an all-failure group still fails a verifier that accepts
+        # everything, which is the check that survives where tampering cannot run.
+        with self.assertRaisesRegex(kat.KatError, "published verdict is reject"):
+            kat.check(
+                _AlwaysAccepts(domain=7),
+                _rejected_vectors(),
+                no_accepted_case="under test",
+            )
+
+    def test_refuses_a_declaration_the_set_outgrew(self) -> None:
+        # A regenerated set that starts publishing an accepted case is the good
+        # outcome, and the declaration is what turns it into a prompt to delete
+        # the declaration rather than a check that silently stays off.
+        with self.assertRaisesRegex(kat.KatError, "declared as publishing no accepted"):
+            kat.check(
+                ChecksumScheme(domain=7),
+                _reference_vectors(),
+                no_accepted_case="under test",
+            )
+
+    def test_refuses_a_declaration_about_cases_this_call_does_not_verify(self) -> None:
+        # The other direction the declaration can be wrong in. A key generation
+        # set has no verify case for the claim to be about, so a declaration
+        # there describes nothing and would sit unread — which is the shape of
+        # the problem it exists to prevent.
+        vectors = [
+            kat.KatVector(**{**vars(v), "message": None, "signature": None})
+            for v in _reference_vectors()
+        ]
+        with self.assertRaisesRegex(kat.KatError, "no verify case at all"):
+            kat.check(ChecksumScheme(domain=7), vectors, no_accepted_case="under test")
 
     def test_to_bytes_refuses_a_non_byte_wire_form(self) -> None:
         # The message is the seam question it defers, not a type error.

@@ -146,6 +146,31 @@ class SignatureKatTest(absltest.TestCase):
         for vector in wrong_length:
             self.assertFalse(vector.valid, vector.case_id)
 
+    def test_every_operation_with_no_accepted_case_is_declared(self) -> None:
+        # `kat.check` refuses a set whose derived negative checks have no accepted
+        # case to start from, so what keeps the sweep green is the declaration
+        # list — and the sweep is the only thing that runs the sets outside the
+        # merge gate. This is set arithmetic over already-parsed vectors, which is
+        # what lets the whole census be a merge-gate claim rather than leaving
+        # most of it to the scheduled job.
+        groups = slh_dsa_vectors.group(
+            slh_dsa_vectors.runnable(slh_dsa_vectors.load("sigVer"))
+        )
+        observed = {
+            operation
+            for operation, group in groups.items()
+            if not any(vector.valid for vector in group)
+        }
+        self.assertEqual(observed, set(slh_dsa_vectors.NO_ACCEPTED_VERIFY_CASE))
+        # Every one of them is a pre-hash operation, which is the shape of the
+        # gap: ACVP draws the function per case, so the pure and internal groups
+        # are large enough to always hold an accepted one and these are not. The
+        # merge gate's own set is not among them, so the cases below still run
+        # the full derived pass.
+        for operation in observed:
+            self.assertIsNotNone(operation.pre_hash, str(operation))
+            self.assertNotEqual(operation.parameter_set, _MERGE_GATE_SET)
+
     def test_the_pre_hash_functions_the_sets_reach_are_stated(self) -> None:
         # ACVP exercises twelve pre-hash functions and hash-frx provides one. The
         # rest are excluded because a pre-hash case signs its function's OID, so no

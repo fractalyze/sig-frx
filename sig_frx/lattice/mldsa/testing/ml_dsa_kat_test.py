@@ -138,6 +138,25 @@ class SignatureKatTest(absltest.TestCase):
         self.assertGreater(rejected, accepted)
         self.assertGreater(accepted, 0)
 
+    def test_every_operation_with_no_accepted_case_is_declared(self) -> None:
+        # `kat.check` refuses a set whose derived negative checks have no accepted
+        # case to start from, so what keeps the sweep green is the declaration
+        # list — and the sweep is the only thing that runs the sets outside the
+        # merge gate. This is set arithmetic over already-parsed vectors, which is
+        # what lets the whole census be a merge-gate claim rather than leaving
+        # most of it to the scheduled job.
+        observed = {
+            operation
+            for operation, group in ml_dsa_vectors.runnable_groups("sigVer").items()
+            if not any(vector.valid for vector in group)
+        }
+        self.assertEqual(observed, set(ml_dsa_vectors.NO_ACCEPTED_VERIFY_CASE))
+        # Every one of them is a pre-hash operation, which is the shape of the
+        # gap: ACVP draws the function per case, so the pure and internal groups
+        # are large enough to always hold an accepted one and these are not.
+        for operation in observed:
+            self.assertIsNotNone(operation.pre_hash, str(operation))
+
     def test_the_boundaries_of_what_ran_are_the_ones_stated(self) -> None:
         for mode, expected in _EXCLUDED.items():
             with self.subTest(mode):
