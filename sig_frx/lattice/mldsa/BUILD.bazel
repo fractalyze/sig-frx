@@ -22,6 +22,24 @@ py_library(
     ],
 )
 
+# FIPS 204 §7.1-7.2's conversions and wire formats. Depends on `:arith` for the
+# modulus the widths are derived from and on nothing else — no hash, no sampler
+# — which is what lets `:sampling` depend on *it* for §7.1 without a cycle.
+py_library(
+    name = "encoding",
+    srcs = [
+        "__init__.py",
+        "encoding.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":arith",
+        "//sig_frx:arrays",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
 # FIPS 204 §7.3's pseudorandom sampling. The keccak dependency is the whole of
 # it — every sampler is a SHAKE squeezed to a fixed length and rejection-sampled
 # — and `:arith` supplies the field and the modulus the accepted candidates land
@@ -36,6 +54,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":arith",
+        ":encoding",
         "//sig_frx:arrays",
         "@hash_frx//hash_frx/keccak",
         requirement("frx"),

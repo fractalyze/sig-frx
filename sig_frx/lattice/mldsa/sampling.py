@@ -96,6 +96,7 @@ from hash_frx.keccak.byte_hashes import (
 
 from sig_frx.arrays import namespace
 from sig_frx.lattice.mldsa.arith import FIELD, N, Q
+from sig_frx.lattice.mldsa.encoding import bytes_to_bits, unpack_fields
 
 # The shortfall probability every budget below is sized against. `2^-256` is the
 # collision strength `λ` of the strongest parameter set (Table 1), so a budget
@@ -264,34 +265,6 @@ def _rej_bounded_poly(seeds: Any, eta: int, blocks: int) -> Any:
     return _first_accepted(coefficients, accepted, N, "ExpandS")
 
 
-def _bytes_to_bits(values: Any) -> Any:
-    """Algorithm 13 — each byte low bit first, over the trailing axis."""
-    bits = (values[..., None] >> np.arange(8, dtype=np.uint8)) & np.uint8(1)
-    return bits.reshape(*values.shape[:-1], -1)
-
-
-def _bit_unpack_field(v: Any, width: int) -> Any:
-    """`v` read as 256 little-endian `width`-bit fields per row, as uint32.
-
-    The unsigned half of Algorithm 19 — the subtraction its last line performs
-    is the caller's, since only the caller knows `b`. Algorithm 19 is stated
-    over the bit string, and taken literally it needs no byte arithmetic at all:
-    `32·width` bytes is exactly `256·width` bits, so the fields are a reshape
-    and their values a weighted sum. `wots.base_2b` is the same mechanism at the
-    opposite bit order — FIPS 205 numbers from the high end — so neither can
-    stand in for the other, which is the distinction
-    [`bytestring.low_bits`](../../hashbased/bytestring.py) already records for
-    its own near-miss.
-
-    The general BitPack/BitUnpack pair belongs with the wire formats that need
-    both directions; this is the half ExpandMask needs, and it is the piece to
-    hoist when that second consumer arrives rather than a seam guessed at now
-    ([`conventions.md`](../../../docs/reference/conventions.md)).
-    """
-    fields = _bytes_to_bits(v).astype(np.uint32).reshape(*v.shape[:-1], -1, width)
-    return (fields << np.arange(width, dtype=np.uint32)).sum(axis=-1)
-
-
 def expand_a(rho: ArrayLike, k: int, ell: int) -> Any:
     """Algorithm 32 — the public matrix `Â ∈ (T_q)^{k×ℓ}` from a 32-byte seed.
 
@@ -344,13 +317,17 @@ def expand_mask(rho: ArrayLike, mu: int, ell: int, gamma1: int) -> Any:
     `μ` is the signing loop's counter and stays a host integer, since the loop
     that increments it is the host's
     ([`conventions.md`](../../../docs/reference/conventions.md)).
+
+    The bit-field read is `encoding.unpack_fields` — Algorithm 19's unsigned
+    half, which this was the first consumer of and the wire formats are the
+    second, so it lives with them now.
     """
     if gamma1 & (gamma1 - 1):
         raise ValueError(f"gamma1 ({gamma1}) must be a power of 2 — FIPS 204 Table 1")
     width = 1 + (gamma1 - 1).bit_length()
     tails = np.array([_integer_to_bytes(mu + r, 2) for r in range(ell)], dtype=np.uint8)
     v = Shake256(32 * width).digest(_seeds(rho, 64, tails))
-    return np.int32(gamma1) - _bit_unpack_field(v, width).astype(np.int32)
+    return np.int32(gamma1) - unpack_fields(v, width).astype(np.int32)
 
 
 def sample_in_ball(rho: ArrayLike, tau: int) -> Any:
@@ -377,7 +354,7 @@ def sample_in_ball(rho: ArrayLike, tau: int) -> Any:
     budget = _budget(tau, (N - tau + 1, N), 1)
     stream = Shake256(8 + budget).digest(seed[None, :])[0]
 
-    signs = _bytes_to_bits(stream[:8]).astype(np.int32)
+    signs = bytes_to_bits(stream[:8]).astype(np.int32)
     candidates = stream[8:].astype(np.int32)
     position = np.arange(budget, dtype=np.int32)
     slot = np.arange(N, dtype=np.int32)

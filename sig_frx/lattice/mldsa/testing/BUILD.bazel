@@ -32,6 +32,20 @@ py_test(
 )
 
 py_test(
+    name = "encoding_test",
+    size = "medium",
+    srcs = ["encoding_test.py"],
+    deps = [
+        ":fips204_reference",
+        "//sig_frx/lattice/mldsa:arith",
+        "//sig_frx/lattice/mldsa:encoding",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
     name = "sampling_test",
     size = "medium",
     srcs = ["sampling_test.py"],

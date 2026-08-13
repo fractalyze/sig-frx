@@ -32,6 +32,49 @@ ZETA = 1753
 D = 13
 N = 256
 
+# Table 1, in full and in one place. Transcribing it per test module is how the
+# copies start disagreeing about which columns they carry, and every value here
+# is one the standard already determines.
+PARAMETER_SETS = {
+    "ML_DSA_44": {
+        "k": 4,
+        "ell": 4,
+        "eta": 2,
+        "tau": 39,
+        "lam": 128,
+        "gamma1": 1 << 17,
+        "gamma2": (Q - 1) // 88,
+        "omega": 80,
+    },
+    "ML_DSA_65": {
+        "k": 6,
+        "ell": 5,
+        "eta": 4,
+        "tau": 49,
+        "lam": 192,
+        "gamma1": 1 << 19,
+        "gamma2": (Q - 1) // 32,
+        "omega": 55,
+    },
+    "ML_DSA_87": {
+        "k": 8,
+        "ell": 7,
+        "eta": 2,
+        "tau": 60,
+        "lam": 256,
+        "gamma1": 1 << 19,
+        "gamma2": (Q - 1) // 32,
+        "omega": 75,
+    },
+}
+
+
+def parameter_cases() -> tuple[dict, ...]:
+    """`PARAMETER_SETS` as `absltest` named-parameter records."""
+    return tuple(
+        {"testcase_name": name, **values} for name, values in PARAMETER_SETS.items()
+    )
+
 
 def bit_rev8(m: int) -> int:
     """Algorithm 43."""
@@ -297,3 +340,126 @@ def sample_in_ball(rho: bytes, tau: int) -> list[int]:
         c[i] = c[j]
         c[j] = (-1) ** h[i + tau - N]
     return c
+
+
+def integer_to_bits(x: int, alpha: int) -> list[int]:
+    """Algorithm 9 — little-endian bits."""
+    return [(x >> i) & 1 for i in range(alpha)]
+
+
+def bits_to_bytes(y: list[int]) -> bytes:
+    """Algorithm 12 — eight bits to a byte, low bit first."""
+    out = bytearray(len(y) // 8)
+    for i, bit in enumerate(y):
+        out[i // 8] |= bit << (i % 8)
+    return bytes(out)
+
+
+def simple_bit_pack(w: list[int], b: int) -> bytes:
+    """Algorithm 16."""
+    c = b.bit_length()
+    z: list[int] = []
+    for value in w:
+        z += integer_to_bits(value, c)
+    return bits_to_bytes(z)
+
+
+def bit_pack(w: list[int], a: int, b: int) -> bytes:
+    """Algorithm 17."""
+    c = (a + b).bit_length()
+    z: list[int] = []
+    for value in w:
+        z += integer_to_bits(b - value, c)
+    return bits_to_bytes(z)
+
+
+def simple_bit_unpack(v: bytes, b: int) -> list[int]:
+    """Algorithm 18."""
+    c = b.bit_length()
+    z = bytes_to_bits(v)
+    return [bits_to_integer(z[i * c : (i + 1) * c]) for i in range(N)]
+
+
+def hint_bit_pack(h: list[list[int]], omega: int) -> bytes:
+    """Algorithm 20."""
+    y = bytearray(omega + len(h))
+    index = 0
+    for i, poly in enumerate(h):
+        for j in range(N):
+            if poly[j] != 0:
+                y[index] = j
+                index += 1
+        y[omega + i] = index
+    return bytes(y)
+
+
+def hint_bit_unpack(y: bytes, k: int, omega: int) -> list[list[int]] | None:
+    """Algorithm 21 — `None` is the standard's `⊥`."""
+    h = [[0] * N for _ in range(k)]
+    index = 0
+    for i in range(k):
+        if y[omega + i] < index or y[omega + i] > omega:
+            return None
+        first = index
+        while index < y[omega + i]:
+            if index > first and y[index - 1] >= y[index]:
+                return None
+            h[i][y[index]] = 1
+            index += 1
+    for i in range(index, omega):
+        if y[i] != 0:
+            return None
+    return h
+
+
+def pk_encode(rho: bytes, t1: list[list[int]]) -> bytes:
+    """Algorithm 22."""
+    width = (Q - 1).bit_length() - D
+    return rho + b"".join(simple_bit_pack(row, (1 << width) - 1) for row in t1)
+
+
+def pk_decode(pk: bytes, k: int) -> tuple[bytes, list[list[int]]]:
+    """Algorithm 23."""
+    width = (Q - 1).bit_length() - D
+    size = 32 * width
+    rho, body = pk[:32], pk[32:]
+    return rho, [
+        simple_bit_unpack(body[i * size : (i + 1) * size], (1 << width) - 1)
+        for i in range(k)
+    ]
+
+
+def sk_encode(
+    rho: bytes,
+    key: bytes,
+    tr: bytes,
+    s1: list[list[int]],
+    s2: list[list[int]],
+    t0: list[list[int]],
+    eta: int,
+) -> bytes:
+    """Algorithm 24."""
+    out = rho + key + tr
+    for row in s1:
+        out += bit_pack(row, eta, eta)
+    for row in s2:
+        out += bit_pack(row, eta, eta)
+    for row in t0:
+        out += bit_pack(row, (1 << (D - 1)) - 1, 1 << (D - 1))
+    return out
+
+
+def sig_encode(
+    c_tilde: bytes, z: list[list[int]], h: list[list[int]], gamma1: int, omega: int
+) -> bytes:
+    """Algorithm 26."""
+    out = c_tilde
+    for row in z:
+        out += bit_pack(row, gamma1 - 1, gamma1)
+    return out + hint_bit_pack(h, omega)
+
+
+def w1_encode(w1: list[list[int]], gamma2: int) -> bytes:
+    """Algorithm 28."""
+    bound = (Q - 1) // (2 * gamma2) - 1
+    return b"".join(simple_bit_pack(row, bound) for row in w1)
