@@ -43,3 +43,19 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# The pre-hash variants' shared record, over `:context`'s framing. Top level
+# because both standards define one and each scheme family is its own package.
+py_library(
+    name = "prehash",
+    srcs = ["prehash.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":context",
+        "@hash_frx//hash_frx:byte_hash",
+        "@hash_frx//hash_frx:sha256",
+        "@hash_frx//hash_frx/keccak",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
