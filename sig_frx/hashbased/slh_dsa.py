@@ -52,11 +52,11 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx.byte_hash import ByteHash
 from hash_frx.keccak.byte_hashes import Shake256
 from hash_frx.sha256 import Sha256
 
 from sig_frx import context as ctx
+from sig_frx import prehash
 from sig_frx.hashbased import bytestring, fors, hypertree, tree, wots, xmss
 from sig_frx.hashbased.tweakable import (
     Sha2TweakableHash,
@@ -70,11 +70,6 @@ from sig_frx.signature import Signature
 # versa, so they are the first byte of what gets signed rather than metadata.
 _PURE_DOMAIN = 0
 _PREHASH_DOMAIN = 1
-
-
-# The DER encoding of SHA-256's OID, tag and length included — Algorithm 23 line
-# 10, `2.16.840.1.101.3.4.2.1`.
-SHA256_OID = bytes.fromhex("0609608648016503040201")
 
 
 @dataclass(frozen=True)
@@ -209,29 +204,6 @@ SHAKE_PARAMETER_SETS: dict[str, SlhDsaParams] = {
 
 
 @dataclass(frozen=True)
-class PreHash:
-    """A pre-hash function for HashSLH-DSA — Algorithm 23 lines 8 to 23.
-
-    `oid` is the DER encoding of the function's object identifier, tag and length
-    included. It goes into the message that gets signed, so a pre-hash signature
-    names what it pre-hashed with and cannot be reinterpreted under another
-    function.
-    """
-
-    oid: bytes
-    byte_hash: ByteHash
-
-    def digest(self, messages: ArrayLike) -> Array:
-        """`PH_M` — the pre-hash of the content. One message, or a batch of them."""
-        values = fnp.asarray(messages, dtype=fnp.uint8)
-        if values.ndim == 1:
-            return fnp.asarray(self.byte_hash.digest(values[None, :]), dtype=fnp.uint8)[
-                0
-            ]
-        return fnp.asarray(self.byte_hash.digest(values), dtype=fnp.uint8)
-
-
-@dataclass(frozen=True)
 class _SecretKey:
     """`SK.seed ‖ SK.prf ‖ PK.seed ‖ PK.root` — Figure 15, parsed.
 
@@ -343,7 +315,7 @@ class SlhDsa:
         self,
         secret_key: ArrayLike,
         message: ArrayLike,
-        pre_hash: PreHash,
+        pre_hash: prehash.PreHash,
         *,
         randomness: ArrayLike | None = None,
         context: ArrayLike | None = None,
@@ -358,7 +330,7 @@ class SlhDsa:
         return self.sign_internal(
             secret_key,
             ctx.prepend(
-                self._prehash_prefix(pre_hash, context), pre_hash.digest(message)
+                pre_hash.prefix(_PREHASH_DOMAIN, context), pre_hash.digest(message)
             ),
             randomness=randomness,
         )
@@ -473,7 +445,7 @@ class SlhDsa:
         public_key: ArrayLike,
         message: ArrayLike,
         signature: ArrayLike,
-        pre_hash: PreHash,
+        pre_hash: prehash.PreHash,
         *,
         context: ArrayLike | None = None,
     ) -> Array:
@@ -481,7 +453,7 @@ class SlhDsa:
         return self.verify_internal(
             public_key,
             ctx.prepend(
-                self._prehash_prefix(pre_hash, context), pre_hash.digest(message)
+                pre_hash.prefix(_PREHASH_DOMAIN, context), pre_hash.digest(message)
             ),
             signature,
         )
@@ -594,17 +566,6 @@ class SlhDsa:
             ),
         )
 
-    def _prehash_prefix(
-        self, pre_hash: PreHash, context: ArrayLike | None
-    ) -> np.ndarray:
-        """Algorithm 23 line 24, everything before `PH_M`."""
-        return np.concatenate(
-            [
-                ctx.prefix(_PREHASH_DOMAIN, context),
-                np.frombuffer(pre_hash.oid, dtype=np.uint8),
-            ]
-        )
-
     def _split_digest(
         self,
         randomizers: ArrayLike,
@@ -691,13 +652,13 @@ def shake(name: str, *, deterministic: bool = False) -> SlhDsa:
     )
 
 
-def sha256_pre_hash() -> PreHash:
+def sha256_pre_hash() -> prehash.PreHash:
     """SHA-256 as HashSLH-DSA's pre-hash — Algorithm 23 lines 9 to 11.
 
     §10.2.2 restricts SHA-256 to parameter sets claimed in security category 1,
     which is every set `sha2` builds.
     """
-    return PreHash(oid=SHA256_OID, byte_hash=Sha256())
+    return prehash.sha2_256()
 
 
 if TYPE_CHECKING:

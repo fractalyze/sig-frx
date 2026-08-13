@@ -38,6 +38,7 @@ import numpy as np
 from absl.testing import absltest, parameterized
 from frx import Array
 
+from sig_frx import prehash
 from sig_frx.context import MAX_SIZE as MAX_CONTEXT_SIZE
 from sig_frx.lattice.mldsa import ml_dsa, sampling
 from sig_frx.lattice.mldsa.testing import fips204_reference as ref
@@ -45,6 +46,9 @@ from sig_frx.signature import Signature
 
 _DEFAULT = "ML-DSA-44"
 _MESSAGE = b"the reshaped form and the standard's own form"
+# A non-empty context, so the pre-hash cases pin the length byte and the ordering
+# of `ctx` against the OID rather than only the digest.
+_CONTEXT = b"sig-frx"
 _BATCH = 3
 _SEED = bytes(range(32))
 # A `rnd` that is not the deterministic variant's zeros, so a signature that
@@ -62,6 +66,10 @@ _PUBLISHED_SIZES = {
 _PARAMETER_SETS = tuple(
     {"testcase_name": name.replace("-", "_"), "name": name}
     for name in ml_dsa.PARAMETER_SETS
+)
+
+_PRE_HASHES = tuple(
+    {"testcase_name": name.replace("-", "_"), "name": name} for name in prehash.BY_NAME
 )
 
 
@@ -455,6 +463,122 @@ class InternalInterfaceTest(absltest.TestCase):
         signs `M`, so one verifying as the other would mean the domain separator
         was not part of what got signed."""
         self.assertEqual(self._one(_signed(_DEFAULT).signature), [False])
+
+
+class PreHashTest(parameterized.TestCase):
+    """§5.4's pair, which signs a digest under an OID that names the function.
+
+    Every function this repo can compute is driven, because what differs between
+    them is exactly the two constants no round trip reads back — the OID and, for a
+    XOF, how many bytes it is squeezed for. The reference's `switch PH` is a second
+    transcription of that table, so an agreement here is the pair checked against
+    the standard rather than against itself.
+    """
+
+    @parameterized.named_parameters(*_PRE_HASHES)
+    def test_signing_reproduces_the_reference_signature(self, name: str) -> None:
+        signed = _signed(_DEFAULT)
+        got = signed.scheme.hash_sign(
+            signed.secret_key,
+            np.frombuffer(_MESSAGE, dtype=np.uint8),
+            prehash.BY_NAME[name](),
+            context=np.frombuffer(_CONTEXT, dtype=np.uint8),
+        )
+        want = ref.hash_sign(
+            bytes(np.asarray(signed.secret_key)),
+            _MESSAGE,
+            bytes(32),
+            _CONTEXT,
+            name,
+            _reference_params(_DEFAULT),
+        )
+        self.assertEqual(bytes(np.asarray(got)), want)
+
+    @parameterized.named_parameters(*_PRE_HASHES)
+    def test_the_pair_round_trips_over_a_batch(self, name: str) -> None:
+        signed = _signed(_DEFAULT)
+        pre_hash = prehash.BY_NAME[name]()
+        signature = signed.scheme.hash_sign(
+            signed.secret_key, np.frombuffer(_MESSAGE, dtype=np.uint8), pre_hash
+        )
+        public_keys, messages, _ = _batch(signed)
+        signatures = fnp.asarray(np.tile(np.asarray(signature), (_BATCH, 1)))
+        self.assertEqual(
+            _verdicts(
+                signed.scheme.hash_verify(public_keys, messages, signatures, pre_hash)
+            ),
+            [True] * _BATCH,
+        )
+
+    def test_a_pre_hash_signature_is_not_a_pure_one(self) -> None:
+        """The separator is the separation, and §5.4 introduces it for this: the
+        pure variant's domain byte is zero and the pre-hash variant's is one, so
+        one verifying as the other would mean neither was signed."""
+        signed = _signed(_DEFAULT)
+        message = np.frombuffer(_MESSAGE, dtype=np.uint8)
+        signature = signed.scheme.hash_sign(
+            signed.secret_key, message, prehash.sha2_256()
+        )
+        self.assertEqual(
+            _verdicts(
+                signed.scheme.verify(
+                    signed.public_key[None], fnp.asarray(message)[None], signature[None]
+                )
+            ),
+            [False],
+        )
+
+    def test_a_signature_does_not_verify_under_another_pre_hash_function(self) -> None:
+        """The OID is inside `M′`, so the function a signature answers for is part
+        of what was signed. Two functions of the same digest length is the case
+        that only the OID separates."""
+        signed = _signed(_DEFAULT)
+        message = np.frombuffer(_MESSAGE, dtype=np.uint8)
+        signature = signed.scheme.hash_sign(
+            signed.secret_key, message, prehash.sha2_256()
+        )
+        self.assertEqual(
+            _verdicts(
+                signed.scheme.hash_verify(
+                    signed.public_key[None],
+                    fnp.asarray(message)[None],
+                    signature[None],
+                    prehash.sha3_256(),
+                )
+            ),
+            [False],
+        )
+
+    def test_the_reference_verifier_accepts_what_the_module_signed(self) -> None:
+        signed = _signed(_DEFAULT)
+        signature = signed.scheme.hash_sign(
+            signed.secret_key,
+            np.frombuffer(_MESSAGE, dtype=np.uint8),
+            prehash.shake256(),
+            context=np.frombuffer(_CONTEXT, dtype=np.uint8),
+        )
+        self.assertTrue(
+            ref.hash_verify(
+                bytes(np.asarray(signed.public_key)),
+                _MESSAGE,
+                bytes(np.asarray(signature)),
+                _CONTEXT,
+                "SHAKE-256",
+                _reference_params(_DEFAULT),
+            )
+        )
+
+    def test_the_functions_the_repo_computes_are_the_ones_it_states(self) -> None:
+        """`BY_NAME` and the reference's table are written apart and have to hold
+        the same names, since a function present in one alone would be either an
+        untested constructor or an unreachable transcription."""
+        self.assertEqual(set(prehash.BY_NAME), set(ref.PRE_HASHES))
+        for name, build in prehash.BY_NAME.items():
+            with self.subTest(name):
+                _, oid, digest_size = ref.PRE_HASHES[name]
+                pre_hash = build()
+                self.assertEqual(pre_hash.oid.hex(), oid)
+                self.assertEqual(pre_hash.byte_hash.digest_size, digest_size)
 
 
 class InstanceTest(absltest.TestCase):

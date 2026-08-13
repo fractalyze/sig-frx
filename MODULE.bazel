@@ -121,6 +121,43 @@ http_file(
     urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/SLH-DSA-sigVer-FIPS205/expectedResults.json"],
 )
 
+# The ML-DSA keyGen set: 25 cases per parameter set, each a 32-byte `ξ` against
+# the public and private keys it expands to. The widest gate here for its size —
+# `ExpandA`, `ExpandS`, `Power2Round` and both key encodings have to agree for one
+# published key to come back.
+http_file(
+    name = "acvp_ml_dsa_keygen_prompt",
+    downloaded_file_path = "prompt.json",
+    sha256 = "43e81ad820e495dbcad086fe27c1008393a8c32100bbbff77c558c3f06dcefef",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ML-DSA-keyGen-FIPS204/prompt.json"],
+)
+
+http_file(
+    name = "acvp_ml_dsa_keygen_expected",
+    downloaded_file_path = "expectedResults.json",
+    sha256 = "361f47ca19d592adcc66ff2cb591686ad785fea157b295648738bed6921a68df",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ML-DSA-keyGen-FIPS204/expectedResults.json"],
+)
+
+# The sigGen set is the only check the deterministic signing mode gets, and the
+# only one the rejection loop gets: a signature is the loop's output at whichever
+# iteration it accepted, so reproducing one pins every rejection that preceded it.
+# Its 360 cases are 15 per (parameter set, interface, signing mode), where the
+# interfaces are §5's pure external, §5.4's pre-hash external and §6's internal.
+http_file(
+    name = "acvp_ml_dsa_siggen_prompt",
+    downloaded_file_path = "prompt.json",
+    sha256 = "447749d72817b211160d243311ce32302f3023e59c355b0f70be2bd3e9e7830d",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ML-DSA-sigGen-FIPS204/prompt.json"],
+)
+
+http_file(
+    name = "acvp_ml_dsa_siggen_expected",
+    downloaded_file_path = "expectedResults.json",
+    sha256 = "228d011bbe274aeb93e22eea1e0d57b78f43795cf6a64fb5ef1e626485a0bedb",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ML-DSA-sigGen-FIPS204/expectedResults.json"],
+)
+
 # The sigVer set is what pins the negative-vector handling: 144 of its 180 cases
 # are published failures, so a loader that dropped the verdict would turn them
 # into 144 false positives.

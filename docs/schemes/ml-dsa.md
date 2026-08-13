@@ -17,7 +17,23 @@ where ML-KEM's identical adaptation is kept alongside them.
 The standard fixes everything observable: Table 1's three parameter sets, the
 encodings of §7.2, the domain separator and context framing of §5.2, and the
 sampling of §7.3 down to the byte each candidate is read from. A signature either
-reproduces what NIST published or it does not.
+reproduces what NIST published or it does not — and it does, at all three
+parameter sets, against ACVP's `keyGen`, `sigGen` and `sigVer` sets. The
+exhaustive run over the three is tagged `slow_kat`; the merge gate keeps key
+generation at all of them and takes signing and verifying at ML-DSA-44.
+
+Three interfaces, and the seam names one. §5's pure external operation is the
+seam; HashML-DSA and §6's internal interface prepare a different message, so they
+live under `hash_sign` / `hash_verify` and `sign_internal` / `verify_internal`.
+The validation program publishes vectors against all three, so all three are
+gated.
+
+Two things the published sets do not reach. Their `externalMu` cases take a
+pre-computed message representative in place of a message, which is an operation
+nothing here implements, so the harness refuses them rather than running another
+against them. And this set publishes no signature of the wrong length, unlike FIPS
+205's, so §3.6.2's requirement that a wrong length be a verdict rather than an
+error is covered by `ml_dsa_test` alone.
 
 What this implementation chooses:
 
@@ -62,13 +78,23 @@ What this implementation chooses:
   §D.2 records that the draft standard omitted this check and that omitting it
   makes the scheme not strongly existentially unforgeable, which makes dropping the
   flag the one wiring mistake here with a published precedent.
-- **Two interfaces, and the seam names one.** §5's external operation is the seam.
-  §6's internal one prepends neither separator nor context and is what the
-  validation program publishes vectors against, so it lives under
-  `sign_internal` / `verify_internal`. §5.4's pre-hash variant is a third
-  operation and is not implemented; it would live under its own name for the same
-  reason, since the separator exists precisely so the two cannot verify as each
-  other.
+- **The interfaces that prepare a different message are not on the seam.** §6's
+  internal pair prepends neither separator nor context and is what the validation
+  program drives, so it lives under `sign_internal` / `verify_internal`; §5.4's
+  `hash_sign` / `hash_verify` sign a digest under domain separator one and the
+  pre-hash function's OID. The separator exists precisely so the three cannot
+  verify as each other, which is why they do not share an entry point.
+- **A pre-hash function is a value, and five of the twelve are available.** The
+  OID is inside what gets signed, so a case names the function it answers for and
+  no stand-in computes the right message for a function this repo cannot compute.
+  FIPS 204 enumerates three of them and writes `case …` for the rest, so the
+  remaining constants — the OIDs off the NIST CSOR arc, and the length a XOF is
+  squeezed for — are pinned in
+  [`sig_frx/prehash.py`](../../sig_frx/prehash.py) with where each comes from.
+  What the standard's §5.4 footnote asks and this does not enforce is the pairing:
+  a digest shorter than `2λ` bits is below the strength its parameter set claims,
+  and the published sets pair the two freely, so it is a deployment's choice
+  rather than something an implementation may refuse.
 
 ## Where the batch axis is
 

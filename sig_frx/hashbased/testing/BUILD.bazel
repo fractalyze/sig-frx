@@ -259,11 +259,12 @@ py_library(
         "@acvp_slh_dsa_sigver_prompt//file",
     ],
     deps = [
+        "//sig_frx:prehash",
         "//sig_frx:signature",
         "//sig_frx/hashbased:slh_dsa",
         "//sig_frx/testing:kat",
+        "//sig_frx/testing:vector_sets",
         "@rules_python//python/runfiles",
-        requirement("frx"),
     ],
 )
 

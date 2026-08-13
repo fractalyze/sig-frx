@@ -41,14 +41,16 @@ standard omitted this check and that omitting it makes the scheme *not* strongly
 existentially unforgeable, which makes dropping the flag the one wiring mistake
 here with a published precedent.
 
-**Two interfaces, one of them on the seam.** The seam is §5's external operation
-(Algorithms 1, 2 and 3), which prepends the domain separator and the context.
-§6's internal one (Algorithms 6, 7 and 8) prepends nothing and is what the
-validation program publishes vectors against, so it lives here under its own name
-— as it does for SLH-DSA, and for the reason
+**Three interfaces, one of them on the seam.** The seam is §5's external operation
+(Algorithms 1, 2 and 3), which prepends the domain separator and the context. The
+other two prepare a different message, so they live here under their own names —
+as they do for SLH-DSA, and for the reason
 [`conventions.md`](../../../docs/reference/conventions.md) gives: a variant that
-prepares a different message is a different operation. §5.4's pre-hash variant is
-a third, and is not implemented.
+prepares a different message is a different operation. §6's internal one
+(Algorithms 6, 7 and 8) prepends nothing and is what the validation program
+publishes vectors against; §5.4's HashML-DSA (Algorithms 4 and 5, `hash_sign` /
+`hash_verify`) signs a digest under domain separator one, with the pre-hash
+function's OID ahead of it so a signature names what it answers for.
 """
 
 from __future__ import annotations
@@ -65,14 +67,16 @@ from frx.typing import ArrayLike
 from hash_frx.keccak.byte_hashes import Shake256
 
 from sig_frx import context as ctx
+from sig_frx import prehash
 from sig_frx.arrays import namespace
 from sig_frx.lattice.mldsa import arith, encoding, sampling
 from sig_frx.lattice.mldsa.arith import D, Q
 from sig_frx.signature import Signature
 
-# §5.2's domain separator for the pure variant. §5.4's pre-hash variant uses one,
-# which is what keeps a pre-hash signature from verifying as a pure one.
+# §5.2's domain separators: zero for the pure variant and one for §5.4's pre-hash
+# variant, which is what keeps a pre-hash signature from verifying as a pure one.
 _PURE_DOMAIN = 0
+_PREHASH_DOMAIN = 1
 
 # The 32-byte `rnd` of Algorithm 2 line 5, zero for the deterministic variant.
 _RANDOMIZER_SIZE = 32
@@ -314,6 +318,31 @@ class MlDsa:
             randomness=randomness,
         )
 
+    def hash_sign(
+        self,
+        secret_key: ArrayLike,
+        message: ArrayLike,
+        pre_hash: prehash.PreHash,
+        *,
+        randomness: ArrayLike | None = None,
+        context: ArrayLike | None = None,
+    ) -> Array:
+        """`HashML-DSA.Sign` — Algorithm 4: pre-hash signing, over Algorithm 7.
+
+        Deliberately not on the `Signature` seam. What it signs is `PH(M)` under
+        domain separator one and the function's OID, so this and `sign` over the
+        same content produce signatures that do not verify as each other — which
+        is the separation §5.4 introduces it for, and the reason the pre-hash
+        function is a value here rather than a flag.
+        """
+        return self.sign_internal(
+            secret_key,
+            ctx.prepend(
+                pre_hash.prefix(_PREHASH_DOMAIN, context), pre_hash.digest(message)
+            ),
+            randomness=randomness,
+        )
+
     def sign_internal(
         self,
         secret_key: ArrayLike,
@@ -422,6 +451,28 @@ class MlDsa:
         return self.verify_internal(
             public_key,
             ctx.prepend(ctx.prefix(_PURE_DOMAIN, context), message),
+            signature,
+        )
+
+    def hash_verify(
+        self,
+        public_key: ArrayLike,
+        message: ArrayLike,
+        signature: ArrayLike,
+        pre_hash: prehash.PreHash,
+        *,
+        context: ArrayLike | None = None,
+    ) -> Array:
+        """`HashML-DSA.Verify` — Algorithm 5: the counterpart of `hash_sign`.
+
+        Batch-first like `verify`, and for the same reason: the pre-hash is one
+        more hash over each entry's message, not a reason to leave the batch.
+        """
+        return self.verify_internal(
+            public_key,
+            ctx.prepend(
+                pre_hash.prefix(_PREHASH_DOMAIN, context), pre_hash.digest(message)
+            ),
             signature,
         )
 
