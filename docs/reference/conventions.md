@@ -277,7 +277,7 @@ input. It sits in the harness rather than in a scheme's tests because the gap is
 a property of how the vectors are published, not of any one scheme — a
 per-scheme fix would be written once per scheme for one cause.
 
-### An operation with no accepted case declares it
+### An operation with no accepted case is handed one
 
 Everything the harness derives starts from a case the standard accepts, the
 tampering pass and the batch axis alike, because a moved bit is evidence only
@@ -285,16 +285,38 @@ against something that verified before it moved. The validation program draws
 each verification case's pre-hash function at random and publishes mostly
 deliberate failures, so whole operations arrive with nothing accepted in them —
 and there both passes no-op, leaving a run that compares the published verdicts
-and goes green having derived nothing.
+and goes green having derived nothing. Which operations those are is a property
+of the draw in whichever vector set is pinned, not of the scheme: a regenerated
+set reshuffles it, so it is also not a list anyone can maintain.
 
-So `check` refuses such a set unless the call site declares it, one entry per
-operation with its reason. The declaration buys no coverage: an operation gated
-on failures alone cannot separate a verifier that rejects for the right reason
-from one that rejects everything, and what holds those paths up is the scheme's
-own round trip, which this page already says is not evidence. What it buys is
-that the boundary is written down where a regenerated set will trip over it — a
-declaration that stops describing its set fails the same way a wrong interface
-does, so an accepted case arriving deletes the entry rather than going unnoticed.
+The case they are missing is in the same pair of files. A signing set publishes,
+for every operation, a signature the standard says is the right one over a
+published message under a published key — an accepted verification case in all
+but the public key, which it does not carry and which its secret key determines.
+So `check` takes that case from the call site and runs it as a vector like any
+other, held to the same operation as the published ones. That last part is not a
+formality: a pre-hash variant prepares a different message than the pure one, so
+a case borrowed from a sibling operation would be rejected by a **correct**
+implementation.
+
+How a public key comes off a secret one is each scheme's own answer, and the two
+kinds here are not alike. A hash-based secret key ends in the public key it was
+generated with, so it is a slice, confirmed against every key pair the standard
+publishes. A lattice one carries the seed and the secret vectors, so the key is
+recomputed — and what makes that evidence rather than an implementation vouching
+for its own input is the `tr = H(pk, 64)` the same secret key carries: a
+recomputation that drifted anywhere fails against published bytes instead of
+quietly producing a case that gates nothing.
+
+Where the published set reaches an operation nowhere at all, the call site
+declares it instead, one entry with its reason. The declaration buys no coverage:
+an operation gated on failures alone cannot separate a verifier that rejects for
+the right reason from one that rejects everything, and what holds those paths up
+is the scheme's own round trip, which this page already says is not evidence.
+What it buys is that the boundary is written down where a regenerated set will
+trip over it — a declaration that stops describing its set fails the same way a
+wrong interface does, so an accepted case arriving deletes the entry rather than
+going unnoticed.
 
 ### A standard that publishes no vectors still gets gated
 

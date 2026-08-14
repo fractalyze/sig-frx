@@ -28,9 +28,13 @@ across every constructible set is `slh_dsa_sweep_test`, tagged `slow_kat`.
 
 from __future__ import annotations
 
+import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
+from frx import Array
+from frx.typing import ArrayLike
 
+from sig_frx import prehash
 from sig_frx.hashbased import slh_dsa
 from sig_frx.hashbased.testing import slh_dsa_vectors
 from sig_frx.testing import kat
@@ -38,6 +42,33 @@ from sig_frx.testing import kat
 # The cheap constructible set: 22 layers of 8 key pairs, where `128s` is 7 layers
 # of 512 and belongs in the sweep.
 _MERGE_GATE_SET = "SLH-DSA-SHA2-128f"
+
+
+class _RejectsEveryPreHashedSignature(slh_dsa.SlhDsa):
+    """A pre-hash verifier that answers before it looks at anything.
+
+    The one failure mode an operation gated on published failures alone cannot
+    tell from a correct implementation: every verdict such a group publishes is a
+    rejection, and so is every verdict this returns. Built over the family and
+    parameters of an instance the module already built, since which hash family a
+    set is instantiated with is not something a test picks.
+    """
+
+    def __init__(self, scheme: slh_dsa.SlhDsa) -> None:
+        super().__init__(
+            scheme._tweak, scheme.params, deterministic=scheme.deterministic
+        )
+
+    def hash_verify(
+        self,
+        public_key: ArrayLike,
+        message: ArrayLike,
+        signature: ArrayLike,
+        pre_hash: prehash.PreHash,
+        *,
+        context: ArrayLike | None = None,
+    ) -> Array:
+        return fnp.zeros(np.shape(public_key)[0], dtype=fnp.bool_)
 
 
 class KeyGenKatTest(absltest.TestCase):
@@ -72,6 +103,23 @@ class KeyGenKatTest(absltest.TestCase):
                 with self.assertRaises(NotImplementedError):
                     slh_dsa.sha2(name)
 
+    def test_every_published_secret_key_ends_in_its_public_key(self) -> None:
+        # Figure 15's secret key ends in Figure 16's public key, which is what
+        # lets an operation with no accepted verification case be handed one built
+        # from a signing case — those publish `sk` and no `pk`. The layout is read
+        # off the standard in one place and confirmed here against every key pair
+        # NIST published, so a misreading fails on published bytes rather than
+        # producing a public key nothing verifies under.
+        for vector in slh_dsa_vectors.runnable(self.vectors):
+            with self.subTest(vector.case_id):
+                assert vector.public_key is not None and vector.secret_key is not None
+                self.assertEqual(
+                    slh_dsa_vectors.public_key_from_secret(
+                        vector.parameter_set, vector.secret_key
+                    ),
+                    vector.public_key,
+                )
+
     def test_a_seed_the_standard_did_not_publish_gives_another_key(self) -> None:
         # The published cases all pass under a keygen that ignored its seed and
         # returned a memorized answer per case; this is the case that does not.
@@ -90,13 +138,13 @@ class SignatureKatTest(absltest.TestCase):
     def _groups(
         self, mode: str
     ) -> dict[slh_dsa_vectors.Operation, list[kat.KatVector]]:
-        vectors = [
-            v
-            for v in slh_dsa_vectors.runnable(slh_dsa_vectors.load(mode))
-            if v.parameter_set == _MERGE_GATE_SET
-        ]
-        self.assertNotEmpty(vectors)
-        return slh_dsa_vectors.group(vectors)
+        groups = {
+            operation: group
+            for operation, group in slh_dsa_vectors.runnable_groups(mode).items()
+            if operation.parameter_set == _MERGE_GATE_SET
+        }
+        self.assertNotEmpty(groups)
+        return groups
 
     def test_the_published_signatures_are_reproduced(self) -> None:
         groups = self._groups("sigGen")
@@ -146,30 +194,50 @@ class SignatureKatTest(absltest.TestCase):
         for vector in wrong_length:
             self.assertFalse(vector.valid, vector.case_id)
 
-    def test_every_operation_with_no_accepted_case_is_declared(self) -> None:
+    def test_every_operation_with_no_accepted_case_is_handed_one(self) -> None:
         # `kat.check` refuses a set whose derived negative checks have no accepted
-        # case to start from, so what keeps the sweep green is the declaration
-        # list — and the sweep is the only thing that runs the sets outside the
-        # merge gate. This is set arithmetic over already-parsed vectors, which is
-        # what lets the whole census be a merge-gate claim rather than leaving
-        # most of it to the scheduled job.
-        groups = slh_dsa_vectors.group(
-            slh_dsa_vectors.runnable(slh_dsa_vectors.load("sigVer"))
-        )
+        # case to start from, so what keeps the sweep green is that `sigGen`
+        # reaches every operation whose verification cases are all failures — and
+        # the sweep is the only thing that runs the sets outside the merge gate.
+        # This is set arithmetic and a slice per operation over already-parsed
+        # vectors, which is what lets the whole census be a merge-gate claim rather
+        # than leaving most of it to the scheduled job.
         observed = {
-            operation
-            for operation, group in groups.items()
+            operation: group
+            for operation, group in slh_dsa_vectors.runnable_groups("sigVer").items()
             if not any(vector.valid for vector in group)
         }
-        self.assertEqual(observed, set(slh_dsa_vectors.NO_ACCEPTED_VERIFY_CASE))
-        # Every one of them is a pre-hash operation, which is the shape of the
-        # gap: ACVP draws the function per case, so the pure and internal groups
-        # are large enough to always hold an accepted one and these are not. The
-        # merge gate's own set is not among them, so the cases below still run
-        # the full derived pass.
-        for operation in observed:
-            self.assertIsNotNone(operation.pre_hash, str(operation))
-            self.assertNotEqual(operation.parameter_set, _MERGE_GATE_SET)
+        self.assertNotEmpty(observed)
+        for operation, group in observed.items():
+            with self.subTest(str(operation)):
+                # Every one of them is a pre-hash operation, which is the shape of
+                # the gap: ACVP draws the function per case, so the pure and
+                # internal groups are large enough to always hold an accepted one
+                # and these are not. The merge gate's own set is not among them,
+                # so the cases here run the derived pass off published bytes and
+                # the sourcing is what carries the sweep's sets.
+                self.assertIsNotNone(operation.pre_hash, str(operation))
+                self.assertNotEqual(operation.parameter_set, _MERGE_GATE_SET)
+                self.assertIsNotNone(slh_dsa_vectors.accepted_case(operation, group))
+
+    def test_a_pre_hash_verifier_that_rejects_everything_fails_the_gate(self) -> None:
+        # The failure a set of published failures cannot see. This set is not one
+        # of those — the merge gate's pre-hash group publishes an accepted case of
+        # its own — so what this pins is that the gate does not depend on which
+        # way the draw went: the same sabotage fails at the sets where it did not,
+        # off the case sourced from `sigGen`, wherever `slh_dsa_sweep_test` runs
+        # them.
+        operation, group = next(
+            (operation, group)
+            for operation, group in self._groups("sigVer").items()
+            if operation.pre_hash is not None
+        )
+        with self.assertRaisesRegex(kat.KatError, "published verdict is accept"):
+            slh_dsa_vectors.check(
+                operation,
+                group,
+                scheme=_RejectsEveryPreHashedSignature(slh_dsa.sha2(_MERGE_GATE_SET)),
+            )
 
     def test_the_pre_hash_functions_the_sets_reach_are_stated(self) -> None:
         # ACVP exercises twelve pre-hash functions and hash-frx provides one. The

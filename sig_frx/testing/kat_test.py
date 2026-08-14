@@ -30,6 +30,10 @@ from sig_frx.testing.checksum_scheme import KEY_SIZE, ChecksumScheme
 
 _BATCH = 4
 _MESSAGE_LEN = 16
+# The length of the case supplied from outside the set under test. Its own, so
+# that it lands in a shape group of its own the way a case sourced from another
+# mode of a published set does.
+_SOURCED_MESSAGE_LEN = 20
 
 # What both published sets look like to the harness's shape grouping: a message
 # length per case, so no two cases share a batch and every group is a singleton.
@@ -114,6 +118,20 @@ def _rejected_vectors() -> list[kat.KatVector]:
             )
         )
     return vectors
+
+
+def _sourced_accepted_case() -> kat.KatVector:
+    """An accepted case from outside the set under test, as a sourced one is.
+
+    Its own key pair and its own message length, like the case a caller lifts out
+    of the signing set: nothing lines it up with the group it is handed to beyond
+    the operation both belong to. The secret key goes, because what is missing
+    from an all-failure group is a case to verify and not a case to sign.
+    """
+    (vector,) = _reference_vectors((_SOURCED_MESSAGE_LEN,))
+    return kat.KatVector(
+        **{**vars(vector), "case_id": "sourced/tc1", "seed": None, "secret_key": None}
+    )
 
 
 class _AlwaysAccepts(ChecksumScheme):
@@ -318,6 +336,90 @@ class KatHarnessTest(absltest.TestCase):
             kat.check(
                 ChecksumScheme(domain=7),
                 _reference_vectors(),
+                no_accepted_case="under test",
+            )
+
+    def test_an_accepted_case_supplied_for_an_all_failure_set_is_verified(self) -> None:
+        # The declaration's alternative, and what it buys back: the group that an
+        # always-rejecting verifier satisfies is one it fails as soon as a case it
+        # has to accept is handed to it. The correct scheme passes the same call,
+        # which is what makes the failure the verifier's rather than the case's.
+        vectors = _rejected_vectors()
+        kat.check(
+            ChecksumScheme(domain=7), vectors, accepted_case=_sourced_accepted_case()
+        )
+        with self.assertRaisesRegex(kat.KatError, "published verdict is accept"):
+            kat.check(
+                _AlwaysRejects(domain=7),
+                vectors,
+                accepted_case=_sourced_accepted_case(),
+            )
+
+    def test_a_supplied_accepted_case_is_what_makes_the_derived_passes_run(
+        self,
+    ) -> None:
+        # Not only the extra verdict: everything the harness derives starts from
+        # the supplied case too. A verdict decided for the whole batch survives an
+        # all-failure group under the declaration — a reduction over rejections is
+        # a rejection — and the batch built from the supplied case is what sees it.
+        vectors = _rejected_vectors()
+        kat.check(
+            _VerdictForTheWholeBatch(domain=7), vectors, no_accepted_case="under test"
+        )
+        with self.assertRaisesRegex(kat.KatError, "replicated across a batch"):
+            kat.check(
+                _VerdictForTheWholeBatch(domain=7),
+                vectors,
+                accepted_case=_sourced_accepted_case(),
+            )
+
+    def test_a_supplied_case_that_does_not_verify_fails_the_call(self) -> None:
+        # A stand-in is bytes the caller derived part of — a public key, for the
+        # scheme that has to recompute one — and a derivation that drifted would
+        # hand over a case nothing accepts. That gates nothing while looking like
+        # coverage, so it fails against the correct scheme rather than passing.
+        case = _sourced_accepted_case()
+        assert case.public_key is not None
+        wrong = kat.KatVector(
+            **{
+                **vars(case),
+                "public_key": bytes([case.public_key[0] ^ 1]) + case.public_key[1:],
+            }
+        )
+        with self.assertRaisesRegex(kat.KatError, "published verdict is accept"):
+            kat.check(
+                ChecksumScheme(domain=7), _rejected_vectors(), accepted_case=wrong
+            )
+
+    def test_a_supplied_case_is_held_to_the_operation_the_call_runs(self) -> None:
+        # It is checked like a published vector, which is what keeps a case
+        # belonging to another operation from standing in here: one that verifies
+        # under a different instance would report coverage nobody has.
+        case = kat.KatVector(
+            **{**vars(_sourced_accepted_case()), "parameter_set": "something-else"}
+        )
+        with self.assertRaisesRegex(kat.KatError, "one parameter set"):
+            kat.check(ChecksumScheme(domain=7), _rejected_vectors(), accepted_case=case)
+
+    def test_refuses_a_supplied_case_the_set_did_not_need(self) -> None:
+        # The mirror of the stale declaration, and wrong in the same direction:
+        # once the set publishes an accepted case, the derived passes start from
+        # the standard's own and the stand-in is coverage nobody has to invent.
+        with self.assertRaisesRegex(kat.KatError, "standing in for one that is there"):
+            kat.check(
+                ChecksumScheme(domain=7),
+                _reference_vectors(),
+                accepted_case=_sourced_accepted_case(),
+            )
+
+    def test_refuses_a_supplied_case_and_a_declaration_at_once(self) -> None:
+        # They answer the same question in opposite directions: one says the
+        # derived checks cannot run and the other is what they run from.
+        with self.assertRaisesRegex(kat.KatError, "exactly one of them describes"):
+            kat.check(
+                ChecksumScheme(domain=7),
+                _rejected_vectors(),
+                accepted_case=_sourced_accepted_case(),
                 no_accepted_case="under test",
             )
 

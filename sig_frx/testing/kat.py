@@ -22,16 +22,24 @@ scheme. So `check` replicates an accepted case and moves a bit in some entries:
 the multiplicity is the only invented part, since the accepting entries carry the
 standard's own signature and the rejecting ones carry it corrupted.
 
-**Both derived passes need a case the standard accepts, so an operation that
-publishes none says so at the call site.** A moved bit is evidence only against
-something that verified before it moved, which is what makes the accepted case
-the starting point of the tampering pass and of the batch axis alike. ACVP's
+**Both derived passes need a case the standard accepts, and an operation whose
+verification set publishes none is handed one.** A moved bit is evidence only
+against something that verified before it moved, which is what makes the accepted
+case the starting point of the tampering pass and of the batch axis alike. ACVP's
 sigVer sets are mostly deliberate failures and draw each case's pre-hash function
 at random, so whole operations arrive with nothing accepted in them — and there
 both passes no-op, leaving a green run that cannot be told apart from one where
-they ran. `check` refuses that instead of shrinking quietly; a caller that means
-it declares it, and the declaration is itself an error once the set stops
-matching it.
+they ran. So `check` takes `accepted_case`, which the caller sources from
+elsewhere in the same published set rather than producing itself. It is held to
+everything the published vectors are held to, the operation it belongs to first
+of all, and it is refused where the set publishes an accepted case of its own,
+since what it stands in for is then already there.
+
+**Where not even that reaches, the call site declares it.** A stand-in is
+published bytes from somewhere else, so an operation the standard covers nowhere
+has none to be handed. `check` refuses that instead of shrinking quietly; a
+caller that means it declares it, and the declaration is itself an error once the
+set stops matching it.
 
 **A vector the harness cannot run faithfully is an error, not a skip.** Silently
 dropping a field — a published failure verdict, a mode marker selecting a
@@ -346,12 +354,31 @@ _BATCH_AXIS_ENTRIES = 4
 _BATCH_AXIS_TAMPERED = frozenset({1, 2})
 
 
+def verify_cases(vectors: Sequence[KatVector]) -> list[KatVector]:
+    """The cases carrying everything one verification needs.
+
+    A published set covers several operations at once and a mode publishes what
+    that mode is about, so a key generation case has no signature and a signing
+    case no public key. Public here because whether a call has a verify case at
+    all is what decides whether it needs an accepted one — a question its caller
+    answers before it can source one.
+    """
+    return [
+        v
+        for v in vectors
+        if v.public_key is not None
+        and v.message is not None
+        and v.signature is not None
+    ]
+
+
 def check(
     scheme: Signature,
     vectors: Sequence[KatVector],
     *,
     interface: str = "external",
     pre_hash: str | None = None,
+    accepted_case: KatVector | None = None,
     no_accepted_case: str | None = None,
 ) -> None:
     """Run every check the standard requires, plus the tampering it does not.
@@ -367,21 +394,43 @@ def check(
     harness from running one operation against vectors published for another,
     which would report a pass for a case nobody ran.
 
-    `no_accepted_case` is the caller's statement that this operation publishes
-    nothing the standard accepts, and why. Everything the harness derives starts
-    from an accepted case, so a set without one runs the published verdicts and
-    nothing else — which the caller knows to expect and a green run cannot say.
-    It is declared for the same reason `interface` is, and like a wrong interface
-    it fails once it stops describing the set.
+    `accepted_case` is a case this operation's verification set does not publish,
+    sourced by the caller from where the standard did publish one. Everything the
+    harness derives starts from an accepted case, and a set of failures has none
+    to start from; this is that starting point, and it runs as a vector like any
+    other — its verdict compared, its inputs tampered with, its batch built — so
+    a stand-in that does not verify fails here rather than passing quietly.
+
+    `no_accepted_case` is the caller's statement that nothing in the published set
+    reaches this operation, and why. It is the last resort behind `accepted_case`
+    and costs what that one buys: the call then runs the published verdicts and
+    nothing else, which the caller knows to expect and a green run cannot say. It
+    is declared for the same reason `interface` is, and like a wrong interface it
+    fails once it stops describing the set.
     """
     if not vectors:
         raise KatError("no vectors: an empty set passes trivially and proves nothing")
+    if accepted_case is not None and no_accepted_case is not None:
+        raise KatError(
+            f"an accepted case was supplied ({accepted_case.case_id}) and the same "
+            f"call declares there is none to supply ({no_accepted_case}); the "
+            f"declaration stands in for the derived checks and the case makes them "
+            f"run, so exactly one of them describes this call"
+        )
 
-    _reject_unrunnable(scheme, vectors, interface, pre_hash)
+    supplied = [] if accepted_case is None else [accepted_case]
+    # The stand-in is held to the same identity as the published cases: it is
+    # meant to be this operation's, and one belonging to another would gate the
+    # wrong thing while looking like coverage.
+    _reject_unrunnable(scheme, [*vectors, *supplied], interface, pre_hash)
     _check_keygen(scheme, vectors)
     _check_sign(scheme, vectors)
     _check_verify(
-        scheme, vectors, _operation(vectors, interface, pre_hash), no_accepted_case
+        scheme,
+        vectors,
+        _operation(vectors, interface, pre_hash),
+        accepted_case,
+        no_accepted_case,
     )
 
 
@@ -501,6 +550,7 @@ def _check_verify(
     scheme: Signature,
     vectors: Sequence[KatVector],
     operation: str,
+    accepted_case: KatVector | None,
     no_accepted_case: str | None,
 ) -> None:
     """Verification agrees with every published verdict, and rejects tampering.
@@ -511,46 +561,49 @@ def _check_verify(
     is followed by one over a batch built here.
 
     Both of the passes below the published verdicts start from a case the
-    standard accepts, so an operation that publishes none reduces to comparing
-    verdicts — and the two things a comparison alone cannot separate are a
-    verifier that rejects for the right reason and one that rejects everything.
-    That is a property of the published set rather than of the scheme, which is
-    why the declaration that expects it comes from the call site.
-    """
-    runnable = [
-        v
-        for v in vectors
-        if v.public_key is not None
-        and v.message is not None
-        and v.signature is not None
-    ]
-    accepted = [v for v in runnable if v.valid]
+    standard accepts, so an operation whose verification set publishes none
+    reduces to comparing verdicts — and the two things a comparison alone cannot
+    separate are a verifier that rejects for the right reason and one that rejects
+    everything. That is a property of the published set rather than of the scheme,
+    which is why what fills the gap comes from the call site: a case sourced from
+    where the standard did publish one, or, where the set holds none anywhere, the
+    declaration that says so.
 
-    if no_accepted_case is None and runnable and not accepted:
+    Those two answer the same question, so they are wrong in the same two
+    directions — an accepted case arriving in the set, and a call that has no
+    verify case for the claim to be about.
+    """
+    runnable = verify_cases(vectors)
+    accepted = [v for v in runnable if v.valid]
+    already = _already_accepted(runnable, accepted)
+
+    if accepted_case is not None:
+        if already is not None:
+            raise KatError(
+                f"{operation}: an accepted case was supplied for the derived checks "
+                f"to start from ({accepted_case.case_id}), and {already}. It stands "
+                f"in for a case this operation does not publish, so drop it rather "
+                f"than leave it standing in for one that is there."
+            )
+        runnable = [*runnable, accepted_case]
+    elif no_accepted_case is not None:
+        if already is not None:
+            raise KatError(
+                f"{operation}: declared as publishing no accepted case "
+                f"({no_accepted_case}), and {already}. The declaration is what "
+                f"stands in for the derived checks, so drop it rather than leave it "
+                f"describing a set it no longer matches."
+            )
+    elif runnable and not accepted:
         plural = "" if len(runnable) == 1 else "s"
         raise KatError(
             f"{operation}: {len(runnable)} verify case{plural} and not one the "
             f"standard accepts, so the tampering pass and the batch axis have "
             f"nothing to move a bit in and neither runs — this call compares the "
-            f"published verdicts and derives nothing from them. Declare it at the "
-            f"call site if the set is meant to look like this; a green run cannot "
-            f"say so on its own."
-        )
-    # A declaration describes the published set, so it is wrong in both the
-    # direction where an accepted case arrived and the one where the call has no
-    # verify case to make the claim about.
-    if no_accepted_case is not None and (accepted or not runnable):
-        found = (
-            f"the set has an accepted case ({accepted[0].case_id}; "
-            f"{len(accepted)} of {len(runnable)})"
-            if accepted
-            else "this call has no verify case at all"
-        )
-        raise KatError(
-            f"{operation}: declared as publishing no accepted case "
-            f"({no_accepted_case}), and {found}. The declaration is what stands in "
-            f"for the derived checks, so drop it rather than leave it describing a "
-            f"set it no longer matches."
+            f"published verdicts and derives nothing from them. Supply an accepted "
+            f"case for this operation from where the standard published one, or "
+            f"declare it at the call site if the set publishes none anywhere; a "
+            f"green run cannot say so on its own."
         )
 
     if not runnable:
@@ -568,6 +621,24 @@ def _check_verify(
         _check_tampering(scheme, [v for v in group if v.valid])
 
     _check_batch_axis(scheme, runnable)
+
+
+def _already_accepted(
+    runnable: Sequence[KatVector], accepted: Sequence[KatVector]
+) -> str | None:
+    """Why a call's claim to publish no accepted case does not describe it.
+
+    `None` where the claim holds: this call verifies something, and none of it is
+    a case the standard accepts.
+    """
+    if accepted:
+        return (
+            f"the set has an accepted case ({accepted[0].case_id}; "
+            f"{len(accepted)} of {len(runnable)})"
+        )
+    if not runnable:
+        return "this call has no verify case at all"
+    return None
 
 
 def _check_batch_axis(scheme: Signature, vectors: Sequence[KatVector]) -> None:

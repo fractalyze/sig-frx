@@ -27,6 +27,16 @@ should hold, built as the product of the constants above; the other reports what
 they do. A caller compares them, which is what turns a set that stopped publishing
 an operation into a failure instead of a smaller green run.
 
+**Splitting by operation is also what makes an accepted case reachable.** The
+harness derives its negative checks from a case the standard accepts, and a
+verification set that draws its pre-hash function per case can hold none for a
+given one. The signing set holds an accepted case for every operation by
+construction — that is what it publishes — so the missing one is two modes away
+in the same pair of files, and the only input it lacks is a public key its
+published secret key determines. `accepted_case` is that crossing, and it is here
+because it is a crossing between two operations of one vector set, which is what
+this module is about.
+
 **The two adapters are why one harness can gate three interfaces.** Only the pure
 external operation is on the `Signature` seam; the internal interface and the
 pre-hash variant live under each scheme's own name, because a variant that
@@ -42,7 +52,7 @@ from __future__ import annotations
 import collections
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
 
 from frx import Array
@@ -244,6 +254,90 @@ def group(vectors: Sequence[kat.KatVector]) -> dict[Operation, list[kat.KatVecto
         )
         grouped.setdefault(operation, []).append(vector)
     return grouped
+
+
+def needs_an_accepted_case(vectors: Sequence[kat.KatVector]) -> bool:
+    """Whether this call's derived negative checks would have nothing to start from.
+
+    Asked before one is sourced rather than after, because sourcing costs a public
+    key recomputation and the answer is no for all but a handful of operations.
+    """
+    cases = kat.verify_cases(vectors)
+    return bool(cases) and not any(vector.valid for vector in cases)
+
+
+def accepted_case(
+    operation: Operation,
+    sig_gen: Mapping[Operation, Sequence[kat.KatVector]],
+    public_key_from_secret: Callable[[str, bytes], bytes],
+) -> kat.KatVector | None:
+    """An accepted verify case for `operation`, out of what it publishes to sign.
+
+    A verification set that draws its pre-hash function per case can hold nothing
+    accepted for a given function, and the signing set cannot: every one of its
+    cases is a signature the standard says is the right one, over a published
+    message under a published key. So the case the verification set is missing is
+    two modes away in the same file pair, and what stands between them is the
+    public key — which `sigGen` does not publish, and which its secret key
+    determines.
+
+    Sourcing it from the *same* operation is the whole of why this works. A
+    pre-hash variant prepares a different message than the pure one, so an
+    accepted case borrowed from a sibling operation would be rejected by a correct
+    implementation; only the operation's own bytes verify under it.
+
+    What comes across is what a verification takes and nothing else. The secret
+    key and the signing randomness stay behind: this is a verify case, and
+    carrying them would put it through the signing comparison too — against an
+    instance built for a mode it was not published in.
+
+    `None` where the signing set does not reach `operation` either, which leaves
+    the caller with the declaration `kat.check` asks for.
+    """
+    source = _sig_gen_source(operation, sig_gen)
+    if source is None:
+        return None
+    assert source.secret_key is not None
+    return kat.KatVector(
+        # Named after where it came from, so a failure points at the published
+        # case rather than at a case identifier nothing published.
+        case_id=f"{source.case_id} under the public key its secret key determines",
+        parameter_set=source.parameter_set,
+        public_key=public_key_from_secret(source.parameter_set, source.secret_key),
+        message=source.message,
+        signature=source.signature,
+        valid=True,
+        context=source.context,
+        interface=source.interface,
+        pre_hash=source.pre_hash,
+        # Verification has no signing mode, which is what lets either of `sigGen`'s
+        # two groups be the source: a signature verifies the same way whichever
+        # mode produced it.
+        deterministic=None,
+    )
+
+
+def _sig_gen_source(
+    operation: Operation, sig_gen: Mapping[Operation, Sequence[kat.KatVector]]
+) -> kat.KatVector | None:
+    """The signing case an accepted verify case is built from.
+
+    The two signing modes are the only axis a verification operation does not
+    fix, and `_MODES` is what says a signing set splits along it. The
+    deterministic group goes first so that which case stands in is a property of
+    the operation rather than of the order a file happens to publish its groups
+    in.
+    """
+    for deterministic in _MODES["sigGen"].signing_modes:
+        for vector in sig_gen.get(replace(operation, deterministic=deterministic), ()):
+            if (
+                vector.valid
+                and vector.secret_key is not None
+                and vector.message is not None
+                and vector.signature is not None
+            ):
+                return vector
+    return None
 
 
 class _Adapter:

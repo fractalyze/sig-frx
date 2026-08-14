@@ -282,9 +282,11 @@ py_test(
     srcs = ["slh_dsa_kat_test.py"],
     deps = [
         ":slh_dsa_vectors",
+        "//sig_frx:prehash",
         "//sig_frx/hashbased:slh_dsa",
         "//sig_frx/testing:kat",
         requirement("absl_py"),
+        requirement("frx"),
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
