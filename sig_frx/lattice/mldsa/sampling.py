@@ -63,10 +63,11 @@ still round-trips and still convolves.
 
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import lru_cache, partial
 from math import comb
 from typing import Any
 
+import frx
 import frx.core
 import frx.numpy as fnp
 import numpy as np
@@ -333,6 +334,10 @@ def sample_in_ball(rho: ArrayLike, tau: int) -> Any:
     masked sum and written as a masked select, so a traced `j` addresses nothing.
     That also keeps the two lines of the standard's swap in their order, which
     matters only when `i = j` — where the second write must win, and does.
+
+    Those steps are compiled — `_ball_from_stream`, which is where the reason
+    is. The squeeze stays out here, so the sponge is still chosen by the seed's
+    namespace as everything else is.
     """
     seed = namespace(rho).asarray(rho, dtype=np.uint8).reshape(-1)
     # A step's byte is accepted when it is at most `i`, and `i` is smallest at
@@ -340,7 +345,44 @@ def sample_in_ball(rho: ArrayLike, tau: int) -> Any:
     # and one budget sized at that rate covers all of them.
     allowance = budget(tau, (N - tau + 1, N), 1)
     stream = shake256(seed)(8 + allowance).digest(seed[None, :])[0]
+    c, completed = _ball_from_stream(stream, tau)
+    # Outside the traced region deliberately, so that the concrete path keeps the
+    # check: `_ball_from_stream` returns a count rather than consuming it, and a
+    # count that has come back out of `jit` is a number wherever the caller is
+    # not itself traced.
+    _require_enough(completed, tau, "SampleInBall")
+    return c
 
+
+@partial(frx.jit, static_argnums=(1,))
+def _ball_from_stream(stream: Any, tau: int) -> tuple[Any, Any]:
+    """The `τ` steps of Algorithm 29 over a squeezed byte string, as one program.
+
+    **This is the one sampler that is compiled, and the reason is its shape.**
+    The others are a batched squeeze and a compaction — a handful of array
+    operations whose cost is the work they name. This one is `τ` *sequential*
+    steps of half a dozen elementwise operations each on a few hundred bytes, so
+    eagerly it is several hundred dispatches doing almost nothing, and what it
+    costs is the dispatching. Compiling collapses them into one program: measured
+    at ML-DSA-65, 6.80 ms eager against 0.12 ms warm, for a compile of about 0.8 s
+    per `(τ, stream length)` that a caller pays once and every later signature
+    reuses.
+
+    Compiling the batched samplers instead makes them worse, which is why none of
+    them is: their squeeze is the bulk of what they do, and tracing it puts the
+    sponge under a tracer — where [`hashes`](../../hashes.py) must select the
+    device row, giving back what selecting the host one just bought.
+
+    `τ` is static because it is the unrolling, and the count comes back out
+    rather than being checked in here: a comparison on it cannot raise under a
+    tracer, so `sample_in_ball` keeps that check where it can still run.
+
+    The allowance is read off the stream rather than recomputed from `τ`. It is
+    the same number either way, and taking it from the bytes that were actually
+    squeezed means the two cannot disagree — which they otherwise could, since a
+    compiled body is reused for every call whose stream is the same length.
+    """
+    allowance = stream.shape[0] - 8
     signs = bytes_to_bits(stream[:8]).astype(np.int32)
     candidates = stream[8:].astype(np.int32)
     position = np.arange(allowance, dtype=np.int32)
@@ -366,5 +408,4 @@ def sample_in_ball(rho: ArrayLike, tau: int) -> Any:
         at_j = slot == j
         c = fnp.where(slot == i, fnp.sum(fnp.where(at_j, c, np.int32(0))), c)
         c = fnp.where(at_j, np.int32(1) - np.int32(2) * signs[step], c)
-    _require_enough(completed, tau, "SampleInBall")
-    return c
+    return c, completed
