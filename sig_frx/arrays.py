@@ -18,6 +18,17 @@ import numpy as np
 from frx import Array
 
 
+def traced(*values: object) -> bool:
+    """Whether any of `values` is a device array, and so whether the call is traced.
+
+    The rule itself, with `namespace` and [`hashes`](hashes.py) as its two
+    readings: one picks the array module and the other picks the implementation
+    of a hash. Both ask this question, and it is written once so they cannot come
+    to different answers about the same values.
+    """
+    return any(isinstance(value, Array) for value in values)
+
+
 def namespace(*values: object) -> Any:
     """The array namespace `values` belong to: `frx.numpy` if any is traced.
 
@@ -26,4 +37,4 @@ def namespace(*values: object) -> Any:
     dispatch per operation. The lift is the conversion that needs a rule, because
     it succeeds everywhere except on the path that cannot afford it.
     """
-    return fnp if any(isinstance(value, Array) for value in values) else np
+    return fnp if traced(*values) else np

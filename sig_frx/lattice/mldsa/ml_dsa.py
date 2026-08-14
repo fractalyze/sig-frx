@@ -64,11 +64,11 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx.keccak.byte_hashes import Shake256
 
 from sig_frx import context as ctx
 from sig_frx import prehash
 from sig_frx.arrays import namespace
+from sig_frx.hashes import shake256
 from sig_frx.lattice.mldsa import arith, encoding, sampling
 from sig_frx.lattice.mldsa.arith import D, Q
 from sig_frx.signature import Signature
@@ -218,14 +218,16 @@ def _h(*parts: ArrayLike, size: int) -> Any:
     """`H(parts, size)` — §3.7's SHAKE256 over the concatenation, as bytes.
 
     One call on the concatenation rather than a series, which §3.7's equivalence
-    says is the same output; the parts arrive in whichever namespace their
-    producer used, and the sponge lifts either way.
+    says is the same output. The sponge is picked the way the array module is,
+    off the namespace the parts arrive in ([`hashes.py`](../../hashes.py)): the
+    concrete path reads every digest back immediately and a device dispatch per
+    short message is what that path cannot afford.
     """
     xnp = namespace(*parts)
     message = xnp.concatenate(
         [xnp.asarray(part, dtype=np.uint8).reshape(-1) for part in parts]
     )
-    return Shake256(size).digest(message[None, :])[0]
+    return shake256(*parts)(size).digest(message[None, :])[0]
 
 
 def _exceeds(values: Any, bound: int) -> Any:

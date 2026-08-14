@@ -71,14 +71,10 @@ import frx.core
 import frx.numpy as fnp
 import numpy as np
 from frx.typing import ArrayLike
-from hash_frx.keccak.byte_hashes import (
-    SHAKE128_RATE,
-    SHAKE256_RATE,
-    Shake128,
-    Shake256,
-)
+from hash_frx.keccak.byte_hashes import SHAKE128_RATE, SHAKE256_RATE
 
 from sig_frx.arrays import namespace
+from sig_frx.hashes import shake128, shake256
 from sig_frx.lattice.mldsa.arith import FIELD, N, Q
 from sig_frx.lattice.mldsa.encoding import bytes_to_bits, unpack_fields
 
@@ -205,9 +201,10 @@ def _seeds(rho: ArrayLike, width: int, tails: np.ndarray) -> Any:
     """`rho` repeated once per stream, each row carrying its own index bytes.
 
     The seed is left in the namespace it arrives in — a host value for key
-    generation, a tracer for verification — right up to the sponge, which lifts
-    it either way. Hashing is an opcode, so this is the same lift `arith.ntt`
-    makes ([`conventions.md`](../../../docs/reference/conventions.md)).
+    generation, a tracer for verification — and the sponge is picked to match
+    ([`hashes.py`](../../hashes.py)) rather than lifting it. Hashing is not the
+    lift `arith.ntt` makes: `frx.lax.ntt` has no host implementation and a SHAKE
+    has one ([`conventions.md`](../../../docs/reference/conventions.md)).
     """
     xnp = namespace(rho)
     seed = xnp.asarray(rho, dtype=np.uint8).reshape(-1)
@@ -228,7 +225,7 @@ def _rej_ntt_poly(seeds: Any, blocks: int) -> Any:
     `G`'s 168-byte rate is 56 whole three-byte candidates, so the budget divides
     into candidates without a remainder and no block boundary splits one.
     """
-    stream = Shake128(blocks * SHAKE128_RATE).digest(seeds)
+    stream = shake128(seeds)(blocks * SHAKE128_RATE).digest(seeds)
     groups = stream.reshape(stream.shape[0], -1, 3).astype(fnp.uint32)
     # Algorithm 14, over the whole stream at once: the top bit of `b2` is
     # dropped, and the rest is a little-endian 23-bit integer.
@@ -239,7 +236,7 @@ def _rej_ntt_poly(seeds: Any, blocks: int) -> Any:
 
 def _rej_bounded_poly(seeds: Any, eta: int, blocks: int) -> Any:
     """Algorithm 31 over a batch of streams: uint8 `[B, 66]` -> int32 `[B, 256]`."""
-    stream = Shake256(blocks * SHAKE256_RATE).digest(seeds).astype(np.int32)
+    stream = shake256(seeds)(blocks * SHAKE256_RATE).digest(seeds).astype(np.int32)
     # `z mod 16` then `⌊z/16⌋`, which is the order the standard consumes them in.
     nibbles = fnp.stack([stream & 0xF, stream >> 4], axis=-1).reshape(
         stream.shape[0], -1
@@ -315,7 +312,8 @@ def expand_mask(rho: ArrayLike, mu: int, ell: int, gamma1: int) -> Any:
         raise ValueError(f"gamma1 ({gamma1}) must be a power of 2 — FIPS 204 Table 1")
     width = 1 + (gamma1 - 1).bit_length()
     tails = np.array([_integer_to_bytes(mu + r, 2) for r in range(ell)], dtype=np.uint8)
-    v = Shake256(32 * width).digest(_seeds(rho, 64, tails))
+    seeds = _seeds(rho, 64, tails)
+    v = shake256(seeds)(32 * width).digest(seeds)
     return np.int32(gamma1) - unpack_fields(v, width).astype(np.int32)
 
 
@@ -341,7 +339,7 @@ def sample_in_ball(rho: ArrayLike, tau: int) -> Any:
     # the first step — so every step accepts at least as often as `(257−τ)/256`,
     # and one budget sized at that rate covers all of them.
     allowance = budget(tau, (N - tau + 1, N), 1)
-    stream = Shake256(8 + allowance).digest(seed[None, :])[0]
+    stream = shake256(seed)(8 + allowance).digest(seed[None, :])[0]
 
     signs = bytes_to_bits(stream[:8]).astype(np.int32)
     candidates = stream[8:].astype(np.int32)
