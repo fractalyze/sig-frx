@@ -43,7 +43,10 @@ py_library(
 # FIPS 204 §5 and §6 — the scheme itself, over the three libraries above. The
 # `Signature` seam and the shared context framing are the only dependencies that
 # are not ML-DSA's own: everything else the assembly needs is `:arith`,
-# `:encoding` and `:sampling`, and the hash it reaches for directly is `H`.
+# `:encoding` and `:sampling`, and the hash it reaches for directly is `H`. That
+# one is reached through `//sig_frx:hashes` rather than by naming a sponge, so no
+# hash-frx dependency appears here: which implementation `H` is depends on the
+# namespace of the values being hashed, which is the caller's fact.
 py_library(
     name = "ml_dsa",
     srcs = [
@@ -57,9 +60,9 @@ py_library(
         ":sampling",
         "//sig_frx:arrays",
         "//sig_frx:context",
+        "//sig_frx:hashes",
         "//sig_frx:prehash",
         "//sig_frx:signature",
-        "@hash_frx//hash_frx/keccak",
         requirement("frx"),
         requirement("numpy"),
     ],
@@ -81,6 +84,7 @@ py_library(
         ":arith",
         ":encoding",
         "//sig_frx:arrays",
+        "//sig_frx:hashes",
         "@hash_frx//hash_frx/keccak",
         requirement("frx"),
         requirement("numpy"),

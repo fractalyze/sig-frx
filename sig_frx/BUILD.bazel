@@ -31,6 +31,22 @@ py_library(
     ],
 )
 
+# `:arrays`' rule applied to the hash rather than to the array module. Separate
+# from `:arrays` because of what it costs to merge them: `:arrays` is what
+# `:arith` and `:encoding` depend on for the namespace rule, and neither hashes,
+# so folding the hash-frx dependency in there would charge it to every consumer
+# of the rule rather than to the ones that pick a hash.
+py_library(
+    name = "hashes",
+    srcs = ["hashes.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":arrays",
+        "@hash_frx//hash_frx:byte_hash",
+        "@hash_frx//hash_frx/keccak",
+    ],
+)
+
 # The message framing FIPS 204 and FIPS 205 share. Top level for the same reason
 # as `:arrays` — one scheme family per package, and both standards frame a
 # context the same way.

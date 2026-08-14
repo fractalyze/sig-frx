@@ -35,11 +35,12 @@ cache, not by a second verifier.
 
 Host values stay on numpy, traced values stay on frx, and a function does not
 decide for its caller. `namespace` in
-[`bytestring.py`](../../sig_frx/hashbased/bytestring.py) is that rule as code —
-it reads the namespace off the arguments instead of naming one — and
-`index_column` is the same question asked of the values that most invite a
-conversion, tree and leaf indices. Every boundary between key generation, signing
-and verification is one of its call sites.
+[`arrays.py`](../../sig_frx/arrays.py) is that rule as code — it reads the
+namespace off the arguments instead of naming one — and `index_column` in
+[`bytestring.py`](../../sig_frx/hashbased/bytestring.py) is the same question
+asked of the values that most invite a conversion, tree and leaf indices. Every
+boundary between key generation, signing and verification is one of its call
+sites.
 
 It is a rule rather than a preference because of what a lift costs. Key
 generation and signing are concrete on the host, where a Python integer has no
@@ -55,6 +56,23 @@ under `jit`, and it costs a signing path nothing because there is no tracer
 there. The lift onto the device is the one that needs a rule, because it succeeds
 everywhere except on the path that cannot afford it — and pays a dispatch per
 operation to batch a signature with itself even where it works.
+
+**An operation with a host implementation picks it the same way.** A lift needs a
+reason, and "the callee only has a device form" is the reason `arith.ntt` lifts:
+`frx.lax.ntt` has no host implementation, so there is nowhere else for a host
+argument to go. Hashing looks like that case and is not one — hash-frx ships a
+`hashlib` sibling of every sponge, gated against the device row — so
+[`hashes.py`](../../sig_frx/hashes.py) reads the same namespace `namespace`
+does and answers with an implementation instead of a module. Which of the two a
+call gets is the caller's fact, exactly as the array module is: one scheme
+instance verifies under a tracer and signs concretely, so a hash fixed when the
+instance is built would be fixing what belongs to the values.
+
+What the rule does not do is drag a value home to make the cheaper side apply.
+A commitment computed by the transform is a device array because the transform
+has no other form, and hashing it is a device hash; bringing it back to the host
+first is a decision about that value with its own cost, not this rule applied
+harder.
 
 ## A rejection loop is not a `while` on secret data
 
