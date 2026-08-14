@@ -72,6 +72,14 @@ _MESSAGE_SIZE = flags.DEFINE_integer(
     "Bytes of message to sign. `μ` is the one hash whose input grows with it, and"
     " it is one call per signature.",
 )
+_WARM_UP = flags.DEFINE_float(
+    "warm_up",
+    0.5,
+    "Seconds of real signing to run before anything is timed. Not a nicety on a"
+    " GPU: a first measurement in a process reports a floor several times the"
+    " settled one, and only sustained work clears it — a single warm-up call"
+    " does not.",
+)
 _SIGNATURES = flags.DEFINE_integer(
     "signatures",
     8,
@@ -567,6 +575,40 @@ def _int32(cast: Callable[[Any], Any], value: Any) -> Any:
     return module.asarray(value, dtype=np.int32)
 
 
+def _warm_up(name: str, message_size: int, seconds: float) -> None:
+    """Sign for `seconds` before anything is timed, and say that it happened.
+
+    A device's first measurement in a process measures its initialization, and
+    on a GPU that is not a rounding error — a trivial call timed first reports
+    several times what the same call reports once the process has been doing
+    real work. What clears it is *sustained* work: repeated trivial calls do
+    not, and one call of a real program does not either, so this warms for a
+    wall-clock budget rather than a call count.
+
+    It matters most for the first table, which is the sponge comparison — the
+    one whose whole content is small per-call timings, and the one that would
+    otherwise read a device waking up as a device sponge being slow.
+    """
+    scheme = ml_dsa.named(name, deterministic=True)
+    seed = np.frombuffer(
+        bytes((i * 13 + 5) % 256 for i in range(scheme.params.seed_size)),
+        dtype=np.uint8,
+    )
+    message = np.frombuffer(
+        bytes((i * 7 + 3) % 256 for i in range(message_size)), dtype=np.uint8
+    )
+    secret_key = np.asarray(scheme.keygen(seed)[1])
+    start = time.perf_counter()
+    signatures = 0
+    while time.perf_counter() - start < seconds:
+        _blocked(scheme.sign_internal(secret_key, message))
+        signatures += 1
+    print(
+        f"  warmed {time.perf_counter() - start:.1f} s over {signatures} "
+        f"signature(s) before timing anything"
+    )
+
+
 def main(argv: Sequence[str]) -> None:
     del argv
     reps, message_size = _REPS.value, _MESSAGE_SIZE.value
@@ -575,6 +617,8 @@ def main(argv: Sequence[str]) -> None:
         print(
             f"\n=== {name}: k={params.k} ℓ={params.ell} η={params.eta} τ={params.tau}"
         )
+        if _WARM_UP.value > 0:
+            _warm_up(name, message_size, _WARM_UP.value)
         print("\n-- the sponge, at the shapes this scheme hashes")
         _sponge_table(params, message_size, reps)
         print("\n-- per operation, eager")
