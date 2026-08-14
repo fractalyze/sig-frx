@@ -22,6 +22,13 @@ verifying are the merge gate's expensive half and run at ML-DSA-44, whose `A` is
 4x4 against ML-DSA-87's 8x7; the exhaustive run across all three is
 `ml_dsa_sweep_test`, tagged `slow_kat`.
 
+**The pre-hash operations are gated on the same evidence as the pure one**, which
+takes sourcing an accepted case from `sigGen` for the ones ACVP's random draw
+left with nothing accepted. What that is worth is asserted here rather than
+argued: a `hash_verify` that rejects everything fails this target at every
+pre-hash function hash-frx provides, and not only at the ones the draw happened
+to accept a case for.
+
 **Two coverage boundaries and one refusal**, each asserted rather than described.
 ACVP exercises twelve pre-hash functions and hash-frx provides five. Its
 `externalMu` cases hand over a pre-computed message representative in place of a
@@ -32,9 +39,13 @@ length verdict has no published exercise — `ml_dsa_test` is what covers it.
 
 from __future__ import annotations
 
+import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
+from frx import Array
+from frx.typing import ArrayLike
 
+from sig_frx import prehash
 from sig_frx.lattice.mldsa import ml_dsa
 from sig_frx.lattice.mldsa.testing import ml_dsa_vectors
 from sig_frx.testing import kat
@@ -56,6 +67,26 @@ _EXCLUDED = {
         "pre-hash function hash-frx does not provide": 26,
     },
 }
+
+
+class _RejectsEveryPreHashedSignature(ml_dsa.MlDsa):
+    """A pre-hash verifier that answers before it looks at anything.
+
+    The one failure mode an operation gated on published failures alone cannot
+    tell from a correct implementation: every verdict such a group publishes is a
+    rejection, and so is every verdict this returns.
+    """
+
+    def hash_verify(
+        self,
+        public_key: ArrayLike,
+        message: ArrayLike,
+        signature: ArrayLike,
+        pre_hash: prehash.PreHash,
+        *,
+        context: ArrayLike | None = None,
+    ) -> Array:
+        return fnp.zeros(np.shape(public_key)[0], dtype=fnp.bool_)
 
 
 class KeyGenKatTest(absltest.TestCase):
@@ -138,24 +169,60 @@ class SignatureKatTest(absltest.TestCase):
         self.assertGreater(rejected, accepted)
         self.assertGreater(accepted, 0)
 
-    def test_every_operation_with_no_accepted_case_is_declared(self) -> None:
+    def test_every_operation_with_no_accepted_case_is_handed_one(self) -> None:
         # `kat.check` refuses a set whose derived negative checks have no accepted
-        # case to start from, so what keeps the sweep green is the declaration
-        # list — and the sweep is the only thing that runs the sets outside the
-        # merge gate. This is set arithmetic over already-parsed vectors, which is
-        # what lets the whole census be a merge-gate claim rather than leaving
-        # most of it to the scheduled job.
+        # case to start from, so what keeps the sweep green is that `sigGen`
+        # reaches every operation whose verification cases are all failures — and
+        # the sweep is the only thing that runs the sets outside the merge gate.
+        # This is set arithmetic and a public key per operation over already-parsed
+        # vectors, which is what lets the whole census be a merge-gate claim rather
+        # than leaving most of it to the scheduled job.
         observed = {
-            operation
+            operation: group
             for operation, group in ml_dsa_vectors.runnable_groups("sigVer").items()
             if not any(vector.valid for vector in group)
         }
-        self.assertEqual(observed, set(ml_dsa_vectors.NO_ACCEPTED_VERIFY_CASE))
-        # Every one of them is a pre-hash operation, which is the shape of the
-        # gap: ACVP draws the function per case, so the pure and internal groups
-        # are large enough to always hold an accepted one and these are not.
-        for operation in observed:
-            self.assertIsNotNone(operation.pre_hash, str(operation))
+        self.assertNotEmpty(observed)
+        for operation, group in observed.items():
+            with self.subTest(str(operation)):
+                # Every one of them is a pre-hash operation, which is the shape of
+                # the gap: ACVP draws the function per case, so the pure and
+                # internal groups are large enough to always hold an accepted one
+                # and these are not.
+                self.assertIsNotNone(operation.pre_hash, str(operation))
+                self.assertIsNotNone(ml_dsa_vectors.accepted_case(operation, group))
+
+    def test_a_pre_hash_verifier_that_rejects_everything_fails_the_gate(self) -> None:
+        # The failure a set of published failures cannot see, at every pre-hash
+        # function this repo can compute rather than at the ones the draw happened
+        # to accept a case for: three of the five reach `kat.check` with nothing
+        # published to accept, and what fails them is the case sourced from
+        # `sigGen`. Sabotaging the whole of `hash_verify` at once is what an OID
+        # read wrongly, a wrong domain separator or a dropped context does to a
+        # pre-hash operation, and each of those verifies nothing while agreeing
+        # with every verdict such a group publishes.
+        groups = self._groups("sigVer")
+        pre_hashed = {
+            operation: group
+            for operation, group in groups.items()
+            if operation.pre_hash is not None
+        }
+        self.assertEqual(
+            {operation.pre_hash for operation in pre_hashed},
+            set(ml_dsa_vectors.PRE_HASHES),
+        )
+        for operation, group in pre_hashed.items():
+            with self.subTest(str(operation)):
+                with self.assertRaisesRegex(
+                    kat.KatError, "published verdict is accept"
+                ):
+                    ml_dsa_vectors.check(
+                        operation,
+                        group,
+                        scheme=_RejectsEveryPreHashedSignature(
+                            ml_dsa.PARAMETER_SETS[operation.parameter_set]
+                        ),
+                    )
 
     def test_the_boundaries_of_what_ran_are_the_ones_stated(self) -> None:
         for mode, expected in _EXCLUDED.items():

@@ -17,6 +17,13 @@ only FIPS 204 answers — and, unusually, it is mostly the *absence* of boundari
   what hash-frx provides and nothing narrower. ACVP exercises twelve and
   `prehash.BY_NAME` holds five, so the other seven are the one real gap.
 
+**The other part only FIPS 204 answers is how a public key comes off a secret
+one.** An operation whose verification cases are all failures is handed an
+accepted one from `sigGen`, and the only input a signing case lacks is the public
+key. Here that is Algorithm 6's arithmetic rather than a slice — `t = A·s1 + s2`,
+recomputed and rounded — which the secret key's own published `tr` is what
+certifies.
+
 **What is refused rather than excluded is the external-mu variant.** Its input is
 a pre-computed 64-byte message representative in place of a message, which no
 operation here names, so `kat.load_acvp` records it as unsupported and the harness
@@ -30,12 +37,14 @@ single largest slice of what is published — a quarter of `sigGen` and of `sigV
 
 from __future__ import annotations
 
+import hashlib
 from functools import lru_cache
 
+import numpy as np
 from python.runfiles import Runfiles
 
 from sig_frx import prehash
-from sig_frx.lattice.mldsa import ml_dsa
+from sig_frx.lattice.mldsa import arith, encoding, ml_dsa, sampling
 from sig_frx.signature import Signature
 from sig_frx.testing import kat, vector_sets
 from sig_frx.testing.vector_sets import Operation
@@ -54,38 +63,6 @@ COVERAGE = vector_sets.Coverage(
     parameter_sets=CONSTRUCTIBLE_SETS,
     pre_hashes=PRE_HASHES,
 )
-
-# The sigVer operations that publish no case the standard accepts, one entry
-# each. ACVP draws every sigVer case's pre-hash function at random from twelve
-# and publishes mostly deliberate failures, so a function that came up once or
-# twice can easily have come up rejected every time — which is what happened
-# here, and only here, since the pure and internal groups hold fifteen cases and
-# three accepted ones apiece.
-#
-# Where it happened, everything `kat.check` derives has nothing to start from and
-# the operation is gated on its published verdicts alone. That is a real hole and
-# not a small one: it cannot separate a `hash_verify` that rejects for the right
-# reason from one that rejects everything under this function. What separates
-# them is `ml_dsa_test`'s pre-hash round trip, which is self-consistency and
-# therefore no evidence about the standard — so this is the boundary of what the
-# published bytes gate, stated where a regenerated set will trip over it. An
-# accepted case arriving is what deletes the entry, and `kat.check` is what makes
-# that a failure rather than a decision nobody revisits.
-NO_ACCEPTED_VERIFY_CASE: dict[Operation, str] = {
-    Operation(parameter_set, "external", pre_hash, None): reason
-    for parameter_set, pre_hash, reason in (
-        ("ML-DSA-44", "SHA2-256", "the one case drawn for it is a failure"),
-        ("ML-DSA-44", "SHA3-512", "both cases drawn for it are failures"),
-        ("ML-DSA-44", "SHAKE-256", "the one case drawn for it is a failure"),
-        ("ML-DSA-65", "SHA2-256", "the one case drawn for it is a failure"),
-        ("ML-DSA-65", "SHA3-256", "the one case drawn for it is a failure"),
-        ("ML-DSA-65", "SHA3-512", "the one case drawn for it is a failure"),
-        ("ML-DSA-65", "SHAKE-256", "the one case drawn for it is a failure"),
-        ("ML-DSA-87", "SHA2-256", "the one case drawn for it is a failure"),
-        ("ML-DSA-87", "SHA3-256", "the one case drawn for it is a failure"),
-        ("ML-DSA-87", "SHAKE-256", "the one case drawn for it is a failure"),
-    )
-}
 
 
 def load(mode: str) -> list[kat.KatVector]:
@@ -128,24 +105,89 @@ def runnable_groups(mode: str) -> dict[Operation, list[kat.KatVector]]:
     return group(runnable(load(mode)))
 
 
-def implementation(operation: Operation) -> Signature:
+def public_key_from_secret(parameter_set: str, secret_key: bytes) -> bytes:
+    """`pk = ρ ‖ t1`, recomputed from `sk` and confirmed against the `tr` in it.
+
+    Algorithm 6 from its fourth line on: `sk` carries `ρ`, `s1` and `s2`, so `A`
+    expands and `t = A·s1 + s2` rounds exactly as key generation does it. What
+    makes the result evidence rather than this repo vouching for its own input is
+    the line above them — `sk` also carries `tr = H(pk, 64)`, published by NIST,
+    so a public key that reproduces it is the published one, and a recomputation
+    that drifted anywhere fails here instead of quietly gating nothing.
+
+    The comparison hashes with the standard library rather than with hash-frx: the
+    sponge under test cannot be the one that certifies the answer.
+    """
+    params = ml_dsa.PARAMETER_SETS[parameter_set]
+    rho, _, tr, s1, s2, _ = encoding.sk_decode(
+        np.frombuffer(secret_key, dtype=np.uint8), params.k, params.ell, params.eta
+    )
+    a_hat = sampling.expand_a(rho, params.k, params.ell)
+    products = arith.matrix_vector(a_hat, arith.ntt(arith.to_field(s1)))
+    t1, _ = arith.power2round(arith.intt(products) + arith.to_field(s2))
+    public_key = kat.to_bytes(encoding.pk_encode(rho, t1))
+
+    published = kat.to_bytes(tr)
+    if hashlib.shake_256(public_key).digest(len(published)) != published:
+        raise kat.KatError(
+            f"{parameter_set}: a public key recomputed from a published secret key "
+            f"does not hash to the `tr` that key carries, so it is not the key the "
+            f"standard published — an accepted case built on it would gate nothing"
+        )
+    return public_key
+
+
+def accepted_case(
+    operation: Operation, vectors: list[kat.KatVector]
+) -> kat.KatVector | None:
+    """The accepted case `operation` needs and its verification cases lack.
+
+    ACVP draws every sigVer case's pre-hash function at random from twelve and
+    publishes mostly deliberate failures, so a function that came up once or twice
+    can easily have come up rejected every time — which happens here and only
+    here, since the pure and internal groups hold fifteen cases and three accepted
+    ones apiece. Which functions it happens to is a property of the draw in
+    whichever set is pinned rather than of the scheme, so an operation is asked
+    whether it needs a case instead of being listed as needing one.
+    """
+    if not vector_sets.needs_an_accepted_case(vectors):
+        return None
+    return vector_sets.accepted_case(
+        operation, runnable_groups("sigGen"), public_key_from_secret
+    )
+
+
+def implementation(
+    operation: Operation, scheme: vector_sets.VariantScheme | None = None
+) -> Signature:
     """The thing that performs `operation` — the scheme, or an adapter over it.
 
     One family, unlike SLH-DSA's two: every set is SHAKE-instantiated, so the
     parameter set and the signing mode are the whole of what an instance fixes.
+
+    `scheme` stands in for the instance that would be built, which is how a test
+    asks what the gate does with one broken in a particular way. The adapter
+    around it is still this module's, so a substitute is driven exactly as the
+    real instance is rather than through a second path written beside it.
     """
-    scheme = ml_dsa.named(
-        operation.parameter_set, deterministic=bool(operation.deterministic)
-    )
+    if scheme is None:
+        scheme = ml_dsa.named(
+            operation.parameter_set, deterministic=bool(operation.deterministic)
+        )
     return vector_sets.implementation(operation, scheme, COVERAGE)
 
 
-def check(operation: Operation, vectors: list[kat.KatVector]) -> None:
+def check(
+    operation: Operation,
+    vectors: list[kat.KatVector],
+    *,
+    scheme: vector_sets.VariantScheme | None = None,
+) -> None:
     """Gate one operation's cases through the shared harness."""
     kat.check(
-        implementation(operation),
+        implementation(operation, scheme),
         vectors,
         interface=operation.interface,
         pre_hash=operation.pre_hash,
-        no_accepted_case=NO_ACCEPTED_VERIFY_CASE.get(operation),
+        accepted_case=accepted_case(operation, vectors),
     )
