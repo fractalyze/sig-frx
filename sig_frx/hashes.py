@@ -35,6 +35,7 @@ from hash_frx.byte_hash import ByteHash
 from hash_frx.keccak.byte_hashes import (
     HostShake128,
     HostShake256,
+    Keccak256,
     Shake128,
     Shake256,
 )
@@ -75,3 +76,17 @@ def sha256(*values: object) -> ByteHash:
     family awaiting an output length.
     """
     return Sha256() if traced(*values) else HostSha256()
+
+
+def keccak256(*values: object) -> ByteHash:
+    """Keccak-256 — the pre-FIPS submission — which only the device row serves.
+
+    The stdlib has no keccak to wrap (`hashlib.sha3_256` carries the FIPS
+    domain byte), so hash-frx ships no host sibling and this is the one hash
+    where the lift the module docstring refuses to force is genuinely forced:
+    the namespace question has no host answer to give. Ethereum's address
+    derivation and message framing are the consumers. Being the device
+    sponge, messages arrive as exactly `[B, L]` — a single message is B = 1.
+    """
+    del values  # one row exists; nothing to dispatch on
+    return Keccak256()

@@ -35,3 +35,22 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# Ethereum's conventions over the chain-agnostic core — the one module in the
+# family allowed to name the chain. The dependency is one-way: the core never
+# imports back.
+py_library(
+    name = "ethereum",
+    srcs = [
+        "__init__.py",
+        "ethereum.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":core",
+        "//sig_frx:hashes",
+        "//sig_frx/classical:weierstrass",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
