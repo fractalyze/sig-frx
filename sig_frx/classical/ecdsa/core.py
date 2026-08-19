@@ -31,6 +31,16 @@ Python integers for the scalar arithmetic (exact, and host-only per
 `docs/reference/security.md`), the shared group law for the point work, and
 RFC 6979 for the nonce, so signing is deterministic and reproducible against
 the published vectors.
+
+Public-key recovery (SEC 1 §4.1.6) is batch-first like verification but
+host-path like signing, for a reason the reshaping above cannot remove: its
+output is an encoding, and reading coordinates back into bytes is the one
+thing a traced value cannot do (`group.to_affine_ints`). The scalar side —
+`r⁻¹ mod n`, and a ladder driven by its bits — shares the constraint. So the
+per-entry integer work runs on the host, and the curve arithmetic stays the
+substrate's, one stacked ladder over the whole batch. Recovery lives here
+rather than in a chain variant because the curve defines it; Ethereum is
+merely its loudest consumer.
 """
 
 from __future__ import annotations
@@ -133,24 +143,59 @@ class Ecdsa:
         del randomness  # deterministic (RFC 6979); the seam documents this.
         context_rules.require_empty(context, "ECDSA")
         _, x = self._secret_scalar(secret_key, "secret key")
-        n = self.curve.n
+        r, s, _ = self._signature_scalars(x, message)
+        signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        return np.frombuffer(signature, dtype=np.uint8).copy()
 
+    def sign_recoverable(
+        self,
+        secret_key: ArrayLike,
+        message: ArrayLike,
+        *,
+        randomness: ArrayLike | None,
+        context: ArrayLike | None,
+    ) -> tuple[Any, int]:
+        """`sign`, plus the recovery id naming which point `recover` rebuilds.
+
+        The id is curve-level data — `y(R)`'s parity and whether `x(R)`
+        wrapped past `n` — so a signer emits it without knowing what a chain
+        is; how it rides the wire (`v`, a header byte) is the variant's
+        encoding. Same signature bytes as `sign`, by construction.
+        """
+        del randomness  # deterministic (RFC 6979), as in `sign`.
+        context_rules.require_empty(context, "ECDSA")
+        _, x = self._secret_scalar(secret_key, "secret key")
+        r, s, recovery_id = self._signature_scalars(x, message)
+        signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        return np.frombuffer(signature, dtype=np.uint8).copy(), recovery_id
+
+    def _signature_scalars(self, x: int, message: ArrayLike) -> tuple[int, int, int]:
+        """One RFC 6979 signature as integers: `(r, s, recovery_id)`.
+
+        The recovery id is two bits off the nonce's point, read before it is
+        thrown away — bit 0 is `y(R)`'s parity, bit 1 is `x(R) >= n` (SEC 1
+        §4.1.6's second candidate pair). The low-S flip replaces `s` with
+        `n - s`, which verifies against `-R` instead of `R`, so the parity
+        bit flips with it — the round-trip tests hold the two together.
+        """
+        n = self.curve.n
         h1 = self.hash.host_constructor(
             np.asarray(message, dtype=np.uint8).tobytes()
         ).digest()
         e = rfc6979.bits2int(h1, n.bit_length()) % n
         for k in rfc6979.nonces(n, x, h1, self.hash.host_constructor):
-            rx, _ = self._host_multiple_of_g(k)
+            rx, ry = self._host_multiple_of_g(k)
             r = rx % n
             if r == 0:  # SEC 1 §4.1.3 discards the draw and takes the next
                 continue
             s = pow(k, -1, n) * (e + r * x) % n
             if s == 0:
                 continue
+            recovery_id = 2 * (rx >= n) + (ry & 1)
             if self.low_s and s > n // 2:
                 s = n - s
-            signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
-            return np.frombuffer(signature, dtype=np.uint8).copy()
+                recovery_id ^= 1
+            return r, s, recovery_id
         raise AssertionError("unreachable: the nonce stream is infinite")
 
     def verify(
@@ -241,6 +286,144 @@ class Ecdsa:
         found = found_per_candidate[0] | (wraps & found_per_candidate[1])
 
         return key_ok & range_ok & found
+
+    def recover(
+        self,
+        message: ArrayLike,
+        signature: ArrayLike,
+        recovery_id: ArrayLike,
+        *,
+        context: ArrayLike | None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """The signing keys back out of a batch: `(uint8[B, 65], bool[B])`.
+
+        SEC 1 §4.1.6, with the candidate index made explicit instead of
+        searched: `recovery_id[i]`'s bit 0 is `y(R)`'s parity and bit 1 is
+        whether `x(R)` wrapped past `n` — the same sliver `verify`'s second
+        candidate covers from the other side. Batch-first like verification,
+        host-path like signing (the module docstring owns why there is no
+        traced form).
+
+        A per-entry failure — `r` or `s` out of range, an id naming no curve
+        point, the identity result — clears that entry's verdict and zeroes
+        its key row. Rejection is a verdict rather than an exception because
+        signatures and ids are wire data: one bad entry must not take down
+        the batch, and a zeroed row cannot be mistaken for a key.
+        """
+        context_rules.require_empty(context, "ECDSA")
+        message = np.asarray(message, dtype=np.uint8)
+        signature = np.asarray(signature, dtype=np.uint8)
+        recovery_id = np.asarray(recovery_id)
+        if signature.shape[-1] != 64:
+            raise ValueError("a signature is 64 bytes of r ‖ s")
+        if not message.shape[0] == signature.shape[0] == recovery_id.shape[0]:
+            raise ValueError("the batch axes disagree")
+        n = self.curve.n
+        # The host face of the hash pair, as signing uses — this is the
+        # concrete path, and the RFC 6979 KATs already bind the two faces.
+        digest_scalars = [
+            rfc6979.bits2int(
+                self.hash.host_constructor(entry.tobytes()).digest(),
+                n.bit_length(),
+            )
+            % n
+            for entry in message
+        ]
+        return self._recover(digest_scalars, signature, recovery_id)
+
+    def _recover(
+        self,
+        digest_scalars: list[int],
+        signature: np.ndarray,
+        recovery_id: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Recovery below the message hash: `e` arrives as scalars.
+
+        A seam of its own so the identity-result guard is testable — forcing
+        `s·R = e·G` through `recover` would take a hash preimage, and
+        unreachable-in-production is not a licence to leave it ungated.
+        """
+        curve = self.curve
+        p, n = curve.p, curve.n
+        r_scalars = [int.from_bytes(entry[:32].tobytes(), "big") for entry in signature]
+        s_scalars = [int.from_bytes(entry[32:].tobytes(), "big") for entry in signature]
+        ids = [int(entry) for entry in recovery_id]
+
+        # §4.1.6's plain-integer checks: the candidate x with the wrapped
+        # offset, and the range bounds. Failed entries keep an in-field dummy
+        # so the batch stays rectangular; their verdict is already sealed.
+        ok, xs = [], []
+        for r, s, j in zip(r_scalars, s_scalars, ids):
+            x = r + (j >> 1) * n
+            ok.append(0 <= j <= 3 and 1 <= r < n and 1 <= s < n and x < p)
+            xs.append(x % p)
+
+        # R rebuilt from x through the substrate's own lift; the parity bit
+        # then picks between the root and its negation.
+        x_field = np.array(xs, dtype=curve.field)
+        root, is_point = weierstrass.lift_x(curve, x_field)
+        ok = [valid and bool(lifted) for valid, lifted in zip(ok, np.asarray(is_point))]
+        y_scalars = [
+            y if y % 2 == (j & 1) else p - y
+            for y, j in zip((int(v) for v in np.asarray(root).astype(object)), ids)
+        ]
+
+        # Q = r⁻¹(sR - eG), taken as u₁G + u₂R with u₁ = -e/r, u₂ = s/r
+        # (mod n): exact host arithmetic for the scalars, one stacked ladder
+        # for the points — the same shape verification's four multiples ride.
+        u1_scalars, u2_scalars = [], []
+        for e, r, s, valid in zip(digest_scalars, r_scalars, s_scalars, ok):
+            r_inverse = pow(r, -1, n) if valid else 1
+            u1_scalars.append(-e * r_inverse % n)
+            u2_scalars.append(s * r_inverse % n)
+
+        def bits(scalars: list[int]) -> np.ndarray:
+            return group.bits_of(
+                np.stack(
+                    [
+                        np.frombuffer(value.to_bytes(32, "big"), dtype=np.uint8)
+                        for value in scalars
+                    ]
+                )
+            )
+
+        batch = len(ids)
+        generator = weierstrass.Point(
+            *(np.broadcast_to(c, (batch,)) for c in curve.generator)
+        )
+        point_r = weierstrass.from_affine(
+            curve, x_field, np.array(y_scalars, dtype=curve.field)
+        )
+        bases = weierstrass.Point(
+            *(np.stack([g, rc]) for g, rc in zip(generator, point_r))
+        )
+        multiples = weierstrass.scalar_mul(
+            curve, np.stack([bits(u1_scalars), bits(u2_scalars)]), bases
+        )
+        public = weierstrass.add(
+            curve,
+            weierstrass.Point(*(c[0] for c in multiples)),
+            weierstrass.Point(*(c[1] for c in multiples)),
+        )
+
+        # The identity has no encoding, so it is a rejection, not a key
+        # (§4.1.6 rejects it by name). The readback divides by Z, so
+        # rejected rows are steered to G first and zeroed after.
+        ok = [
+            valid and not bool(gone)
+            for valid, gone in zip(
+                ok, np.asarray(weierstrass.is_identity(curve, public))
+            )
+        ]
+        flag = np.array([int(valid) for valid in ok], dtype=curve.field)
+        readable = group.select(curve, flag, public, weierstrass.Point(*generator))
+        keys = np.zeros((batch, 65), dtype=np.uint8)
+        for i, ((qx, qy), valid) in enumerate(zip(group.to_affine_ints(readable), ok)):
+            if valid:
+                keys[i, 0] = 4
+                keys[i, 1:33] = np.frombuffer(qx.to_bytes(32, "big"), dtype=np.uint8)
+                keys[i, 33:] = np.frombuffer(qy.to_bytes(32, "big"), dtype=np.uint8)
+        return keys, np.array(ok, dtype=bool)
 
     def _secret_scalar(self, data: ArrayLike, role: str) -> tuple[Any, int]:
         """The 32-byte encoding as `(bytes, scalar)`, refused outside [1, n-1].
