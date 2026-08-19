@@ -19,32 +19,20 @@ file only needs traced-equals-host.
 from __future__ import annotations
 
 import random
-import unittest
 from typing import Any
 
 import frx
 import frx.numpy as fnp
 import numpy as np
-import zk_dtypes
 from absl.testing import absltest, parameterized
 
 from sig_frx.classical import weierstrass
 from sig_frx.classical.testing import sec1_reference as ref
+from sig_frx.classical.testing.traced_blocker import TRACED_BLOCKED as _TRACED_BLOCKED
 
 _CURVES = (
     ("secp256k1", weierstrass.SECP256K1),
     ("secp256r1", weierstrass.SECP256R1),
-)
-
-# The traced path is blocked upstream, in two layers: the pinned zk_dtypes has
-# no curated dtypes for these curves' moduli, which frxlib requires by name
-# (exposure: fractalyze/zk_dtypes#174), and frxlib's wide-field Montgomery
-# multiply is wrong for full-width moduli (fractalyze/xla#542). Remove this
-# marker when the pins carry both; the traced cases then gate the fixes.
-_TRACED_BLOCKED = unittest.skipIf(
-    not hasattr(zk_dtypes, "secp256k1_bf"),
-    "traced curve arithmetic blocked on fractalyze/zk_dtypes#174 and"
-    " fractalyze/xla#542",
 )
 
 

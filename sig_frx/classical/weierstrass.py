@@ -119,12 +119,23 @@ class Curve:
 
     @functools.cached_property
     def generator(self) -> Point:
-        """The base point `G`, affine coordinates lifted to projective."""
+        """The base point `G`, projective, shaped `[1]`.
+
+        One-element rather than 0-d for the module's batch-axis rule: a 0-d
+        operand meeting another 0-d inside the formulas collapses to the
+        dtype's scalar object, whose arithmetic against arrays is partial.
+        `[1]` broadcasts against any batch instead.
+        """
         return Point(
-            np.array(self.gx, dtype=self.field),
-            np.array(self.gy, dtype=self.field),
-            self.one,
+            np.array([self.gx], dtype=self.field),
+            np.array([self.gy], dtype=self.field),
+            np.array([1], dtype=self.field),
         )
+
+    @functools.cached_property
+    def byte_weights(self) -> np.ndarray:
+        """`256^(31-i) mod p` as field scalars — what `field_from_bytes` sums by."""
+        return np.array([pow(256, 31 - i, self.p) for i in range(32)], dtype=self.field)
 
 
 # SEC 2 §2.4.1, "Recommended Parameters secp256k1". The Koblitz curve.
@@ -325,3 +336,53 @@ def on_curve(curve: Curve, x: ArrayLike, y: ArrayLike) -> Any:
     return y * y == (x * x + curve.coeff_a) * x + np.array(
         curve.b % curve.p, dtype=curve.field
     )
+
+
+def equal(p: Point, q: Point) -> Any:
+    """Whether two projective points name the same group element, elementwise.
+
+    Cross-multiplied, so no division: `(X₁ : Y₁ : Z₁) = (X₂ : Y₂ : Z₂)` iff
+    `X₁Z₂ = X₂Z₁` and `Y₁Z₂ = Y₂Z₁`. Sound for everything the complete
+    formulas produce — they never emit the degenerate all-zero triple.
+    """
+    return (p.x * q.z == q.x * p.z) & (p.y * q.z == q.y * p.z)
+
+
+def field_from_bytes(curve: Curve, data: ArrayLike) -> Any:
+    """Big-endian `[..., 32]` bytes as base-field elements, reduced mod `p`.
+
+    The reduction is the field's, which means a value at or above `p` wraps
+    silently — a caller enforcing an encoding's range bound (SEC 1 §2.3.6
+    rejects coordinates outside `[0, p-1]`) checks the bytes before, where the
+    order still exists.
+    """
+    xnp = namespace(data)
+    lanes = xnp.asarray(data).astype(np.int32).astype(curve.field)
+    return (lanes * curve.byte_weights).sum(axis=-1)
+
+
+def pow_const(curve: Curve, base: ArrayLike, exponent: int) -> Any:
+    """`base^exponent` in the base field, for a static exponent.
+
+    Square-and-multiply with the branches decided at trace time — the exponent
+    is a Python integer, so the unrolled ~256 squarings compile once per
+    exponent and the value path stays pure field arithmetic.
+    """
+    acc = base * np.array(0, dtype=curve.field) + curve.one
+    for bit in bin(exponent)[2:]:
+        acc = acc * acc
+        if bit == "1":
+            acc = acc * base
+    return acc
+
+
+def sqrt(curve: Curve, value: ArrayLike) -> Any:
+    """A square root candidate in `F_p`, for `p ≡ 3 (mod 4)`.
+
+    `value^((p+1)/4)` (Tonelli's shortcut for this residue class — both curves
+    here qualify). For a non-residue the result is a root of `-value`, so a
+    caller decides membership by squaring: `sqrt(v)² == v`.
+    """
+    if curve.p % 4 != 3:
+        raise ValueError("sqrt shortcut requires p ≡ 3 (mod 4)")
+    return pow_const(curve, value, (curve.p + 1) // 4)

@@ -38,6 +38,7 @@ from hash_frx.keccak.byte_hashes import (
     Shake128,
     Shake256,
 )
+from hash_frx.sha256 import HostSha256, Sha256
 
 from sig_frx.arrays import traced
 
@@ -63,3 +64,14 @@ def shake256(*values: object) -> Xof:
     seed derivations, and the three samplers that are not `ExpandA`.
     """
     return Shake256 if traced(*values) else HostShake256
+
+
+def sha256(*values: object) -> ByteHash:
+    """SHA-256 as the namespace of `values` calls for it.
+
+    ECDSA's message hash in the FIPS 186-5 pairing: a batch of messages under a
+    tracer on the verification path, one concrete message on the signing path.
+    Fixed-length, so this returns an instance where the XOFs above return a
+    family awaiting an output length.
+    """
+    return Sha256() if traced(*values) else HostSha256()

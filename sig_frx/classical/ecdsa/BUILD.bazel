@@ -1,0 +1,35 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# RFC 6979 nonce generation: bytes-and-integers work on the signing path,
+# which runs concretely, so it depends on nothing but the standard library.
+py_library(
+    name = "rfc6979",
+    srcs = [
+        "__init__.py",
+        "rfc6979.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# The chain-agnostic ECDSA core on the Signature seam. The hash arrives
+# injected (a MessageHash), so no hash-frx dependency appears here — which
+# implementation a call gets is the namespace's business, through
+# //sig_frx:hashes.
+py_library(
+    name = "core",
+    srcs = [
+        "__init__.py",
+        "core.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":rfc6979",
+        "//sig_frx:arrays",
+        "//sig_frx:hashes",
+        "//sig_frx:signature",
+        "//sig_frx/classical:weierstrass",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
