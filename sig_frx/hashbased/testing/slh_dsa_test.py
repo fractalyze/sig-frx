@@ -77,7 +77,7 @@ class _CountingHash:
     def __init__(self) -> None:
         self._inner = Sha256()
         self.digest_size = self._inner.digest_size
-        self.has_dedicated_fusion = self._inner.has_dedicated_fusion
+        self.fusion_path = self._inner.fusion_path
         self.calls = 0
 
     def digest(self, msg: ArrayLike) -> Array:
