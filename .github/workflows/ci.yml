@@ -69,17 +69,17 @@ jobs:
       # already persist bazel + caches). `.bazelrc.ci` is passed explicitly
       # because it is not auto-imported — it drops the tests CI's wheel can't
       # run and the slow sweeps a PR doesn't need.
+      #
+      # A CLI --test_tag_filters *replaces* .bazelrc.ci's rather than adding to
+      # it, so the scheduled sweep has to restate the `local_only` exclusion it
+      # still needs: those tests want the composite-capable dev frxlib, which
+      # CI's published wheel is not. The expression expands to nothing on a pull
+      # request, which leaves .bazelrc.ci's own default in force.
       - name: Run bazel test
-        env:
-          # A CLI --test_tag_filters *replaces* .bazelrc.ci's rather than adding
-          # to it, so the scheduled sweep has to restate the `local_only`
-          # exclusion it still needs: those tests want the composite-capable dev
-          # frxlib, which CI's published wheel is not. Empty on a pull request,
-          # which leaves .bazelrc.ci's own default in force.
-          TAG_FILTERS: ${{ github.event_name == 'schedule' && '--test_tag_filters=-local_only' || '' }}
         run: |
           set -euo pipefail
-          bazel --bazelrc=.bazelrc.ci test ${{ matrix.flags }} ${TAG_FILTERS} \
+          bazel --bazelrc=.bazelrc.ci test ${{ matrix.flags }} \
+            ${{ github.event_name == 'schedule' && '--test_tag_filters=-local_only' || '' }} \
             --test_env=FRX_PLATFORMS=${{ matrix.platforms }} -- //...
 
       # Capture the runner-local test.log a failed test leaves behind — the CI
