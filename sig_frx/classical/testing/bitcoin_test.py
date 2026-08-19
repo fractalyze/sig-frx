@@ -19,10 +19,10 @@ import hashlib
 import numpy as np
 from absl.testing import absltest
 
-from sig_frx.classical import weierstrass
+from sig_frx.classical import secp
 from sig_frx.classical.ecdsa import bitcoin, core
 
-_CURVE = weierstrass.SECP256K1
+_CURVE = secp.SECP256K1
 
 
 def _keypair(seed: int) -> tuple[np.ndarray, np.ndarray]:

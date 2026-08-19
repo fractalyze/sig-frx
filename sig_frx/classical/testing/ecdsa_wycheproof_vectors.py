@@ -21,7 +21,7 @@ import functools
 
 from python.runfiles import Runfiles
 
-from sig_frx.classical import weierstrass
+from sig_frx.classical import secp
 from sig_frx.classical.ecdsa import core
 from sig_frx.testing import kat
 
@@ -44,8 +44,8 @@ SETS = {
 # The scheme under test per curve — one home, so the slice and the sweep
 # cannot disagree about the instance the vectors gate.
 SCHEMES = {
-    "secp256k1": core.Ecdsa(weierstrass.SECP256K1, core.SHA256),
-    "secp256r1": core.Ecdsa(weierstrass.SECP256R1, core.SHA256),
+    "secp256k1": core.Ecdsa(secp.SECP256K1, core.SHA256),
+    "secp256r1": core.Ecdsa(secp.SECP256R1, core.SHA256),
 }
 
 # The split predicate is the scheme's own declared wire size — the seam field

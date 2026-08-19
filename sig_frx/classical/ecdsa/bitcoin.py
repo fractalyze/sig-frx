@@ -36,7 +36,7 @@ import numpy as np
 from frx.typing import ArrayLike
 
 from sig_frx import hashes
-from sig_frx.classical import group, weierstrass
+from sig_frx.classical import secp
 from sig_frx.classical.ecdsa import core
 
 # The engine: secp256k1, low-S at signing (BIP-62's signing half). The
@@ -44,7 +44,7 @@ from sig_frx.classical.ecdsa import core
 # digest-level surface. Nonces are RFC 6979 under HMAC-SHA256, as in the
 # Ethereum variant: libsecp256k1's default nonce function, which here is
 # also the RFC's own pairing, the digest family being SHA-256.
-_SCHEME = core.Ecdsa(weierstrass.SECP256K1, core.SHA256, low_s=True)
+_SCHEME = core.Ecdsa(secp.SECP256K1, core.SHA256, low_s=True)
 
 
 def message_digest(data: ArrayLike) -> Any:
@@ -220,18 +220,19 @@ def decompress(public_key: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
     key = np.asarray(public_key, dtype=np.uint8)
     if key.shape[-1] != 33:
         raise ValueError("a compressed public key is 33 bytes")
-    curve = weierstrass.SECP256K1
+    curve = secp.SECP256K1
     flat = key.reshape(-1, 33)
-    x_bytes = flat[:, 1:]
-    ok = ((flat[:, 0] == 2) | (flat[:, 0] == 3)) & group.bytes_below(
-        np, x_bytes, curve.p, byteorder="big"
+    x_ints = [int.from_bytes(entry[1:].tobytes(), "big") for entry in flat]
+    ok = np.array(
+        [int(entry[0]) in (2, 3) and x < curve.p for entry, x in zip(flat, x_ints)],
+        dtype=bool,
     )
-    points, on_curve = weierstrass.lift_x_to_parity(
-        curve, weierstrass.field_from_bytes(curve, x_bytes), flat[:, 0] & 1
+    points, on_curve = secp.lift_x_to_parity(
+        curve, [x % curve.p for x in x_ints], [int(entry[0]) & 1 for entry in flat]
     )
-    ok = ok & np.asarray(on_curve)
+    ok = ok & on_curve
     out = np.zeros((flat.shape[0], 65), dtype=np.uint8)
-    for i, ((_, y), valid) in enumerate(zip(group.to_affine_ints(points), ok)):
+    for i, ((_, y), valid) in enumerate(zip(secp.affine_ints(curve, points), ok)):
         if valid:
             out[i, 0] = 4
             out[i, 1:33] = flat[i, 1:]

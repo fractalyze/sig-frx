@@ -1,7 +1,7 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """Twisted Edwards curve arithmetic for Ed25519 (RFC 8032).
 
-The same substrate contract as `weierstrass.py`, for the curve family EdDSA
+The hand-rolled substrate for the curve family EdDSA
 lives on: fields minted from the modulus, complete formulas because
 verification is traced, one implementation for both namespaces, and
 coordinates that keep a batch axis even at `B = 1`. What is different is the
@@ -66,7 +66,10 @@ class EdwardsCurve:
     @functools.cached_property
     def field(self) -> Any:
         """The base field, canonical storage — see the module docstring."""
-        return zk_dtypes.prime_field(self.p, storage="std")
+        # curated=False: frx supports runtime-modulus fields generically but
+        # curated dtypes only per name, and this field verifies through frx —
+        # the curated curve25519_bf outran the frx pin (zk_dtypes#178).
+        return zk_dtypes.prime_field(self.p, storage="std", curated=False)
 
     @functools.cached_property
     def d_field(self) -> np.ndarray:

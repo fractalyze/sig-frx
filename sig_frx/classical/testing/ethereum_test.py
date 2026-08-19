@@ -18,7 +18,7 @@ import numpy as np
 from absl.testing import absltest
 
 from sig_frx import hashes
-from sig_frx.classical import weierstrass
+from sig_frx.classical import secp
 from sig_frx.classical.ecdsa import core, ethereum
 
 # EIP-155's worked example: chain id 1, nonce 9, 20 gwei, 21000 gas, one ether
@@ -56,7 +56,7 @@ def _digest() -> np.ndarray:
 
 
 def _address_of(secret: bytes) -> bytes:
-    scheme = core.Ecdsa(weierstrass.SECP256K1, core.SHA256)
+    scheme = core.Ecdsa(secp.SECP256K1, core.SHA256)
     public, _ = scheme.keygen(np.frombuffer(secret, dtype=np.uint8))
     return np.asarray(ethereum.address_from_key(public)).tobytes()
 
@@ -127,7 +127,7 @@ class RecoverAddressTest(absltest.TestCase):
         self.assertEqual(addresses[0].tobytes(), _address_of(_SECRET))
 
     def test_policy_rejections_in_one_batch(self) -> None:
-        n = weierstrass.SECP256K1.n
+        n = secp.SECP256K1.n
         good = _R.to_bytes(32, "big") + _S.to_bytes(32, "big")
         # The core would accept the malleated half and recover the same key
         # (the parity bit flips with s); EIP-2 is exactly the rule that the

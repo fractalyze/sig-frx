@@ -41,7 +41,7 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
-# FROST(secp256k1, SHA-256): §6.5's constants over the Weierstrass substrate.
+# FROST(secp256k1, SHA-256): §6.5's constants over the curated secp substrate.
 py_library(
     name = "secp256k1_sha256",
     srcs = [
@@ -52,8 +52,7 @@ py_library(
     deps = [
         ":frost",
         ":xmd",
-        "//sig_frx/classical:group",
-        "//sig_frx/classical:weierstrass",
+        "//sig_frx/classical:secp",
         requirement("numpy"),
     ],
 )

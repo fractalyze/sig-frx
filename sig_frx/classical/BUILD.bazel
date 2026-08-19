@@ -1,16 +1,10 @@
 load("@rules_python//python:defs.bzl", "py_library")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 
-# The short-Weierstrass curve substrate: fields minted from the curve moduli,
-# the complete projective group law, and the fixed-shape scalar ladder. Depends
-# on no hash and no scheme logic — the group law is testable against SEC 1
-# before any of keygen, sign or verify exists. frx is a dependency because the
-# ladder's loop is `lax.fori_loop` under a tracer, and because the same
-# formulas run concretely on the signing path and traced on verification.
-# The curve-family-agnostic plumbing both substrates share: byte/bit
-# reshapes, the bytewise range compare, the fixed-shape ladder, and the host
-# readback. Split out when the Edwards substrate arrived as the second
-# consumer.
+# The Edwards substrate's plumbing: byte/bit reshapes, the bytewise range
+# compare, the fixed-shape ladder, and the host readback. Once shared with a
+# hand-rolled Weierstrass substrate; the SEC curves now ride curated zk_dtypes
+# point types (:secp), which keep only `pow_const` from here.
 py_library(
     name = "group",
     srcs = [
@@ -25,16 +19,19 @@ py_library(
     ],
 )
 
+# The SEC curves over curated zk_dtypes point dtypes: the curve constants,
+# the parity-selected square-root lift, and the byte/int codecs — everything
+# the dtypes' fused kernels do not expose. Host-path throughout; the GPU
+# story is EC kernels over the same dtypes (fractalyze/sig-frx#139).
 py_library(
-    name = "weierstrass",
+    name = "secp",
     srcs = [
         "__init__.py",
-        "weierstrass.py",
+        "secp.py",
     ],
     visibility = ["//visibility:public"],
     deps = [
         ":group",
-        "//sig_frx:arrays",
         requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),
