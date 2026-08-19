@@ -17,10 +17,11 @@ The spec computes `R = s·G - e·P` and rejects unless `y(R)` is even and
 with even y, accept iff `s·G - e·P = R'` exactly: the even-y rejection
 becomes the equation missing (the odd candidate is `-R'`), and an infinite
 `R` can never equal a lifted point, so both of the spec's rejections fall
-out arithmetically. What stays host-side is the parity pick inside the two
-`lift_x` calls (of wire values, not computed points) — which is why the
-scheme is host-path, like everything else these curves' traced blocker
-gates — while the curve work rides one stacked ladder per batch.
+out arithmetically. What stays host-side is the parity pick inside the one
+stacked lift of the key and r columns (`weierstrass.lift_x_to_parity`, over
+wire values rather than computed points) — which is why the scheme is
+host-path, like everything else these curves' traced blocker gates — while
+the curve work rides one stacked ladder per batch.
 
 ## Two batch notions, on purpose
 
@@ -61,31 +62,6 @@ def _tagged(prefix: bytes, payload: bytes) -> bytes:
     return hashlib.sha256(prefix + prefix + payload).digest()
 
 
-def _multiple_of_g(scalar: int) -> tuple[int, int]:
-    """`scalar·G` as affine integers — the signing path's concrete ladder."""
-    point = weierstrass.scalar_mul(_CURVE, group.int_bits(scalar), _CURVE.generator)
-    ((x, y),) = group.to_affine_ints(point)
-    return x, y
-
-
-def _lift_even(x_bytes: np.ndarray) -> tuple[weierstrass.Point, np.ndarray]:
-    """BIP-340's `lift_x` over `[..., 2, B, 32]`-free stacked bytes.
-
-    Takes `[K, B, 32]` x encodings, returns the even-y points `[K, B]` and
-    whether each x names a curve point at all; an out-of-field x is the
-    caller's bytes-level check (`bytes_below`), since the field wrap would
-    hide it here.
-    """
-    x_field = weierstrass.field_from_bytes(_CURVE, x_bytes)
-    root, on_curve = weierstrass.lift_x(_CURVE, x_field)
-    evens = [
-        value if value % 2 == 0 else _CURVE.p - value
-        for value in (int(v) for v in np.asarray(root).astype(object).reshape(-1))
-    ]
-    y_field = np.array(evens, dtype=_CURVE.field).reshape(x_field.shape)
-    return weierstrass.from_affine(_CURVE, x_field, y_field), np.asarray(on_curve)
-
-
 @dataclass(frozen=True)
 class Bip340:
     """BIP-340 on the seam: x-only keys, tagged hashes, hedged deterministic sign.
@@ -108,8 +84,8 @@ class Bip340:
         business (the spec applies it there), so a stored key never depends
         on which parity its point happened to draw.
         """
-        secret = self._secret_scalar(seed)
-        x, _ = _multiple_of_g(secret)
+        _, secret = weierstrass.secret_scalar(_CURVE, seed, "seed")
+        x, _ = weierstrass.host_multiple_of_g(_CURVE, secret)
         public = np.frombuffer(x.to_bytes(32, "big"), dtype=np.uint8).copy()
         return public, np.asarray(seed, dtype=np.uint8).reshape(-1).copy()
 
@@ -136,8 +112,8 @@ class Bip340:
         n = _CURVE.n
         message_bytes = np.asarray(message, dtype=np.uint8).tobytes()
 
-        d0 = self._secret_scalar(secret_key)
-        px, py = _multiple_of_g(d0)
+        _, d0 = weierstrass.secret_scalar(_CURVE, secret_key, "secret key")
+        px, py = weierstrass.host_multiple_of_g(_CURVE, d0)
         d = d0 if py % 2 == 0 else n - d0
         p_bytes = px.to_bytes(32, "big")
 
@@ -146,7 +122,7 @@ class Bip340:
         k0 = int.from_bytes(_tagged(_NONCE, t + p_bytes + message_bytes), "big") % n
         if k0 == 0:  # the spec fails rather than redraws (a ~2^-256 draw)
             raise ValueError("the derived nonce is zero")
-        rx, ry = _multiple_of_g(k0)
+        rx, ry = weierstrass.host_multiple_of_g(_CURVE, k0)
         k = k0 if ry % 2 == 0 else n - k0
         r_bytes = rx.to_bytes(32, "big")
 
@@ -182,18 +158,12 @@ class Bip340:
         spec's, rejection for rejection.
         """
         context_rules.require_empty(context, "BIP-340")
-        keys, messages, signatures, in_range = self._parsed(
+        keys, messages, signatures, ok, key_point, r_point = self._parsed(
             public_key, message, signature
         )
-        points, on_curve = _lift_even(np.stack([keys, signatures[..., :32]]))
-        key_point = weierstrass.Point(*(c[0] for c in points))
-        r_point = weierstrass.Point(*(c[1] for c in points))
         challenges = self._challenge_bits(keys, messages, signatures)
 
-        batch = keys.shape[0]
-        generator = weierstrass.Point(
-            *(np.broadcast_to(c, (batch,)) for c in _CURVE.generator)
-        )
+        generator = weierstrass.generator_at(_CURVE, keys.shape[0])
         bases = weierstrass.Point(
             *(np.stack([g, q]) for g, q in zip(generator, key_point))
         )
@@ -207,7 +177,7 @@ class Bip340:
             weierstrass.Point(*(c[0] for c in multiples)),
             weierstrass.negate(weierstrass.Point(*(c[1] for c in multiples))),
         )
-        return in_range & on_curve[0] & on_curve[1] & group.equal(lhs, r_point)
+        return ok & group.equal(lhs, r_point)
 
     def aggregate_verify(
         self,
@@ -227,14 +197,11 @@ class Bip340:
         combination to vanish over coefficients fixed only after every byte
         of it was committed.
         """
-        keys, messages, signatures, in_range = self._parsed(
+        keys, messages, signatures, ok, key_points, r_points = self._parsed(
             public_key, message, signature
         )
-        points, on_curve = _lift_even(np.stack([keys, signatures[..., :32]]))
-        if not bool(np.all(in_range & on_curve[0] & on_curve[1])):
+        if not bool(np.all(ok)):
             return False
-        key_points = weierstrass.Point(*(c[0] for c in points))
-        r_points = weierstrass.Point(*(c[1] for c in points))
 
         n = _CURVE.n
         batch = keys.shape[0]
@@ -258,52 +225,63 @@ class Bip340:
         ]
 
         combined = sum(a * s for a, s in zip(coefficients, s_scalars)) % n
-        lhs = weierstrass.scalar_mul(_CURVE, group.int_bits(combined), _CURVE.generator)
-
-        def bits(scalars: list[int]) -> np.ndarray:
-            return group.bits_of(
-                np.stack(
-                    [
-                        np.frombuffer(v.to_bytes(32, "big"), dtype=np.uint8)
-                        for v in scalars
-                    ]
-                )
-            )
-
-        r_weights = bits(coefficients)
-        p_weights = bits([a * e % n for a, e in zip(coefficients, e_scalars)])
+        # The s·G side rides the same stacked ladder as the 2B point
+        # multiples — a separate call would pay the full 256-step ladder
+        # again for its one lane.
+        weights = np.concatenate(
+            [
+                group.ints_bits(coefficients),
+                group.ints_bits([a * e % n for a, e in zip(coefficients, e_scalars)]),
+                group.int_bits(combined),
+            ]
+        )
         bases = weierstrass.Point(
-            *(np.concatenate([rc, pc]) for rc, pc in zip(r_points, key_points))
+            *(
+                np.concatenate([rc, pc, g])
+                for rc, pc, g in zip(r_points, key_points, _CURVE.generator)
+            )
         )
-        multiples = weierstrass.scalar_mul(
-            _CURVE, np.concatenate([r_weights, p_weights]), bases
-        )
-        return bool(np.asarray(group.equal(lhs, _sum_points(multiples)))[0])
-
-    def _secret_scalar(self, data: ArrayLike) -> int:
-        raw = np.asarray(data, dtype=np.uint8).reshape(-1)
-        if raw.shape[0] != 32:
-            raise ValueError("a secret key is 32 bytes")
-        scalar = int.from_bytes(raw.tobytes(), "big")
-        if not 1 <= scalar <= _CURVE.n - 1:
-            raise ValueError("the secret scalar is outside [1, n-1]")
-        return scalar
+        multiples = weierstrass.scalar_mul(_CURVE, weights, bases)
+        lhs = weierstrass.Point(*(c[-1:] for c in multiples))
+        total = _sum_points(weierstrass.Point(*(c[:-1] for c in multiples)))
+        return bool(np.asarray(group.equal(lhs, total))[0])
 
     def _parsed(
         self, public_key: ArrayLike, message: ArrayLike, signature: ArrayLike
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """The wire arrays plus the bytes-level range verdicts, `[B]`."""
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        weierstrass.Point,
+        weierstrass.Point,
+    ]:
+        """Both verifiers' shared prologue: the wire arrays, the combined
+        per-entry verdict, and the even-y lifted `P` and `R'` points.
+
+        One stacked lift serves the key and r columns (the spec's `lift_x`
+        is the parity-0 case), and the verdict already folds the bytes-level
+        ranges with both memberships — an out-of-field x is checked on the
+        bytes, where the field wrap would hide it.
+        """
         keys = np.asarray(public_key, dtype=np.uint8)
         messages = np.asarray(message, dtype=np.uint8)
         signatures = np.asarray(signature, dtype=np.uint8)
         if keys.shape[-1] != 32 or signatures.shape[-1] != 64:
             raise ValueError("x-only keys are 32 bytes; signatures are 64")
-        in_range = (
+        ok = (
             group.bytes_below(np, keys, _CURVE.p, byteorder="big")
             & group.bytes_below(np, signatures[..., :32], _CURVE.p, byteorder="big")
             & group.bytes_below(np, signatures[..., 32:], _CURVE.n, byteorder="big")
         )
-        return keys, messages, signatures, in_range
+        stacked = np.stack([keys, signatures[..., :32]])
+        points, on_curve = weierstrass.lift_x_to_parity(
+            _CURVE, weierstrass.field_from_bytes(_CURVE, stacked), 0
+        )
+        ok = ok & np.asarray(on_curve[0]) & np.asarray(on_curve[1])
+        key_point = weierstrass.Point(*(c[0] for c in points))
+        r_point = weierstrass.Point(*(c[1] for c in points))
+        return keys, messages, signatures, ok, key_point, r_point
 
     def _challenge_digests(
         self, keys: np.ndarray, messages: np.ndarray, signatures: np.ndarray
@@ -327,16 +305,12 @@ class Bip340:
         integer, so the bytes fed here are `int(hash) mod n` re-encoded.
         """
         n = _CURVE.n
-        reduced = np.stack(
+        return group.ints_bits(
             [
-                np.frombuffer(
-                    (int.from_bytes(digest, "big") % n).to_bytes(32, "big"),
-                    dtype=np.uint8,
-                )
+                int.from_bytes(digest, "big") % n
                 for digest in self._challenge_digests(keys, messages, signatures)
             ]
         )
-        return group.bits_of(reduced)
 
 
 def _sum_points(points: weierstrass.Point) -> weierstrass.Point:
