@@ -243,6 +243,22 @@ class DigestSurfaceTest(absltest.TestCase):
         self.assertEqual(got_sig.tobytes(), want_sig.tobytes())
         self.assertEqual(got_id, want_id)
 
+    def test_verify_digest_matches_the_message_path(self) -> None:
+        scheme = _p256()
+        keys, messages, signatures = _rows(
+            b"sample", _signature(b"sample"), _signature(b"test")
+        )
+        digests = np.stack(
+            [
+                np.frombuffer(hashlib.sha256(row.tobytes()).digest(), dtype=np.uint8)
+                for row in messages
+            ]
+        )
+        want = np.asarray(scheme.verify(keys, messages, signatures, context=None))
+        got = np.asarray(scheme.verify_digest(keys, digests, signatures))
+        self.assertEqual(list(got), list(want))
+        self.assertEqual(list(want), [True, False])  # the mismatched pair
+
     def test_recover_digest_matches_the_message_path(self) -> None:
         scheme = _p256()
         message = np.frombuffer(b"sample", dtype=np.uint8)
