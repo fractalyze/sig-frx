@@ -14,8 +14,7 @@ py_library(
     deps = [
         "//sig_frx:context",
         "//sig_frx:signature",
-        "//sig_frx/classical:group",
-        "//sig_frx/classical:weierstrass",
+        "//sig_frx/classical:secp",
         requirement("frx"),
         requirement("numpy"),
     ],

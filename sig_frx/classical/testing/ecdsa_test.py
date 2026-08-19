@@ -7,8 +7,8 @@ the shared harness reproduces keygen, signing, and verification byte for byte
 and derives the tampering and batch-axis gates from them — the same driver
 the Wycheproof sets run through. What stays local is what only this scheme
 defines: the seed range refusals, the context refusal, the low-S signing
-option, the r/s range bounds, n - s accepted (malleability policy stays out
-of the core), and traced-equals-host. secp256k1's authority is the
+option, the r/s range bounds, and n - s accepted (malleability policy stays
+out of the core). secp256k1's authority is the
 Wycheproof gate; its round trip here is smoke for the signing path those
 verify-only sets cannot reach.
 
@@ -24,14 +24,11 @@ from __future__ import annotations
 
 import hashlib
 
-import frx
-import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
 
-from sig_frx.classical import group, weierstrass
+from sig_frx.classical import secp
 from sig_frx.classical.ecdsa import core
-from sig_frx.classical.testing.traced_blocker import TRACED_BLOCKED
 from sig_frx.testing import kat
 
 # RFC 6979 Appendix A.2.5: the P-256 example key pair.
@@ -53,7 +50,7 @@ _VECTORS = {
 
 
 def _p256() -> core.Ecdsa:
-    return core.Ecdsa(weierstrass.SECP256R1, core.SHA256)
+    return core.Ecdsa(secp.SECP256R1, core.SHA256)
 
 
 def _seed() -> np.ndarray:
@@ -126,7 +123,7 @@ class SignTest(absltest.TestCase):
             )
 
     def test_low_s_takes_the_smaller_half(self) -> None:
-        scheme = core.Ecdsa(weierstrass.SECP256R1, core.SHA256, low_s=True)
+        scheme = core.Ecdsa(secp.SECP256R1, core.SHA256, low_s=True)
         n = scheme.curve.n
         r, s = _VECTORS[b"sample"]
         self.assertGreater(s, n // 2)  # the vector is the high half
@@ -180,19 +177,6 @@ class VerifyTest(absltest.TestCase):
                 keys, messages, signatures, context=np.array([1], dtype=np.uint8)
             )
 
-    @TRACED_BLOCKED
-    def test_traced_matches_host(self) -> None:
-        scheme = _p256()
-        keys, messages, signatures = _rows(
-            b"sample", _signature(b"sample"), _signature(b"test")
-        )
-        host = np.asarray(scheme.verify(keys, messages, signatures, context=None))
-        compiled = frx.jit(lambda k, m, s: scheme.verify(k, m, s, context=None))
-        traced = compiled(
-            fnp.asarray(keys), fnp.asarray(messages), fnp.asarray(signatures)
-        )
-        self.assertEqual(list(np.asarray(traced)), list(host))
-
 
 class Secp256k1SmokeTest(absltest.TestCase):
     """A round trip, which is smoke and not a gate.
@@ -204,7 +188,7 @@ class Secp256k1SmokeTest(absltest.TestCase):
     """
 
     def test_round_trip_and_a_moved_bit(self) -> None:
-        scheme = core.Ecdsa(weierstrass.SECP256K1, core.SHA256)
+        scheme = core.Ecdsa(secp.SECP256K1, core.SHA256)
         seed = np.frombuffer((0x1234567890ABCDEF).to_bytes(32, "big"), np.uint8)
         public, secret = scheme.keygen(seed)
         message = np.frombuffer(b"smoke", dtype=np.uint8)
@@ -273,7 +257,7 @@ class DigestSurfaceTest(absltest.TestCase):
         self.assertEqual(keys[0].tobytes(), _PUBLIC)
 
 
-def _curve_point_from(curve: weierstrass.Curve, start: int) -> tuple[int, int]:
+def _curve_point_from(curve: secp.Curve, start: int) -> tuple[int, int]:
     """The first `x >= start` on the curve, with a square root of its rhs.
 
     Host integers, because this is test-vector construction: the x >= n
@@ -290,7 +274,7 @@ def _curve_point_from(curve: weierstrass.Curve, start: int) -> tuple[int, int]:
         x += 1
 
 
-def _non_residue_r(curve: weierstrass.Curve) -> int:
+def _non_residue_r(curve: secp.Curve) -> int:
     """The first `r >= 1` whose curve equation rhs has no square root."""
     r = 1
     while True:
@@ -347,7 +331,7 @@ class RecoverTest(absltest.TestCase):
             self.assertEqual(keys[0].tobytes(), _PUBLIC)
 
     def test_round_trips_random_keys_in_one_batch(self) -> None:
-        for curve in (weierstrass.SECP256K1, weierstrass.SECP256R1):
+        for curve in (secp.SECP256K1, secp.SECP256R1):
             scheme = core.Ecdsa(curve, core.SHA256)
             seeds = [
                 np.frombuffer(d.to_bytes(32, "big"), dtype=np.uint8)
@@ -379,7 +363,7 @@ class RecoverTest(absltest.TestCase):
         plain_sig, plain_id = _p256().sign_recoverable(
             _seed(), message, randomness=None, context=None
         )
-        low_scheme = core.Ecdsa(weierstrass.SECP256R1, core.SHA256, low_s=True)
+        low_scheme = core.Ecdsa(secp.SECP256R1, core.SHA256, low_s=True)
         low_sig, low_id = low_scheme.sign_recoverable(
             _seed(), message, randomness=None, context=None
         )
@@ -401,7 +385,7 @@ class RecoverTest(absltest.TestCase):
         # candidate branch — an independent implementation of the same
         # sliver — must accept the recovered key. Gating either branch
         # against the other is the only cross-check the ~2^-64 draw allows.
-        scheme = core.Ecdsa(weierstrass.SECP256K1, core.SHA256)
+        scheme = core.Ecdsa(secp.SECP256K1, core.SHA256)
         curve = scheme.curve
         x, y = _curve_point_from(curve, curve.n + 1)
         r, s = x - curve.n, 12345
@@ -458,11 +442,10 @@ class RecoverTest(absltest.TestCase):
         # this through `recover` would take a hash preimage — the guard is
         # exercised at the scalar seam instead, per the docstring's rule that
         # unreachable-in-production is not untested.
-        scheme = core.Ecdsa(weierstrass.SECP256K1, core.SHA256)
+        scheme = core.Ecdsa(secp.SECP256K1, core.SHA256)
         curve = scheme.curve
         k, s = 7, 1234
-        point = weierstrass.scalar_mul(curve, group.int_bits(k), curve.generator)
-        ((rx, ry),) = group.to_affine_ints(point)
+        rx, ry = secp.host_multiple_of_g(curve, k)
         r = rx % curve.n
         e = s * k % curve.n
         signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")

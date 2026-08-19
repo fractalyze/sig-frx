@@ -25,12 +25,10 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":rfc6979",
-        "//sig_frx:arrays",
         "//sig_frx:context",
         "//sig_frx:hashes",
         "//sig_frx:signature",
-        "//sig_frx/classical:group",
-        "//sig_frx/classical:weierstrass",
+        "//sig_frx/classical:secp",
         requirement("frx"),
         requirement("numpy"),
     ],
@@ -49,8 +47,7 @@ py_library(
     deps = [
         ":core",
         "//sig_frx:hashes",
-        "//sig_frx/classical:group",
-        "//sig_frx/classical:weierstrass",
+        "//sig_frx/classical:secp",
         requirement("frx"),
         requirement("numpy"),
     ],
@@ -69,7 +66,7 @@ py_library(
     deps = [
         ":core",
         "//sig_frx:hashes",
-        "//sig_frx/classical:weierstrass",
+        "//sig_frx/classical:secp",
         requirement("frx"),
         requirement("numpy"),
     ],

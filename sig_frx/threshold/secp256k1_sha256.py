@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from sig_frx.classical import group, weierstrass
+from sig_frx.classical import secp
 from sig_frx.threshold import frost, xmd
 
 _CONTEXT = b"FROST-secp256k1-SHA256-v1"
@@ -33,10 +33,10 @@ _FIELD_BYTES = 48
 class Secp256k1Sha256:
     """RFC 9591 §6.5's ciphersuite, elements riding as `[1]`-batch points."""
 
-    order = weierstrass.SECP256K1.n
+    order = secp.SECP256K1.n
     element_size = 33
 
-    curve = weierstrass.SECP256K1
+    curve = secp.SECP256K1
 
     def _hash_to_scalar(self, label: bytes, message: bytes) -> int:
         return xmd.hash_to_scalar(message, _CONTEXT + label, self.order, _FIELD_BYTES)
@@ -72,40 +72,31 @@ class Secp256k1Sha256:
             self.element_scalar_mult(self.curve.generator, scalar)
         )
 
-    def deserialize_element(self, data: bytes) -> weierstrass.Point:
+    def deserialize_element(self, data: bytes) -> np.ndarray:
         """SEC 1 §2.3.4 compressed decoding plus §3.2.2.1 validation."""
         if len(data) != 33 or data[0] not in (2, 3):
             raise ValueError("a serialized element is 33 bytes, prefix 02 or 03")
         x = int.from_bytes(data[1:], "big")
         if x >= self.curve.p:
             raise ValueError("the x-coordinate is out of range")
-        field = self.curve.field
-        x_field = np.array([x], dtype=field)
-        root, on_curve = weierstrass.lift_x(self.curve, x_field)
-        if not bool(np.asarray(on_curve)[0]):
+        points, on_curve = secp.lift_x_to_parity(self.curve, [x], [data[0] & 1])
+        if not bool(on_curve[0]):
             raise ValueError("the x-coordinate is not on the curve")
-        y = int(np.asarray(root).astype(object)[0])
-        if y % 2 != data[0] - 2:
-            y = self.curve.p - y
-        return weierstrass.from_affine(self.curve, x_field, np.array([y], dtype=field))
+        return points.astype(self.curve.accumulator)
 
-    def element_add(
-        self, left: weierstrass.Point, right: weierstrass.Point
-    ) -> weierstrass.Point:
-        return weierstrass.add(self.curve, left, right)
+    def element_add(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+        return left + right
 
-    def element_scalar_mult(
-        self, element: weierstrass.Point, scalar: int
-    ) -> weierstrass.Point:
-        return weierstrass.scalar_mul(self.curve, group.int_bits(scalar), element)
+    def element_scalar_mult(self, element: np.ndarray, scalar: int) -> np.ndarray:
+        return secp.multiple(self.curve, [scalar], element)
 
-    def identity_element(self) -> weierstrass.Point:
-        return weierstrass.identity(self.curve, self.curve.generator.x)
+    def identity_element(self) -> np.ndarray:
+        return np.zeros([1], dtype=self.curve.accumulator)
 
-    def serialize_element(self, element: weierstrass.Point) -> bytes:
-        if bool(np.asarray(weierstrass.is_identity(self.curve, element))[0]):
+    def serialize_element(self, element: np.ndarray) -> bytes:
+        if bool(secp.is_identity(self.curve, element)[0]):
             raise ValueError("the identity element has no encoding here")
-        ((x, y),) = group.to_affine_ints(element)
+        ((x, y),) = secp.affine_ints(self.curve, element)
         return (2 + (y & 1)).to_bytes(1, "big") + x.to_bytes(32, "big")
 
 

@@ -2,45 +2,25 @@
 """The chain-agnostic ECDSA core: SEC 1 over an injected curve and hash.
 
 No blockchain is named here and no message convention is chosen: the curve is
-a `weierstrass.Curve`, the hash is a `MessageHash`, and everything Ethereum
-and Bitcoin disagree about — message preparation, recovery, low-`S` policy,
+a `secp.Curve`, the hash is a `MessageHash`, and everything Ethereum and
+Bitcoin disagree about — message preparation, recovery, low-`S` policy,
 encodings — rides above this module as variants.
 
-## Verification without a modular inversion
+## One host path, on the curated point types
 
-SEC 1 §4.1.4 computes `R = u₁G + u₂Q` with `u₁ = e·s⁻¹, u₂ = r·s⁻¹ (mod n)`
-and accepts iff `x(R) mod n = r`. The reshaped form here multiplies through
-by `s`: accept iff there is a point `R'` with x-coordinate `r` (or `r + n`,
-when that still fits below `p`) such that `s·R' = e·G + r·Q` — the same
-predicate, since `s` is invertible on the checked range. What the reshaping
-buys is that every scalar the ladders consume (`e`, `r`, `s`) arrives as wire
-bytes, so no arithmetic ever happens modulo `n` on the device — which matters
-because a 256-bit scalar-field element has no integer lane to read its bits
-back from. The candidate `R'` is rebuilt from `r` by a square root (both
-curves have `p ≡ 3 mod 4`), and `±R'` fold into one ladder because
-`s·(-R') = -(s·R')`. The tests hold this form to SEC 1's own, case by case.
+Scalar arithmetic is Python integers — the domain SEC 1 and RFC 6979 speak,
+exact, with order and bounds intact — and point arithmetic is the curve's
+zk_dtypes kernels through `secp.py`, batched across each call. Verification
+is the standard's own §4.1.4: `u₁ = e·s⁻¹`, `u₂ = r·s⁻¹ (mod n)`, accept iff
+`x(u₁G + u₂Q) mod n = r` — which takes the `x(R) = r + n` wrap along for
+free. An earlier reshaped, inversion-free form existed to keep mod-n
+arithmetic off a traced device path; it retired with that path, and the GPU
+story for these curves is EC kernels over the same dtypes (the decision is
+recorded on fractalyze/sig-frx#139). Batch-first stays the seam's contract
+regardless: one `bool[B]` per call, the point kernels batched across it.
 
-A scalar wider than `n` is left unreduced on purpose: `k·P = (k mod n)·P`,
-so the group performs the standard's `mod n` itself (`weierstrass.scalar_mul`).
-
-## The two paths
-
-Verification is batch-first and namespace-generic — one traced computation
-over the whole batch, per the seam. Key generation and signing are concrete:
-Python integers for the scalar arithmetic (exact, and host-only per
-`docs/reference/security.md`), the shared group law for the point work, and
-RFC 6979 for the nonce, so signing is deterministic and reproducible against
-the published vectors.
-
-Public-key recovery (SEC 1 §4.1.6) is batch-first like verification but
-host-path like signing, for a reason the reshaping above cannot remove: its
-output is an encoding, and reading coordinates back into bytes is the one
-thing a traced value cannot do (`group.to_affine_ints`). The scalar side —
-`r⁻¹ mod n`, and a ladder driven by its bits — shares the constraint. So the
-per-entry integer work runs on the host, and the curve arithmetic stays the
-substrate's, one stacked ladder over the whole batch. Recovery lives here
-rather than in a chain variant because the curve defines it; Ethereum is
-merely its loudest consumer.
+Public-key recovery (SEC 1 §4.1.6) lives here rather than in a chain variant
+because the curve defines it; Ethereum is merely its loudest consumer.
 """
 
 from __future__ import annotations
@@ -54,8 +34,7 @@ from frx.typing import ArrayLike
 
 from sig_frx import context as context_rules
 from sig_frx import hashes
-from sig_frx.arrays import namespace
-from sig_frx.classical import group, weierstrass
+from sig_frx.classical import secp
 from sig_frx.classical.ecdsa import rfc6979
 from sig_frx.signature import Signature
 
@@ -65,11 +44,11 @@ class MessageHash:
     """The hash a variant pairs with the curve — both of its faces.
 
     `byte_hash` is a namespace dispatcher in the `sig_frx.hashes` shape,
-    serving batched verification in whichever namespace the values arrive.
-    `host_constructor` is the `hashlib`-style constructor the signing path
-    uses for the message and for RFC 6979's HMAC — the RFC requires those two
-    to be the same `H`, and the known-answer `k` values are what hold this
-    record's two faces to one function.
+    serving batched hashing over message rows. `host_constructor` is the
+    `hashlib`-style constructor the signing path uses for the message and
+    for RFC 6979's HMAC — the RFC requires those two to be the same `H`,
+    and the known-answer `k` values are what hold this record's two faces
+    to one function.
     """
 
     byte_hash: Callable[..., Any]
@@ -80,12 +59,7 @@ class MessageHash:
 SHA256 = MessageHash(byte_hash=hashes.sha256, host_constructor=hashlib.sha256)
 
 
-def _nonzero(xnp: Any, data: Any) -> Any:
-    """Whether big-endian bytes name a nonzero integer, elementwise."""
-    return xnp.any(data != 0, axis=-1)
-
-
-def is_low_s(curve: weierstrass.Curve, signature: ArrayLike) -> Any:
+def is_low_s(curve: secp.Curve, signature: ArrayLike) -> np.ndarray:
     """Whether each `r ‖ s` signature carries the low half of `s`: `bool[B]`.
 
     A curve-level fact with chain-policy consumers: SEC 1 accepts both
@@ -93,10 +67,11 @@ def is_low_s(curve: weierstrass.Curve, signature: ArrayLike) -> Any:
     variants that reject the high half (their malleability rules) share the
     predicate instead of each re-deriving `n/2`.
     """
-    xnp = namespace(signature)
-    signature = xnp.asarray(signature)
-    return group.bytes_below(
-        xnp, signature[..., 32:64], curve.n // 2 + 1, byteorder="big"
+    rows = np.asarray(signature, dtype=np.uint8)
+    half = curve.n // 2
+    return np.array(
+        [int.from_bytes(entry[32:64].tobytes(), "big") <= half for entry in rows],
+        dtype=bool,
     )
 
 
@@ -114,7 +89,7 @@ class Ecdsa:
     and verification accepts both halves either way, as SEC 1 does.
     """
 
-    curve: weierstrass.Curve
+    curve: secp.Curve
     hash: MessageHash
     low_s: bool = False
 
@@ -132,8 +107,8 @@ class Ecdsa:
         range is refused rather than reduced — reduction would silently map
         two seeds to one key.
         """
-        seed_bytes, scalar = weierstrass.secret_scalar(self.curve, seed, "seed")
-        x, y = weierstrass.host_multiple_of_g(self.curve, scalar)
+        seed_bytes, scalar = secp.secret_scalar(self.curve, seed, "seed")
+        x, y = secp.host_multiple_of_g(self.curve, scalar)
         public = b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big")
         return (
             np.frombuffer(public, dtype=np.uint8).copy(),
@@ -177,7 +152,7 @@ class Ecdsa:
         """
         del randomness  # deterministic (RFC 6979); the seam documents this.
         context_rules.require_empty(context, "ECDSA")
-        _, x = weierstrass.secret_scalar(self.curve, secret_key, "secret key")
+        _, x = secp.secret_scalar(self.curve, secret_key, "secret key")
         r, s, recovery_id = self._signature_scalars(x, message)
         signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
         return np.frombuffer(signature, dtype=np.uint8).copy(), recovery_id
@@ -200,7 +175,7 @@ class Ecdsa:
         and the EIP-155 example vector pins that pairing in the variant's
         tests.)
         """
-        _, x = weierstrass.secret_scalar(self.curve, secret_key, "secret key")
+        _, x = secp.secret_scalar(self.curve, secret_key, "secret key")
         h1 = np.asarray(digest, dtype=np.uint8).tobytes()
         r, s, recovery_id = self._digest_signature_scalars(x, h1, nonce_hash)
         signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
@@ -227,7 +202,7 @@ class Ecdsa:
         n = self.curve.n
         e = rfc6979.bits2int(h1, n.bit_length()) % n
         for k in rfc6979.nonces(n, x, h1, nonce_hash):
-            rx, ry = weierstrass.host_multiple_of_g(self.curve, k)
+            rx, ry = secp.host_multiple_of_g(self.curve, k)
             r = rx % n
             if r == 0:  # SEC 1 §4.1.3 discards the draw and takes the next
                 continue
@@ -249,9 +224,9 @@ class Ecdsa:
         *,
         context: ArrayLike | None,
     ) -> Any:
-        """The batched verdict, `bool[B]` — one traced computation, no scalar path."""
+        """The batched verdict, `bool[B]`, over the record's message hash."""
         context_rules.require_empty(context, "ECDSA")
-        digest = self.hash.byte_hash(public_key, message, signature).digest(message)
+        digest = self.hash.byte_hash(message).digest(message)
         return self.verify_digest(public_key, digest, signature)
 
     def verify_digest(
@@ -260,90 +235,58 @@ class Ecdsa:
         digest: ArrayLike,
         signature: ArrayLike,
     ) -> Any:
-        """`verify` for a caller that arrives with the digests: `[B, L]`.
+        """SEC 1 §4.1.4 over a digest batch: `bool[B]`.
 
-        Off the seam under its own name, like the other digest-level entries —
-        and unlike them still namespace-generic: verification reads nothing
-        back, so skipping the hash keeps the traced form intact. No `context`
-        parameter, because context framing belongs to the seam's
-        message-level surface.
+        The per-entry rejections are the standard's: a key must be the
+        `04 ‖ X ‖ Y` encoding of a point on the curve with in-field
+        coordinates (§2.3.4 — the dtypes construct off-curve coordinates
+        without complaint, so the check is this module's to make), and
+        `r, s` must sit in `[1, n-1]`. Rejected rows carry the generator as
+        a placeholder so the batch stays rectangular; their verdict is
+        already sealed.
         """
         curve = self.curve
-        xnp = namespace(public_key, digest, signature)
-        public_key = xnp.asarray(public_key)
-        signature = xnp.asarray(signature)
-        z_bits = group.bits_of(digest)[..., :256]
+        p, n = curve.p, curve.n
+        keys = np.asarray(public_key, dtype=np.uint8)
+        digest = np.asarray(digest, dtype=np.uint8)
+        signature = np.asarray(signature, dtype=np.uint8)
 
-        # SEC 1 §2.3.4: an uncompressed point is `04 ‖ X ‖ Y` with both
-        # coordinates in [0, p-1], and the point must satisfy the curve
-        # equation. Cofactor 1 makes that the whole subgroup check.
-        qx_bytes = public_key[..., 1:33]
-        qy_bytes = public_key[..., 33:65]
-        qx = weierstrass.field_from_bytes(curve, qx_bytes)
-        qy = weierstrass.field_from_bytes(curve, qy_bytes)
-        key_ok = (
-            (public_key[..., 0] == np.uint8(4))
-            & group.bytes_below(xnp, qx_bytes, curve.p, byteorder="big")
-            & group.bytes_below(xnp, qy_bytes, curve.p, byteorder="big")
-            & weierstrass.on_curve(curve, qx, qy)
-        )
-
-        # SEC 1 §4.1.4 requires r and s in [1, n-1] before anything else runs.
-        r_bytes = signature[..., :32]
-        s_bytes = signature[..., 32:64]
-        range_ok = (
-            _nonzero(xnp, r_bytes)
-            & group.bytes_below(xnp, r_bytes, curve.n, byteorder="big")
-            & _nonzero(xnp, s_bytes)
-            & group.bytes_below(xnp, s_bytes, curve.n, byteorder="big")
-        )
-
-        # The two x-candidates: x(R) mod n = r also admits x(R) = r + n,
-        # reachable only while r + n < p — a sliver of size p - n on either
-        # curve. Stacked on a leading axis so one square-root chain lifts
-        # both; a junk root (x not on the curve) fails lift_x's own square
-        # check, so an invalid candidate drops out arithmetically.
-        first_x = weierstrass.field_from_bytes(curve, r_bytes)
-        candidate_x = xnp.stack(
-            [first_x, first_x + np.array(curve.n % curve.p, dtype=curve.field)]
-        )
-        root, is_point = weierstrass.lift_x(curve, candidate_x)
-        lifted = weierstrass.from_affine(curve, candidate_x, root)
-
-        # The four scalar multiples — z·G, r·Q, s·R'₁, s·R'₂ — have no data
-        # dependencies, so they ride one stacked ladder call instead of four:
-        # same 256 steps, a quarter of the dispatches (and a quarter of the
-        # traced graph).
-        s_bits = group.bits_of(s_bytes)
-        generator = weierstrass.Point(
-            *(xnp.broadcast_to(c, first_x.shape) for c in curve.generator)
-        )
-        point_q = weierstrass.from_affine(curve, qx, qy)
-        bases = weierstrass.Point(
-            *(
-                xnp.stack([g, q, lifted_coord[0], lifted_coord[1]])
-                for g, q, lifted_coord in zip(generator, point_q, lifted)
+        checks, points, u1_scalars, u2_scalars, r_scalars = [], [], [], [], []
+        for key, entry, sig in zip(keys, digest, signature):
+            qx = int.from_bytes(key[1:33].tobytes(), "big")
+            qy = int.from_bytes(key[33:65].tobytes(), "big")
+            r = int.from_bytes(sig[:32].tobytes(), "big")
+            s = int.from_bytes(sig[32:64].tobytes(), "big")
+            e = rfc6979.bits2int(entry.tobytes(), n.bit_length()) % n
+            ok = (
+                int(key[0]) == 4
+                and qx < p
+                and qy < p
+                and secp.on_curve(curve, qx, qy)
+                and 1 <= r < n
+                and 1 <= s < n
             )
-        )
-        multiples = weierstrass.scalar_mul(
-            curve,
-            xnp.stack([z_bits, group.bits_of(r_bytes), s_bits, s_bits]),
-            bases,
-        )
-        target = weierstrass.add(
-            curve,
-            weierstrass.Point(*(c[0] for c in multiples)),
-            weierstrass.Point(*(c[1] for c in multiples)),
-        )
-        s_multiple = weierstrass.Point(*(c[2:] for c in multiples))
-        matches = group.equal(s_multiple, target) | group.equal(
-            s_multiple, weierstrass.negate(target)
-        )
-        found_per_candidate = is_point & matches
-        wraps = group.bytes_below(xnp, r_bytes, curve.p - curve.n, byteorder="big")
-        found = found_per_candidate[0] | (wraps & found_per_candidate[1])
+            w = pow(s, -1, n) if ok else 1
+            u1_scalars.append(e * w % n)
+            u2_scalars.append(r * w % n)
+            r_scalars.append(r)
+            checks.append(ok)
+            points.append(
+                curve.point((qx, qy)) if ok else curve.point((curve.gx, curve.gy))
+            )
 
-        return key_ok & range_ok & found
+        q_points = np.array(points, dtype=curve.point)
+        big_r = secp.multiple(
+            curve, u1_scalars, np.broadcast_to(curve.generator, q_points.shape)
+        ) + secp.multiple(curve, u2_scalars, q_points)
+        gone = secp.is_identity(curve, big_r)
+        verdicts = [
+            ok and not bool(dead) and x % n == r
+            for (x, _), ok, dead, r in zip(
+                secp.affine_ints(curve, big_r), checks, gone, r_scalars
+            )
+        ]
+        return np.array(verdicts, dtype=bool)
 
     def recover(
         self,
@@ -357,10 +300,7 @@ class Ecdsa:
 
         SEC 1 §4.1.6, with the candidate index made explicit instead of
         searched: `recovery_id[i]`'s bit 0 is `y(R)`'s parity and bit 1 is
-        whether `x(R)` wrapped past `n` — the same sliver `verify`'s second
-        candidate covers from the other side. Batch-first like verification,
-        host-path like signing (the module docstring owns why there is no
-        traced form).
+        whether `x(R)` wrapped past `n`.
 
         A per-entry failure — `r` or `s` out of range, an id naming no curve
         point, the identity result — clears that entry's verdict and zeroes
@@ -370,8 +310,7 @@ class Ecdsa:
         """
         context_rules.require_empty(context, "ECDSA")
         message = np.asarray(message, dtype=np.uint8)
-        # On host values `byte_hash` dispatches to the record's host face —
-        # the same function signing uses, already batched over the rows.
+        # The record's batched hash row — the same function signing uses.
         digest = np.asarray(self.hash.byte_hash(message).digest(message))
         return self.recover_digest(digest, signature, recovery_id)
 
@@ -429,46 +368,29 @@ class Ecdsa:
             xs.append(x % p)
         ok = np.array(checks, dtype=bool)
 
-        # R rebuilt from x through the substrate's own lift; the id's bit 0
-        # is the parity that picks between the root and its negation.
-        point_r, is_point = weierstrass.lift_x_to_parity(
-            curve, np.array(xs, dtype=curve.field), np.array(ids) & 1
-        )
-        ok &= np.asarray(is_point)
+        # R rebuilt from x; the id's bit 0 is the parity that picks between
+        # the root and its negation.
+        point_r, lifted = secp.lift_x_to_parity(curve, xs, [j & 1 for j in ids])
+        ok &= lifted
 
         # Q = r⁻¹(sR - eG), taken as u₁G + u₂R with u₁ = -e/r, u₂ = s/r
-        # (mod n): exact host arithmetic for the scalars, one stacked ladder
-        # for the points — the same shape verification's four multiples ride.
+        # (mod n): exact host arithmetic for the scalars, the curve's kernels
+        # for the points. Invalid entries carry a dummy the mask drops.
         u1_scalars, u2_scalars = [], []
         for e, r, s, valid in zip(digest_scalars, r_scalars, s_scalars, ok):
             r_inverse = pow(r, -1, n) if valid else 1
             u1_scalars.append(-e * r_inverse % n)
             u2_scalars.append(s * r_inverse % n)
 
-        batch = len(ids)
-        generator = weierstrass.generator_at(curve, batch)
-        bases = weierstrass.Point(
-            *(np.stack([g, rc]) for g, rc in zip(generator, point_r))
-        )
-        multiples = weierstrass.scalar_mul(
-            curve,
-            np.stack([group.ints_bits(u1_scalars), group.ints_bits(u2_scalars)]),
-            bases,
-        )
-        public = weierstrass.add(
-            curve,
-            weierstrass.Point(*(c[0] for c in multiples)),
-            weierstrass.Point(*(c[1] for c in multiples)),
-        )
+        public = secp.multiple(
+            curve, u1_scalars, np.broadcast_to(curve.generator, point_r.shape)
+        ) + secp.multiple(curve, u2_scalars, point_r)
 
         # The identity has no encoding, so it is a rejection, not a key
-        # (§4.1.6 rejects it by name). The readback divides by Z, so
-        # rejected rows are steered to G first and zeroed after.
-        ok &= ~np.asarray(weierstrass.is_identity(curve, public))
-        flag = ok.astype(np.int32).astype(curve.field)
-        readable = group.select(curve, flag, public, generator)
-        keys = np.zeros((batch, 65), dtype=np.uint8)
-        for i, ((qx, qy), valid) in enumerate(zip(group.to_affine_ints(readable), ok)):
+        # (§4.1.6 rejects it by name).
+        ok &= ~secp.is_identity(curve, public)
+        keys = np.zeros((len(ids), 65), dtype=np.uint8)
+        for i, ((qx, qy), valid) in enumerate(zip(secp.affine_ints(curve, public), ok)):
             if valid:
                 keys[i, 0] = 4
                 keys[i, 1:33] = np.frombuffer(qx.to_bytes(32, "big"), dtype=np.uint8)
