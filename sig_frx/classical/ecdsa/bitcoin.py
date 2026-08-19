@@ -93,25 +93,18 @@ def verify(
         raise ValueError("a public key is 33 or 65 bytes")
 
     rows = np.asarray(signature, dtype=np.uint8)
-    half_n = weierstrass.SECP256K1.n // 2
     packed = np.zeros(rows.shape[:-1] + (64,), dtype=np.uint8)
     encoding_ok = []
     for i, row in enumerate(rows):
-        blob = row.tobytes()
-        declared = blob[1] + 3 if len(blob) >= 2 else len(blob)
         try:
-            if declared > len(blob) or any(blob[declared:]):
-                raise ValueError("data past the declared end")
-            entry, _ = der_decode(np.frombuffer(blob[:declared], dtype=np.uint8))
+            packed[i], _ = der_decode_padded(row)
         except ValueError:
             encoding_ok.append(False)
             continue
-        packed[i] = entry
-        encoding_ok.append(
-            int.from_bytes(entry[32:].tobytes(), "big") <= half_n  # BIP-62
-        )
+        encoding_ok.append(True)
     verdict = np.asarray(_SCHEME.verify_digest(keys, digest, packed))
-    return verdict & key_ok & np.array(encoding_ok, dtype=bool)
+    low = np.asarray(core.is_low_s(_SCHEME.curve, packed))  # BIP-62
+    return verdict & key_ok & np.array(encoding_ok, dtype=bool) & low
 
 
 def der_encode(signature: ArrayLike, sighash: int) -> np.ndarray:
@@ -185,6 +178,22 @@ def der_decode(signature: ArrayLike) -> tuple[np.ndarray, int]:
     return np.frombuffer(packed, dtype=np.uint8).copy(), sig[-1]
 
 
+def der_decode_padded(signature: ArrayLike) -> tuple[np.ndarray, int]:
+    """`der_decode` for a row zero-padded to a batch width.
+
+    The declared length is trusted only as a slice bound — the slice then
+    passes through the transcription like any other blob — and a nonzero
+    byte past the declared end rejects, so padding cannot smuggle data. It
+    lives beside `der_decode` so every byte-level DER decision stays in the
+    codec's one home.
+    """
+    blob = np.asarray(signature, dtype=np.uint8).reshape(-1).tobytes()
+    declared = blob[1] + 3 if len(blob) >= 2 else len(blob)
+    if declared > len(blob) or any(blob[declared:]):
+        raise ValueError("BIP-66: data past the declared end")
+    return der_decode(np.frombuffer(blob[:declared], dtype=np.uint8))
+
+
 def compress(public_key: ArrayLike) -> np.ndarray:
     """`[..., 65]` uncompressed keys to `[..., 33]`: `02 | parity(y) ‖ X`.
 
@@ -217,20 +226,14 @@ def decompress(public_key: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
     ok = ((flat[:, 0] == 2) | (flat[:, 0] == 3)) & group.bytes_below(
         np, x_bytes, curve.p, byteorder="big"
     )
-    root, on_curve = weierstrass.lift_x(
-        curve, weierstrass.field_from_bytes(curve, x_bytes)
+    points, on_curve = weierstrass.lift_x_to_parity(
+        curve, weierstrass.field_from_bytes(curve, x_bytes), flat[:, 0] & 1
     )
     ok = ok & np.asarray(on_curve)
     out = np.zeros((flat.shape[0], 65), dtype=np.uint8)
-    for i, (row, valid, lifted) in enumerate(
-        zip(flat, ok, np.asarray(root).astype(object))
-    ):
-        if not valid:
-            continue
-        y = int(lifted)
-        if y & 1 != row[0] & 1:
-            y = curve.p - y
-        out[i, 0] = 4
-        out[i, 1:33] = row[1:]
-        out[i, 33:] = np.frombuffer(y.to_bytes(32, "big"), dtype=np.uint8)
+    for i, ((_, y), valid) in enumerate(zip(group.to_affine_ints(points), ok)):
+        if valid:
+            out[i, 0] = 4
+            out[i, 1:33] = flat[i, 1:]
+            out[i, 33:] = np.frombuffer(y.to_bytes(32, "big"), dtype=np.uint8)
     return out.reshape(key.shape[:-1] + (65,)), ok.reshape(key.shape[:-1])
