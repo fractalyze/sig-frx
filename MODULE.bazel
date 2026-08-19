@@ -194,3 +194,23 @@ http_file(
     sha256 = "c60de693930e386c3a5472d08081623ef8504decc54b38ac01ec6b2a2575c986",
     urls = ["https://raw.githubusercontent.com/C2SP/wycheproof/dac1dd4729fd1f8dd9e1e9f3dce51d783da6c166/testvectors_v1/ecdsa_secp256r1_sha256_p1363_test.json"],
 )
+
+# RFC 9591's test vectors, in the machine-readable form the RFC's appendix
+# was generated from — the CFRG working group's own repository, pinned at a
+# commit. The values are the RFC's (spot-pinned in the tests against the
+# document text), with the intermediates (nonces, binding factors, signature
+# shares) the appendix also prints, which is what lets a wrong round fail as
+# itself rather than as a wrong final signature.
+http_file(
+    name = "frost_ed25519_sha512_vectors",
+    downloaded_file_path = "frost-ed25519-sha512.json",
+    sha256 = "1aa27908efa7f9388c4145059021fe71db971613bfd1f27467b1bb2da5d95c9c",
+    urls = ["https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-frost/127452b93acb3094a6f659d059550df5618c2714/poc/frost-ed25519-sha512.json"],
+)
+
+http_file(
+    name = "frost_secp256k1_sha256_vectors",
+    downloaded_file_path = "frost-secp256k1-sha256.json",
+    sha256 = "5bda3e29f8e7a0883ceaa0e4bc2f71582bbb4f04058a4657dd5aa276f32372bd",
+    urls = ["https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-frost/127452b93acb3094a6f659d059550df5618c2714/poc/frost-secp256k1-sha256.json"],
+)

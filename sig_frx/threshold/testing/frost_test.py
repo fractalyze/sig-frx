@@ -1,0 +1,261 @@
+# Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
+"""FROST against RFC 9591's vectors, stage by stage, per ciphersuite.
+
+The vector files carry the RFC appendix's intermediates — dealer shares,
+nonces, binding factors, signature shares — so each stage is pinned where it
+can fail as itself: a wrong dealer fails before a wrong nonce, a wrong nonce
+before a wrong share, a wrong share before a wrong signature. Every case runs
+for both ciphersuites, which is what holds the skeleton to its
+parameterization claim: the suites differ in scalar endianness, point
+encoding, and scalar derivation (raw-digest reduction versus hash-to-field),
+and none of that may leak into the round logic.
+
+The last gate is per-suite, because it is what each suite's output *is*:
+FROST(Ed25519, SHA-512)'s aggregate is a plain RFC 8032 signature, accepted
+by the existing batched Ed25519 verifier; FROST(secp256k1, SHA-256)'s is
+RFC 9591's own Schnorr encoding, checked against Appendix B's verification
+transcribed below (it is not a BIP-340 signature, and the test would be
+lying if it pretended a chain verifier existed for it).
+"""
+
+from __future__ import annotations
+
+import json
+
+import numpy as np
+from absl.testing import absltest, parameterized
+from python.runfiles import Runfiles
+
+from sig_frx.classical.eddsa import ed25519
+from sig_frx.threshold import frost
+from sig_frx.threshold.ed25519_sha512 import Ed25519Sha512
+from sig_frx.threshold.secp256k1_sha256 import Secp256k1Sha256
+
+_RUNFILES = Runfiles.Create()
+
+_SUITES: dict[str, tuple[frost.Ciphersuite, str]] = {
+    "ed25519": (
+        Ed25519Sha512(),
+        "frost_ed25519_sha512_vectors/file/frost-ed25519-sha512.json",
+    ),
+    "secp256k1": (
+        Secp256k1Sha256(),
+        "frost_secp256k1_sha256_vectors/file/frost-secp256k1-sha256.json",
+    ),
+}
+
+_PARAMS = tuple(("_" + name, name) for name in _SUITES)
+
+
+class _Vectors:
+    """One suite's vector file, in the shapes the round functions consume."""
+
+    def __init__(self, name: str) -> None:
+        self.cs: frost.Ciphersuite
+        self.cs, resource = _SUITES[name]
+        path = _RUNFILES.Rlocation(resource)
+        assert path is not None
+        data = json.loads(open(path).read())
+        scalar = lambda h: self.cs.deserialize_scalar(bytes.fromhex(h))  # noqa: E731
+        inputs = data["inputs"]
+        self.secret = scalar(inputs["group_secret_key"])
+        self.group_public_key = bytes.fromhex(inputs["group_public_key"])
+        self.message = bytes.fromhex(inputs["message"])
+        self.coefficients = [scalar(c) for c in inputs["share_polynomial_coefficients"]]
+        self.shares = {
+            entry["identifier"]: scalar(entry["participant_share"])
+            for entry in inputs["participant_shares"]
+        }
+        self.round_one = {
+            entry["identifier"]: entry for entry in data["round_one_outputs"]["outputs"]
+        }
+        self.round_two = data["round_two_outputs"]["outputs"]
+        self.final_signature = data["final_output"]["sig"]
+        self.commitment_list = [
+            frost.Commitment(
+                identifier,
+                bytes.fromhex(entry["hiding_nonce_commitment"]),
+                bytes.fromhex(entry["binding_nonce_commitment"]),
+            )
+            for identifier, entry in sorted(self.round_one.items())
+        ]
+        self.scalar = scalar
+
+    def signature_shares(self) -> list[bytes]:
+        return [bytes.fromhex(entry["sig_share"]) for entry in self.round_two]
+
+    def aggregate(self) -> bytes:
+        return frost.aggregate(
+            self.cs,
+            self.commitment_list,
+            self.message,
+            self.group_public_key,
+            self.signature_shares(),
+        )
+
+
+class FrostTest(parameterized.TestCase):
+    @parameterized.named_parameters(*_PARAMS)
+    def test_dealer_reproduces_the_published_shares(self, name: str) -> None:
+        v = _Vectors(name)
+        got = frost.secret_share_split(v.cs, v.secret, v.coefficients, 3)
+        self.assertEqual(dict(got), v.shares)
+
+    @parameterized.named_parameters(*_PARAMS)
+    def test_vss_commitment_opens_with_the_group_key(self, name: str) -> None:
+        v = _Vectors(name)
+        commitment = frost.vss_commit(v.cs, v.secret, v.coefficients)
+        self.assertEqual(commitment[0], v.group_public_key)
+        for identifier, share in v.shares.items():
+            self.assertTrue(frost.vss_verify(v.cs, identifier, share, commitment))
+        self.assertFalse(frost.vss_verify(v.cs, 1, v.shares[1] + 1, commitment))
+
+    @parameterized.named_parameters(*_PARAMS)
+    def test_round_one_reproduces_nonces_and_commitments(self, name: str) -> None:
+        v = _Vectors(name)
+        for identifier, entry in v.round_one.items():
+            nonces, commitments = frost.commit(
+                v.cs,
+                v.shares[identifier],
+                bytes.fromhex(entry["hiding_nonce_randomness"]),
+                bytes.fromhex(entry["binding_nonce_randomness"]),
+            )
+            self.assertEqual(nonces.hiding, v.scalar(entry["hiding_nonce"]))
+            self.assertEqual(nonces.binding, v.scalar(entry["binding_nonce"]))
+            self.assertEqual(commitments[0].hex(), entry["hiding_nonce_commitment"])
+            self.assertEqual(commitments[1].hex(), entry["binding_nonce_commitment"])
+
+    @parameterized.named_parameters(*_PARAMS)
+    def test_binding_factors_match_the_published_intermediates(self, name: str) -> None:
+        v = _Vectors(name)
+        factors = frost.compute_binding_factors(
+            v.cs, v.group_public_key, v.commitment_list, v.message
+        )
+        for identifier, entry in v.round_one.items():
+            self.assertEqual(factors[identifier], v.scalar(entry["binding_factor"]))
+
+    @parameterized.named_parameters(*_PARAMS)
+    def test_round_two_reproduces_the_signature_shares(self, name: str) -> None:
+        v = _Vectors(name)
+        for entry in v.round_two:
+            identifier = entry["identifier"]
+            source = v.round_one[identifier]
+            nonces = frost.Nonces(
+                v.scalar(source["hiding_nonce"]), v.scalar(source["binding_nonce"])
+            )
+            got = frost.sign_share(
+                v.cs,
+                identifier,
+                v.shares[identifier],
+                v.group_public_key,
+                nonces,
+                v.message,
+                v.commitment_list,
+            )
+            self.assertEqual(got.hex(), entry["sig_share"])
+
+    @parameterized.named_parameters(*_PARAMS)
+    def test_aggregate_reproduces_the_published_signature(self, name: str) -> None:
+        v = _Vectors(name)
+        self.assertEqual(v.aggregate().hex(), v.final_signature)
+
+    @parameterized.named_parameters(*_PARAMS)
+    def test_verify_share_names_the_bad_share(self, name: str) -> None:
+        v = _Vectors(name)
+        for entry, share in zip(v.round_two, v.signature_shares()):
+            identifier = entry["identifier"]
+            public_share = v.cs.scalar_base_mult(v.shares[identifier])
+            commitment = next(
+                c for c in v.commitment_list if c.identifier == identifier
+            )
+            arguments = (
+                v.cs,
+                identifier,
+                public_share,
+                commitment,
+            )
+            tail = (v.commitment_list, v.group_public_key, v.message)
+            self.assertTrue(frost.verify_share(*arguments, share, *tail))
+            corrupted = v.cs.serialize_scalar(
+                (v.cs.deserialize_scalar(share) + 1) % v.cs.order
+            )
+            self.assertFalse(frost.verify_share(*arguments, corrupted, *tail))
+
+    @parameterized.named_parameters(*_PARAMS)
+    def test_sign_share_refuses_a_swapped_commitment(self, name: str) -> None:
+        v = _Vectors(name)
+        first = min(v.round_one)
+        entry = v.round_one[first]
+        nonces = frost.Nonces(
+            v.scalar(entry["hiding_nonce"]), v.scalar(entry["binding_nonce"])
+        )
+        swapped = [
+            (
+                frost.Commitment(c.identifier, c.binding, c.hiding)
+                if c.identifier == first
+                else c
+            )
+            for c in v.commitment_list
+        ]
+        with self.assertRaises(ValueError):
+            frost.sign_share(
+                v.cs,
+                first,
+                v.shares[first],
+                v.group_public_key,
+                nonces,
+                v.message,
+                swapped,
+            )
+
+
+class Ed25519CrossingTest(absltest.TestCase):
+    def test_the_aggregate_verifies_as_plain_ed25519(self) -> None:
+        v = _Vectors("ed25519")
+        signature = v.aggregate()
+        corrupted = bytearray(signature)
+        corrupted[0] ^= 1
+        stack = lambda *rows: np.stack(  # noqa: E731
+            [np.frombuffer(r, dtype=np.uint8) for r in rows]
+        )
+        verdicts = ed25519.Ed25519().verify(
+            stack(v.group_public_key, v.group_public_key),
+            stack(v.message, v.message),
+            stack(signature, bytes(corrupted)),
+            context=None,
+        )
+        self.assertEqual(list(np.asarray(verdicts)), [True, False])
+
+
+class Secp256k1SchnorrTest(absltest.TestCase):
+    def _accepts(
+        self, cs: frost.Ciphersuite, public_key: bytes, message: bytes, signature: bytes
+    ) -> bool:
+        """RFC 9591 Appendix B's prime-order verification, transcribed.
+
+        `c = H2(R ‖ PK ‖ msg)`; accept iff `[z]B = R + [c]PK`. Transcribed
+        here because this suite's output is RFC 9591's own encoding with no
+        chain verifier to cross into.
+        """
+        commitment_bytes = signature[: cs.element_size]
+        z = cs.deserialize_scalar(signature[cs.element_size :])
+        challenge = cs.h2(commitment_bytes + public_key + message)
+        expected = cs.element_add(
+            cs.deserialize_element(commitment_bytes),
+            cs.element_scalar_mult(cs.deserialize_element(public_key), challenge),
+        )
+        return cs.scalar_base_mult(z) == cs.serialize_element(expected)
+
+    def test_the_aggregate_verifies_per_appendix_b(self) -> None:
+        v = _Vectors("secp256k1")
+        signature = v.aggregate()
+        self.assertTrue(self._accepts(v.cs, v.group_public_key, v.message, signature))
+        corrupted = bytearray(signature)
+        corrupted[-1] ^= 1
+        self.assertFalse(
+            self._accepts(v.cs, v.group_public_key, v.message, bytes(corrupted))
+        )
+
+
+if __name__ == "__main__":
+    absltest.main()

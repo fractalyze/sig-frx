@@ -1,0 +1,58 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# The RFC 9591 skeleton: round functions, aggregation, share verification,
+# and the trusted-dealer sharing, all ciphersuite-parameterized and all pure.
+# Standard library only — the group arrives through the Ciphersuite.
+py_library(
+    name = "frost",
+    srcs = [
+        "__init__.py",
+        "frost.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# FROST(Ed25519, SHA-512): §6.1's constants and hashes over the Edwards
+# substrate the Ed25519 scheme already uses.
+py_library(
+    name = "ed25519_sha512",
+    srcs = [
+        "__init__.py",
+        "ed25519_sha512.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":frost",
+        "//sig_frx/classical:edwards",
+        "//sig_frx/classical:weierstrass",
+        requirement("numpy"),
+    ],
+)
+
+# expand_message_xmd (RFC 9380 §5.3.1) — the scalar derivation the
+# hash-to-field ciphersuites share. Standard library only.
+py_library(
+    name = "xmd",
+    srcs = [
+        "__init__.py",
+        "xmd.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# FROST(secp256k1, SHA-256): §6.5's constants over the Weierstrass substrate.
+py_library(
+    name = "secp256k1_sha256",
+    srcs = [
+        "__init__.py",
+        "secp256k1_sha256.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":frost",
+        ":xmd",
+        "//sig_frx/classical:weierstrass",
+        requirement("numpy"),
+    ],
+)
