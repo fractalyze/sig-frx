@@ -1,0 +1,22 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# BIP-340 Schnorr — a scheme of its own over the shared Weierstrass
+# substrate. The curve is fixed rather than injected: the standard names
+# secp256k1, its tagged-hash strings, and the even-y convention together.
+py_library(
+    name = "bip340",
+    srcs = [
+        "__init__.py",
+        "bip340.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//sig_frx:context",
+        "//sig_frx:signature",
+        "//sig_frx/classical:group",
+        "//sig_frx/classical:weierstrass",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

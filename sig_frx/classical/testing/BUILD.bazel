@@ -145,6 +145,19 @@ py_test(
 )
 
 py_test(
+    name = "bip340_test",
+    size = "medium",
+    srcs = ["bip340_test.py"],
+    deps = [
+        "//sig_frx/classical/schnorr:bip340",
+        "//sig_frx/testing:kat",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
     name = "bitcoin_test",
     size = "medium",
     srcs = ["bitcoin_test.py"],
