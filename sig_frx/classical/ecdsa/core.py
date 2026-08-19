@@ -169,7 +169,40 @@ class Ecdsa:
         signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
         return np.frombuffer(signature, dtype=np.uint8).copy(), recovery_id
 
+    def sign_digest_recoverable(
+        self,
+        secret_key: ArrayLike,
+        digest: ArrayLike,
+        *,
+        nonce_hash: rfc6979.HashConstructor,
+    ) -> tuple[Any, int]:
+        """`sign_recoverable` for a caller that arrives with the digest.
+
+        Off the seam under its own name, per the seam's rule for pre-hashed
+        variants. The message-level record binds `H(message)` and RFC 6979's
+        HMAC to one function; a digest-level caller has severed that by
+        construction, so the HMAC face is named explicitly instead of read
+        off the record. (Ethereum's ecosystem convention — libsecp256k1's
+        default nonce function — is HMAC-SHA256 beneath a Keccak-256 digest,
+        and the EIP-155 example vector pins that pairing in the variant's
+        tests.)
+        """
+        _, x = self._secret_scalar(secret_key, "secret key")
+        h1 = np.asarray(digest, dtype=np.uint8).tobytes()
+        r, s, recovery_id = self._digest_signature_scalars(x, h1, nonce_hash)
+        signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        return np.frombuffer(signature, dtype=np.uint8).copy(), recovery_id
+
     def _signature_scalars(self, x: int, message: ArrayLike) -> tuple[int, int, int]:
+        """One RFC 6979 signature as integers, from the record's own pairing."""
+        h1 = self.hash.host_constructor(
+            np.asarray(message, dtype=np.uint8).tobytes()
+        ).digest()
+        return self._digest_signature_scalars(x, h1, self.hash.host_constructor)
+
+    def _digest_signature_scalars(
+        self, x: int, h1: bytes, nonce_hash: rfc6979.HashConstructor
+    ) -> tuple[int, int, int]:
         """One RFC 6979 signature as integers: `(r, s, recovery_id)`.
 
         The recovery id is two bits off the nonce's point, read before it is
@@ -179,11 +212,8 @@ class Ecdsa:
         bit flips with it — the round-trip tests hold the two together.
         """
         n = self.curve.n
-        h1 = self.hash.host_constructor(
-            np.asarray(message, dtype=np.uint8).tobytes()
-        ).digest()
         e = rfc6979.bits2int(h1, n.bit_length()) % n
-        for k in rfc6979.nonces(n, x, h1, self.hash.host_constructor):
+        for k in rfc6979.nonces(n, x, h1, nonce_hash):
             rx, ry = self._host_multiple_of_g(k)
             r = rx % n
             if r == 0:  # SEC 1 §4.1.3 discards the draw and takes the next
@@ -312,22 +342,42 @@ class Ecdsa:
         """
         context_rules.require_empty(context, "ECDSA")
         message = np.asarray(message, dtype=np.uint8)
+        # The host face of the hash pair, as signing uses — this is the
+        # concrete path, and the RFC 6979 KATs already bind the two faces.
+        digest = np.stack(
+            [
+                np.frombuffer(
+                    self.hash.host_constructor(entry.tobytes()).digest(),
+                    dtype=np.uint8,
+                )
+                for entry in message
+            ]
+        )
+        return self.recover_digest(digest, signature, recovery_id)
+
+    def recover_digest(
+        self,
+        digest: ArrayLike,
+        signature: ArrayLike,
+        recovery_id: ArrayLike,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """`recover` for a caller that arrives with the digests: `[B, L]`.
+
+        Off the seam under its own name, like `sign_digest_recoverable` — and
+        with no `context` parameter, because context framing belongs to the
+        seam's message-level surface. Everything else, verdicts included, is
+        `recover`'s contract.
+        """
+        digest = np.asarray(digest, dtype=np.uint8)
         signature = np.asarray(signature, dtype=np.uint8)
         recovery_id = np.asarray(recovery_id)
         if signature.shape[-1] != 64:
             raise ValueError("a signature is 64 bytes of r ‖ s")
-        if not message.shape[0] == signature.shape[0] == recovery_id.shape[0]:
+        if not digest.shape[0] == signature.shape[0] == recovery_id.shape[0]:
             raise ValueError("the batch axes disagree")
         n = self.curve.n
-        # The host face of the hash pair, as signing uses — this is the
-        # concrete path, and the RFC 6979 KATs already bind the two faces.
         digest_scalars = [
-            rfc6979.bits2int(
-                self.hash.host_constructor(entry.tobytes()).digest(),
-                n.bit_length(),
-            )
-            % n
-            for entry in message
+            rfc6979.bits2int(entry.tobytes(), n.bit_length()) % n for entry in digest
         ]
         return self._recover(digest_scalars, signature, recovery_id)
 
