@@ -145,6 +145,20 @@ py_test(
 )
 
 py_test(
+    name = "bitcoin_test",
+    size = "medium",
+    srcs = ["bitcoin_test.py"],
+    deps = [
+        "//sig_frx/classical:weierstrass",
+        "//sig_frx/classical/ecdsa:bitcoin",
+        "//sig_frx/classical/ecdsa:core",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
     name = "ethereum_test",
     size = "medium",
     srcs = ["ethereum_test.py"],

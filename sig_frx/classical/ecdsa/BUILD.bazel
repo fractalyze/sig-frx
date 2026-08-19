@@ -36,6 +36,26 @@ py_library(
     ],
 )
 
+# Bitcoin's conventions over the chain-agnostic core — the strict-DER codec,
+# the key codecs, and the BIP-62 policy. Like :ethereum below, it names its
+# chain freely and the dependency is one-way.
+py_library(
+    name = "bitcoin",
+    srcs = [
+        "__init__.py",
+        "bitcoin.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":core",
+        "//sig_frx:hashes",
+        "//sig_frx/classical:group",
+        "//sig_frx/classical:weierstrass",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
 # Ethereum's conventions over the chain-agnostic core — the one module in the
 # family allowed to name the chain. The dependency is one-way: the core never
 # imports back.
