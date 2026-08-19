@@ -26,6 +26,7 @@ py_library(
     deps = [
         ":rfc6979",
         "//sig_frx:arrays",
+        "//sig_frx:context",
         "//sig_frx:hashes",
         "//sig_frx:signature",
         "//sig_frx/classical:weierstrass",

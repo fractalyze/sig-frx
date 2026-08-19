@@ -15,6 +15,30 @@ py_library(
     ],
 )
 
+# The affine twisted-Edwards rule, same role for the Edwards substrate.
+py_library(
+    name = "edwards_reference",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "edwards_reference.py",
+    ],
+)
+
+py_test(
+    name = "eddsa_test",
+    size = "medium",
+    srcs = ["eddsa_test.py"],
+    deps = [
+        ":edwards_reference",
+        "//sig_frx/classical:edwards",
+        "//sig_frx/classical/eddsa:ed25519",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 # One marker shared by every traced classical case, so the skip and its
 # reasons live in a single module rather than a copy per test file.
 py_library(

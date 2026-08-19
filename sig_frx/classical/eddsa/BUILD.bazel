@@ -1,0 +1,23 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# Ed25519 over the Edwards substrate. SHA-512 is reached through hashlib on
+# the concrete paths — hash-frx ships none — which the module records as a
+# decision, not an accident.
+py_library(
+    name = "ed25519",
+    srcs = [
+        "__init__.py",
+        "ed25519.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//sig_frx:arrays",
+        "//sig_frx:context",
+        "//sig_frx:signature",
+        "//sig_frx/classical:edwards",
+        "//sig_frx/classical:weierstrass",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

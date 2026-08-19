@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import numpy as np
 from frx.typing import ArrayLike
 
+from sig_frx import context as context_rules
 from sig_frx import hashes
 from sig_frx.arrays import namespace
 from sig_frx.classical import weierstrass
@@ -150,7 +151,7 @@ class Ecdsa:
         to ignore it would verify something other than what the caller asked.
         """
         del randomness  # deterministic (RFC 6979); the seam documents this.
-        _require_no_context(context)
+        context_rules.require_empty(context, "ECDSA")
         secret = np.asarray(secret_key, dtype=np.uint8).reshape(-1)
         if secret.shape[0] != self.secret_key_size:
             raise ValueError(f"a secret key is {self.secret_key_size} bytes")
@@ -186,7 +187,7 @@ class Ecdsa:
         context: ArrayLike | None,
     ) -> Any:
         """The batched verdict, `bool[B]` — one traced computation, no scalar path."""
-        _require_no_context(context)
+        context_rules.require_empty(context, "ECDSA")
         curve = self.curve
         xnp = namespace(public_key, message, signature)
         public_key = xnp.asarray(public_key)
@@ -266,14 +267,6 @@ class Ecdsa:
         return int(np.asarray(x).astype(object)[0]), int(
             np.asarray(y).astype(object)[0]
         )
-
-
-def _require_no_context(context: ArrayLike | None) -> None:
-    """ECDSA's standards define no context string; only empty is honest."""
-    if context is None:
-        return
-    if np.asarray(context).size != 0:
-        raise ValueError("ECDSA takes no context string; pass None or empty")
 
 
 if TYPE_CHECKING:
