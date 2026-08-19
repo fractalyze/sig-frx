@@ -25,7 +25,7 @@ py_library(
     deps = [
         ":frost",
         "//sig_frx/classical:edwards",
-        "//sig_frx/classical:weierstrass",
+        "//sig_frx/classical:group",
         requirement("numpy"),
     ],
 )
@@ -52,6 +52,7 @@ py_library(
     deps = [
         ":frost",
         ":xmd",
+        "//sig_frx/classical:group",
         "//sig_frx/classical:weierstrass",
         requirement("numpy"),
     ],

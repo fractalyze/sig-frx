@@ -81,6 +81,16 @@ class _Vectors:
         ]
         self.scalar = scalar
 
+    def nonces(self, identifier: int) -> frost.Nonces:
+        """The published round-one state for `identifier`, as the caller holds it."""
+        entry = self.round_one[identifier]
+        return frost.Nonces(
+            self.scalar(entry["hiding_nonce"]),
+            self.scalar(entry["binding_nonce"]),
+            bytes.fromhex(entry["hiding_nonce_commitment"]),
+            bytes.fromhex(entry["binding_nonce_commitment"]),
+        )
+
     def signature_shares(self) -> list[bytes]:
         return [bytes.fromhex(entry["sig_share"]) for entry in self.round_two]
 
@@ -114,7 +124,7 @@ class FrostTest(parameterized.TestCase):
     def test_round_one_reproduces_nonces_and_commitments(self, name: str) -> None:
         v = _Vectors(name)
         for identifier, entry in v.round_one.items():
-            nonces, commitments = frost.commit(
+            nonces = frost.commit(
                 v.cs,
                 v.shares[identifier],
                 bytes.fromhex(entry["hiding_nonce_randomness"]),
@@ -122,8 +132,12 @@ class FrostTest(parameterized.TestCase):
             )
             self.assertEqual(nonces.hiding, v.scalar(entry["hiding_nonce"]))
             self.assertEqual(nonces.binding, v.scalar(entry["binding_nonce"]))
-            self.assertEqual(commitments[0].hex(), entry["hiding_nonce_commitment"])
-            self.assertEqual(commitments[1].hex(), entry["binding_nonce_commitment"])
+            self.assertEqual(
+                nonces.hiding_commitment.hex(), entry["hiding_nonce_commitment"]
+            )
+            self.assertEqual(
+                nonces.binding_commitment.hex(), entry["binding_nonce_commitment"]
+            )
 
     @parameterized.named_parameters(*_PARAMS)
     def test_binding_factors_match_the_published_intermediates(self, name: str) -> None:
@@ -139,16 +153,12 @@ class FrostTest(parameterized.TestCase):
         v = _Vectors(name)
         for entry in v.round_two:
             identifier = entry["identifier"]
-            source = v.round_one[identifier]
-            nonces = frost.Nonces(
-                v.scalar(source["hiding_nonce"]), v.scalar(source["binding_nonce"])
-            )
             got = frost.sign_share(
                 v.cs,
                 identifier,
                 v.shares[identifier],
                 v.group_public_key,
-                nonces,
+                v.nonces(identifier),
                 v.message,
                 v.commitment_list,
             )
@@ -168,27 +178,29 @@ class FrostTest(parameterized.TestCase):
             commitment = next(
                 c for c in v.commitment_list if c.identifier == identifier
             )
-            arguments = (
-                v.cs,
-                identifier,
-                public_share,
-                commitment,
-            )
-            tail = (v.commitment_list, v.group_public_key, v.message)
-            self.assertTrue(frost.verify_share(*arguments, share, *tail))
+
+            def verdict(candidate: bytes) -> bool:
+                return frost.verify_share(
+                    v.cs,
+                    identifier,
+                    public_share,
+                    commitment,
+                    candidate,
+                    v.commitment_list,
+                    v.group_public_key,
+                    v.message,
+                )
+
             corrupted = v.cs.serialize_scalar(
                 (v.cs.deserialize_scalar(share) + 1) % v.cs.order
             )
-            self.assertFalse(frost.verify_share(*arguments, corrupted, *tail))
+            self.assertTrue(verdict(share))
+            self.assertFalse(verdict(corrupted))
 
     @parameterized.named_parameters(*_PARAMS)
     def test_sign_share_refuses_a_swapped_commitment(self, name: str) -> None:
         v = _Vectors(name)
         first = min(v.round_one)
-        entry = v.round_one[first]
-        nonces = frost.Nonces(
-            v.scalar(entry["hiding_nonce"]), v.scalar(entry["binding_nonce"])
-        )
         swapped = [
             (
                 frost.Commitment(c.identifier, c.binding, c.hiding)
@@ -203,7 +215,7 @@ class FrostTest(parameterized.TestCase):
                 first,
                 v.shares[first],
                 v.group_public_key,
-                nonces,
+                v.nonces(first),
                 v.message,
                 swapped,
             )

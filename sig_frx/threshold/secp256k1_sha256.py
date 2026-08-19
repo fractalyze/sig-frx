@@ -20,8 +20,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from sig_frx.classical import weierstrass
-from sig_frx.classical.weierstrass import bits_of
+from sig_frx.classical import group, weierstrass
 from sig_frx.threshold import frost, xmd
 
 _CONTEXT = b"FROST-secp256k1-SHA256-v1"
@@ -35,7 +34,6 @@ class Secp256k1Sha256:
     """RFC 9591 §6.5's ciphersuite, elements riding as `[1]`-batch points."""
 
     order = weierstrass.SECP256K1.n
-    scalar_size = 32
     element_size = 33
 
     curve = weierstrass.SECP256K1
@@ -83,11 +81,8 @@ class Secp256k1Sha256:
             raise ValueError("the x-coordinate is out of range")
         field = self.curve.field
         x_field = np.array([x], dtype=field)
-        rhs = (x_field * x_field + self.curve.coeff_a) * x_field + np.array(
-            self.curve.b, dtype=field
-        )
-        root = weierstrass.sqrt(self.curve, rhs)
-        if not bool(np.asarray(root * root == rhs)[0]):
+        root, on_curve = weierstrass.lift_x(self.curve, x_field)
+        if not bool(np.asarray(on_curve)[0]):
             raise ValueError("the x-coordinate is not on the curve")
         y = int(np.asarray(root).astype(object)[0])
         if y % 2 != data[0] - 2:
@@ -102,10 +97,7 @@ class Secp256k1Sha256:
     def element_scalar_mult(
         self, element: weierstrass.Point, scalar: int
     ) -> weierstrass.Point:
-        bits = bits_of(np.frombuffer(scalar.to_bytes(32, "big"), dtype=np.uint8))[
-            None, :
-        ]
-        return weierstrass.scalar_mul(self.curve, bits, element)
+        return weierstrass.scalar_mul(self.curve, group.int_bits(scalar), element)
 
     def identity_element(self) -> weierstrass.Point:
         return weierstrass.identity(self.curve, self.curve.generator.x)
@@ -113,17 +105,8 @@ class Secp256k1Sha256:
     def serialize_element(self, element: weierstrass.Point) -> bytes:
         if bool(np.asarray(weierstrass.is_identity(self.curve, element))[0]):
             raise ValueError("the identity element has no encoding here")
-        ((x, y),) = _affine_ints(self.curve, element)
+        ((x, y),) = group.to_affine_ints(element)
         return (2 + (y & 1)).to_bytes(1, "big") + x.to_bytes(32, "big")
-
-
-def _affine_ints(
-    curve: weierstrass.Curve, point: weierstrass.Point
-) -> list[tuple[int, int]]:
-    """A host batch of projective points back to affine Python integers."""
-    xs = np.asarray(point.x / point.z).astype(object)
-    ys = np.asarray(point.y / point.z).astype(object)
-    return [(int(x), int(y)) for x, y in zip(xs, ys)]
 
 
 if TYPE_CHECKING:

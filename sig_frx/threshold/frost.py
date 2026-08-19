@@ -41,7 +41,6 @@ class Ciphersuite(Protocol):
     """
 
     order: int
-    scalar_size: int
     element_size: int
 
     def h1(self, message: bytes) -> int: ...
@@ -82,10 +81,18 @@ class Commitment:
 
 @dataclass(frozen=True)
 class Nonces:
-    """One participant's round-one secrets, held locally between rounds."""
+    """One participant's round-one state, held locally between rounds.
+
+    The two secret scalars plus their own public commitments as they went to
+    the Coordinator — carried rather than re-derived, so §5.2's
+    my-commitments-are-in-the-list check is a byte comparison instead of two
+    base-point ladders per signing call.
+    """
 
     hiding: int
     binding: int
+    hiding_commitment: bytes
+    binding_commitment: bytes
 
 
 def nonce_generate(cs: Ciphersuite, randomness: bytes, secret: int) -> int:
@@ -104,11 +111,17 @@ def commit(
     secret_share: int,
     hiding_randomness: bytes,
     binding_randomness: bytes,
-) -> tuple[Nonces, tuple[bytes, bytes]]:
-    """RFC 9591 §5.1: round one — nonces and their public commitments."""
+) -> Nonces:
+    """RFC 9591 §5.1: round one — nonces and their public commitments.
+
+    The wire half of the result is `(nonces.hiding_commitment,
+    nonces.binding_commitment)`; the scalars stay local.
+    """
     hiding = nonce_generate(cs, hiding_randomness, secret_share)
     binding = nonce_generate(cs, binding_randomness, secret_share)
-    return Nonces(hiding, binding), (
+    return Nonces(
+        hiding,
+        binding,
         cs.scalar_base_mult(hiding),
         cs.scalar_base_mult(binding),
     )
@@ -116,19 +129,28 @@ def commit(
 
 def _validated_commitment_list(
     cs: Ciphersuite, commitment_list: list[Commitment]
-) -> list[Commitment]:
-    """§5.2's MUST-checks on the list itself: sorted, distinct, deserializable."""
+) -> dict[int, tuple[Any, Any]]:
+    """§5.2's MUST-checks on the list: sorted, distinct, deserializable.
+
+    Returns the decoded `(hiding, binding)` elements by identifier — the
+    validation already paid for the decompression, and the group commitment
+    consumes the same points, so decoding them a second time would be pure
+    waste.
+    """
     identifiers = [c.identifier for c in commitment_list]
     if identifiers != sorted(identifiers) or len(set(identifiers)) != len(identifiers):
         raise ValueError(
             "a commitment list is sorted by identifier, without duplicates"
         )
+    decoded = {}
     for entry in commitment_list:
         if not 1 <= entry.identifier <= cs.order - 1:
             raise ValueError("a participant identifier is a NonZeroScalar")
-        cs.deserialize_element(entry.hiding)
-        cs.deserialize_element(entry.binding)
-    return commitment_list
+        decoded[entry.identifier] = (
+            cs.deserialize_element(entry.hiding),
+            cs.deserialize_element(entry.binding),
+        )
+    return decoded
 
 
 def encode_group_commitment_list(
@@ -161,19 +183,17 @@ def compute_binding_factors(
 
 def compute_group_commitment(
     cs: Ciphersuite,
-    commitment_list: list[Commitment],
+    decoded_commitments: dict[int, tuple[Any, Any]],
     binding_factors: dict[int, int],
 ) -> Any:
-    """RFC 9591 §4.5: `Σ (D_i + [ρ_i]E_i)`, an Element."""
+    """RFC 9591 §4.5: `Σ (D_i + [ρ_i]E_i)`, over already-decoded elements."""
     group_commitment = cs.identity_element()
-    for entry in commitment_list:
+    for identifier, (hiding, binding_commitment) in decoded_commitments.items():
         binding = cs.element_scalar_mult(
-            cs.deserialize_element(entry.binding),
-            binding_factors[entry.identifier],
+            binding_commitment, binding_factors[identifier]
         )
         group_commitment = cs.element_add(
-            cs.element_add(group_commitment, cs.deserialize_element(entry.hiding)),
-            binding,
+            cs.element_add(group_commitment, hiding), binding
         )
     return group_commitment
 
@@ -221,18 +241,16 @@ def sign_share(
     coordinator that swapped them would otherwise make this share sign a
     different group commitment.
     """
-    _validated_commitment_list(cs, commitment_list)
+    decoded = _validated_commitment_list(cs, commitment_list)
     own = [c for c in commitment_list if c.identifier == identifier]
     if not own or own[0] != Commitment(
-        identifier,
-        cs.scalar_base_mult(nonces.hiding),
-        cs.scalar_base_mult(nonces.binding),
+        identifier, nonces.hiding_commitment, nonces.binding_commitment
     ):
         raise ValueError("this participant's round-one commitments are not in the list")
     binding_factors = compute_binding_factors(
         cs, group_public_key, commitment_list, message
     )
-    group_commitment = compute_group_commitment(cs, commitment_list, binding_factors)
+    group_commitment = compute_group_commitment(cs, decoded, binding_factors)
     participants = [c.identifier for c in commitment_list]
     lambda_i = derive_interpolating_value(cs, participants, identifier)
     challenge = compute_challenge(
@@ -258,12 +276,12 @@ def aggregate(
     Every share deserializes first — §5.3's MUST — so a corrupt share aborts
     here; *which* share is corrupt is `verify_share`'s question.
     """
-    _validated_commitment_list(cs, commitment_list)
+    decoded = _validated_commitment_list(cs, commitment_list)
     scalars = [cs.deserialize_scalar(share) for share in signature_shares]
     binding_factors = compute_binding_factors(
         cs, group_public_key, commitment_list, message
     )
-    group_commitment = compute_group_commitment(cs, commitment_list, binding_factors)
+    group_commitment = compute_group_commitment(cs, decoded, binding_factors)
     z = sum(scalars) % cs.order
     return cs.serialize_element(group_commitment) + cs.serialize_scalar(z)
 
@@ -283,23 +301,21 @@ def verify_share(
     `[z_i]B = (D_i + [ρ_i]E_i) + [c·λ_i]PK_i` — false names the misbehaving
     participant, which the aggregate signature alone cannot.
     """
-    _validated_commitment_list(cs, commitment_list)
+    decoded = _validated_commitment_list(cs, commitment_list)
     share = cs.deserialize_scalar(signature_share)
     binding_factors = compute_binding_factors(
         cs, group_public_key, commitment_list, message
     )
-    group_commitment = compute_group_commitment(cs, commitment_list, binding_factors)
+    group_commitment = compute_group_commitment(cs, decoded, binding_factors)
     challenge = compute_challenge(
         cs, cs.serialize_element(group_commitment), group_public_key, message
     )
     participants = [c.identifier for c in commitment_list]
     lambda_i = derive_interpolating_value(cs, participants, identifier)
+    hiding, binding_commitment = decoded[commitment.identifier]
     commitment_share = cs.element_add(
-        cs.deserialize_element(commitment.hiding),
-        cs.element_scalar_mult(
-            cs.deserialize_element(commitment.binding),
-            binding_factors[identifier],
-        ),
+        hiding,
+        cs.element_scalar_mult(binding_commitment, binding_factors[identifier]),
     )
     expected = cs.element_add(
         commitment_share,

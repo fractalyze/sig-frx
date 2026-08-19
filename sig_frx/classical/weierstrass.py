@@ -39,12 +39,11 @@ host signing path holds one-element arrays the same way.
 ## One implementation, both namespaces
 
 Everything here is dtype arithmetic, so the same code runs concretely on numpy
-(key generation, signing) and under a tracer (verification) — except the scalar
-ladder, whose *loop* has to come from somewhere: a Python loop on the host, and
-`lax.fori_loop` under a tracer, where unrolling 256 complete additions would
-compile a graph nobody can afford. The select inside the ladder is arithmetic
-(`bit·added + (1-bit)·doubled`) rather than a `where`, so the carried state
-never leaves the field dtype.
+(key generation, signing) and under a tracer (verification). The plumbing that
+is not this family's — the ladder and its loop split, the byte reshapes, the
+range compare, the host readback — lives in `group.py`, shared with the
+Edwards substrate; this module keeps the formulas, the constants, and the
+encodings its standards fix.
 """
 
 from __future__ import annotations
@@ -55,10 +54,9 @@ from typing import Any, NamedTuple
 
 import numpy as np
 import zk_dtypes
-from frx import lax
 from frx.typing import ArrayLike
 
-from sig_frx.arrays import namespace
+from sig_frx.classical import group
 
 
 class Point(NamedTuple):
@@ -107,6 +105,11 @@ class Curve:
     def coeff_a(self) -> np.ndarray:
         """`a` as a field scalar, the shape the formulas consume."""
         return np.array(self.a % self.p, dtype=self.field)
+
+    @functools.cached_property
+    def coeff_b(self) -> np.ndarray:
+        """`b` as a field scalar — what the defining equation evaluates with."""
+        return np.array(self.b % self.p, dtype=self.field)
 
     @functools.cached_property
     def coeff_b3(self) -> np.ndarray:
@@ -258,65 +261,15 @@ def negate(point: Point) -> Point:
     return Point(point.x, -point.y, point.z)
 
 
-def bits_of(data: ArrayLike) -> Any:
-    """Big-endian bytes as bits, most significant first: `[..., L] -> [..., 8L]`.
-
-    The shape the scalar ladder consumes, produced from wire bytes — a scalar's
-    bits come off its encoding, never off a field element, because a 256-bit
-    residue has no integer lane to be read back onto.
-    """
-    xnp = namespace(data)
-    data = xnp.asarray(data)
-    shifts = np.arange(7, -1, -1, dtype=np.uint8)
-    bits = (data[..., :, None] >> shifts) & np.uint8(1)
-    return bits.reshape(data.shape[:-1] + (8 * data.shape[-1],))
-
-
-def _select(curve: Curve, flag: Any, when_set: Point, when_clear: Point) -> Point:
-    """`flag ? when_set : when_clear`, arithmetically, per batch entry.
-
-    `flag` is a field element in {0, 1}. Arithmetic rather than `where` so the
-    ladder's carried state is field-dtype arithmetic end to end.
-    """
-    keep = curve.one - flag
-    return Point(
-        flag * when_set.x + keep * when_clear.x,
-        flag * when_set.y + keep * when_clear.y,
-        flag * when_set.z + keep * when_clear.z,
-    )
-
-
 def scalar_mul(curve: Curve, bits: ArrayLike, point: Point) -> Point:
     """`k·P` over `k`'s bits, most significant first: `[..., L]` bits by a point.
 
-    Double-and-add with a fixed trip count `L` and an arithmetic select, so one
-    traced computation serves the whole batch (SEC 1 §2.2 names the algorithm;
-    the fixed shape is this repo's). A scalar wider than the group order is
-    reduced by the group itself — `k·P = (k mod n)·P` — which is why callers
-    hand bits straight off wire bytes without a mod-n in front.
-
-    The loop is `lax.fori_loop` under a tracer and a Python loop on the host:
-    same body, and the host path never lifts (`conventions.md`).
+    The shared fixed-shape ladder (`group.ladder`), bound to this family's
+    complete formulas. SEC 1 §2.2 names the algorithm; the fixed shape and the
+    unreduced-scalar rule are the plumbing's
+    (`k·P = (k mod n)·P`, so wire bytes drive it directly).
     """
-    xnp = namespace(bits, *point)
-    bits = xnp.asarray(bits)
-    flags = bits.astype(np.int32).astype(curve.field)
-    length = flags.shape[-1]
-
-    def step(flag: Any, acc: Point) -> Point:
-        doubled = double(curve, acc)
-        added = add(curve, doubled, point)
-        return _select(curve, flag, added, doubled)
-
-    start = identity(curve, flags[..., 0] * point.x)
-    if xnp is np:
-        acc = start
-        for i in range(length):
-            acc = step(flags[..., i], acc)
-        return acc
-    return lax.fori_loop(
-        0, length, lambda i, acc: step(xnp.take(flags, i, axis=-1), acc), start
-    )
+    return group.ladder(curve, bits, point, double=double, add=add, identity=identity)
 
 
 def to_affine(curve: Curve, point: Point) -> tuple[Any, Any]:
@@ -331,49 +284,37 @@ def to_affine(curve: Curve, point: Point) -> tuple[Any, Any]:
     return point.x / point.z, point.y / point.z
 
 
+def equation_rhs(curve: Curve, x: ArrayLike) -> Any:
+    """`x³ + ax + b` — the defining equation's right side, elementwise."""
+    return (x * x + curve.coeff_a) * x + curve.coeff_b
+
+
 def on_curve(curve: Curve, x: ArrayLike, y: ArrayLike) -> Any:
     """Whether affine `(x, y)` satisfies `y² = x³ + ax + b`, elementwise."""
-    return y * y == (x * x + curve.coeff_a) * x + np.array(
-        curve.b % curve.p, dtype=curve.field
-    )
+    return y * y == equation_rhs(curve, x)
 
 
-def equal(p: Point, q: Point) -> Any:
-    """Whether two projective points name the same group element, elementwise.
+def lift_x(curve: Curve, x: ArrayLike) -> tuple[Any, Any]:
+    """A y-candidate for `x`, with whether `x` is on the curve at all.
 
-    Cross-multiplied, so no division: `(X₁ : Y₁ : Z₁) = (X₂ : Y₂ : Z₂)` iff
-    `X₁Z₂ = X₂Z₁` and `Y₁Z₂ = Y₂Z₁`. Sound for everything the complete
-    formulas produce — they never emit the degenerate all-zero triple.
+    `(root, valid)`: the square-root candidate of the equation's right side,
+    and the membership verdict `root² = rhs` — false exactly when the right
+    side is a non-residue, in which case `root` is junk a caller's mask
+    drops arithmetically.
     """
-    return (p.x * q.z == q.x * p.z) & (p.y * q.z == q.y * p.z)
+    rhs = equation_rhs(curve, x)
+    root = sqrt(curve, rhs)
+    return root, root * root == rhs
 
 
 def field_from_bytes(curve: Curve, data: ArrayLike) -> Any:
     """Big-endian `[..., 32]` bytes as base-field elements, reduced mod `p`.
 
-    The reduction is the field's, which means a value at or above `p` wraps
-    silently — a caller enforcing an encoding's range bound (SEC 1 §2.3.6
-    rejects coordinates outside `[0, p-1]`) checks the bytes before, where the
-    order still exists.
+    `group.field_from_bytes` over this curve's big-endian weights; the range
+    caveat there applies (SEC 1 §2.3.6 rejects out-of-range coordinates, and
+    that check reads the bytes, not the wrapped element).
     """
-    xnp = namespace(data)
-    lanes = xnp.asarray(data).astype(np.int32).astype(curve.field)
-    return (lanes * curve.byte_weights).sum(axis=-1)
-
-
-def pow_const(curve: Curve, base: ArrayLike, exponent: int) -> Any:
-    """`base^exponent` in the base field, for a static exponent.
-
-    Square-and-multiply with the branches decided at trace time — the exponent
-    is a Python integer, so the unrolled ~256 squarings compile once per
-    exponent and the value path stays pure field arithmetic.
-    """
-    acc = base * np.array(0, dtype=curve.field) + curve.one
-    for bit in bin(exponent)[2:]:
-        acc = acc * acc
-        if bit == "1":
-            acc = acc * base
-    return acc
+    return group.field_from_bytes(curve.byte_weights, data)
 
 
 def sqrt(curve: Curve, value: ArrayLike) -> Any:
@@ -385,4 +326,4 @@ def sqrt(curve: Curve, value: ArrayLike) -> Any:
     """
     if curve.p % 4 != 3:
         raise ValueError("sqrt shortcut requires p ≡ 3 (mod 4)")
-    return pow_const(curve, value, (curve.p + 1) // 4)
+    return group.pow_const(curve, value, (curve.p + 1) // 4)

@@ -22,8 +22,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from sig_frx.classical import edwards
-from sig_frx.classical.weierstrass import bits_of
+from sig_frx.classical import edwards, group
 from sig_frx.threshold import frost
 
 _CONTEXT = b"FROST-ED25519-SHA512-v1"
@@ -39,7 +38,6 @@ class Ed25519Sha512:
     """RFC 9591 §6.1's ciphersuite, elements riding as `[1]`-batch points."""
 
     order = edwards.ED25519.order
-    scalar_size = 32
     element_size = 32
 
     curve = edwards.ED25519
@@ -86,7 +84,7 @@ class Ed25519Sha512:
         )
         if not bool(np.asarray(ok)[0]):
             raise ValueError("not a canonical encoding of a curve point")
-        ((x, y),) = edwards.to_affine_ints(self.curve, point)
+        ((x, y),) = group.to_affine_ints(point)
         if (x, y) == (0, 1):
             raise ValueError("the identity element has no place on the wire")
         return point
@@ -99,16 +97,13 @@ class Ed25519Sha512:
     def element_scalar_mult(
         self, element: edwards.ExtPoint, scalar: int
     ) -> edwards.ExtPoint:
-        bits = bits_of(np.frombuffer(scalar.to_bytes(32, "big"), dtype=np.uint8))[
-            None, :
-        ]
-        return edwards.scalar_mul(self.curve, bits, element)
+        return edwards.scalar_mul(self.curve, group.int_bits(scalar), element)
 
     def identity_element(self) -> edwards.ExtPoint:
         return edwards.identity(self.curve, self.curve.generator.x)
 
     def serialize_element(self, element: edwards.ExtPoint) -> bytes:
-        ((x, y),) = edwards.to_affine_ints(self.curve, element)
+        ((x, y),) = group.to_affine_ints(element)
         if (x, y) == (0, 1):
             raise ValueError("the identity element has no encoding here")
         return edwards.encode_affine(x, y)

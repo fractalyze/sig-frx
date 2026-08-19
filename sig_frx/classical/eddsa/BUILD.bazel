@@ -16,7 +16,7 @@ py_library(
         "//sig_frx:context",
         "//sig_frx:signature",
         "//sig_frx/classical:edwards",
-        "//sig_frx/classical:weierstrass",
+        "//sig_frx/classical:group",
         requirement("frx"),
         requirement("numpy"),
     ],

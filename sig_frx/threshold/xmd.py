@@ -11,18 +11,17 @@ protocol-side scalar derivation, bytes and integers.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
 
 
-def expand_message_xmd(
-    message: bytes,
-    dst: bytes,
-    length: int,
-    hash_constructor: Callable[..., "hashlib._Hash"] = hashlib.sha256,
-) -> bytes:
-    """RFC 9380 §5.3.1, transcribed for a Merkle-Damgård `H`."""
-    digest_size = hash_constructor().digest_size
-    block_size = hash_constructor().block_size
+def expand_message_xmd(message: bytes, dst: bytes, length: int) -> bytes:
+    """RFC 9380 §5.3.1 over SHA-256, transcribed for a Merkle-Damgård `H`.
+
+    SHA-256 is fixed rather than injected: every hash-to-field ciphersuite
+    this package ships uses it, and the parameter arrives with the first
+    suite that does not.
+    """
+    digest_size = hashlib.sha256().digest_size
+    block_size = hashlib.sha256().block_size
     ell = -(-length // digest_size)
     if ell > 255 or length > 65535 or len(dst) > 255:
         raise ValueError("expand_message_xmd parameters out of range")
@@ -30,13 +29,11 @@ def expand_message_xmd(
     msg_prime = (
         b"\x00" * block_size + message + length.to_bytes(2, "big") + b"\x00" + dst_prime
     )
-    b0 = hash_constructor(msg_prime).digest()
-    blocks = [hash_constructor(b0 + b"\x01" + dst_prime).digest()]
+    b0 = hashlib.sha256(msg_prime).digest()
+    blocks = [hashlib.sha256(b0 + b"\x01" + dst_prime).digest()]
     for i in range(2, ell + 1):
         mixed = bytes(x ^ y for x, y in zip(b0, blocks[-1]))
-        blocks.append(
-            hash_constructor(mixed + i.to_bytes(1, "big") + dst_prime).digest()
-        )
+        blocks.append(hashlib.sha256(mixed + i.to_bytes(1, "big") + dst_prime).digest())
     return b"".join(blocks)[:length]
 
 

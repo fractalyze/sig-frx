@@ -35,6 +35,7 @@ from frx import lax
 from frx.typing import ArrayLike
 
 from sig_frx.arrays import namespace
+from sig_frx.classical import group
 
 
 class ExtPoint(NamedTuple):
@@ -153,81 +154,25 @@ def double(curve: EdwardsCurve, p: ExtPoint) -> ExtPoint:
     return ExtPoint(e * f, g * h, f * g, e * h)
 
 
-def negate(point: ExtPoint) -> ExtPoint:
-    """`-P = (-X : Y : Z : -T)`."""
-    return ExtPoint(-point.x, point.y, point.z, -point.t)
-
-
-def equal(p: ExtPoint, q: ExtPoint) -> Any:
-    """Whether two extended points name the same element, elementwise.
-
-    Cross-multiplied on `(X, Y)` against `Z`; `T` is determined by the other
-    three and adds nothing to the comparison.
-    """
-    return (p.x * q.z == q.x * p.z) & (p.y * q.z == q.y * p.z)
-
-
-def _select(
-    curve: EdwardsCurve, flag: Any, when_set: ExtPoint, when_clear: ExtPoint
-) -> ExtPoint:
-    """`flag ? when_set : when_clear` arithmetically, per batch entry."""
-    keep = curve.one - flag
-    return ExtPoint(
-        flag * when_set.x + keep * when_clear.x,
-        flag * when_set.y + keep * when_clear.y,
-        flag * when_set.z + keep * when_clear.z,
-        flag * when_set.t + keep * when_clear.t,
-    )
-
-
 def scalar_mul(curve: EdwardsCurve, bits: ArrayLike, point: ExtPoint) -> ExtPoint:
-    """`k·P` over `k`'s bits, most significant first — the shared ladder shape.
+    """`k·P` over `k`'s bits, most significant first — the shared ladder.
 
-    A scalar wider than `L` reduces through the group itself, which is what
-    lets a 512-bit SHA-512 digest drive the ladder straight off its bytes with
-    no arithmetic modulo `L` on the device.
+    `group.ladder` bound to this family's complete formulas. A scalar wider
+    than `L` reduces through the group itself, which is what lets a 512-bit
+    SHA-512 digest drive the ladder straight off its bytes with no arithmetic
+    modulo `L` on the device.
     """
-    xnp = namespace(bits, *point)
-    bits = xnp.asarray(bits)
-    flags = bits.astype(np.int32).astype(curve.field)
-    length = flags.shape[-1]
-
-    def step(flag: Any, acc: ExtPoint) -> ExtPoint:
-        doubled = double(curve, acc)
-        added = add(curve, doubled, point)
-        return _select(curve, flag, added, doubled)
-
-    start = identity(curve, flags[..., 0] * point.x)
-    if xnp is np:
-        acc = start
-        for i in range(length):
-            acc = step(flags[..., i], acc)
-        return acc
-    return lax.fori_loop(
-        0, length, lambda i, acc: step(xnp.take(flags, i, axis=-1), acc), start
-    )
+    return group.ladder(curve, bits, point, double=double, add=add, identity=identity)
 
 
 def field_from_le_bytes(curve: EdwardsCurve, data: ArrayLike) -> Any:
     """Little-endian `[..., 32]` bytes as field elements, reduced mod `p`.
 
-    The reduction is the field's; a caller enforcing the encoding's
-    canonical-range rule (RFC 8032 §5.1.3 fails a `y ≥ p`) checks the bytes
-    first, where the order still exists.
+    `group.field_from_bytes` over this curve's little-endian weights — RFC
+    8032 encodings are little-endian — with the range caveat there (§5.1.3
+    fails a `y ≥ p`, and that check reads the bytes).
     """
-    xnp = namespace(data)
-    lanes = xnp.asarray(data).astype(np.int32).astype(curve.field)
-    return (lanes * curve.le_byte_weights).sum(axis=-1)
-
-
-def pow_const(curve: EdwardsCurve, base: ArrayLike, exponent: int) -> Any:
-    """`base^exponent` in the base field, for a static exponent."""
-    acc = base * np.array(0, dtype=curve.field) + curve.one
-    for bit in bin(exponent)[2:]:
-        acc = acc * acc
-        if bit == "1":
-            acc = acc * base
-    return acc
+    return group.field_from_bytes(curve.le_byte_weights, data)
 
 
 def parity(curve: EdwardsCurve, value: ArrayLike) -> Any:
@@ -258,7 +203,7 @@ def decompress_x(curve: EdwardsCurve, y: Any, sign: Any) -> tuple[Any, Any]:
     v = curve.d_field * (y * y) + curve.one
     v3 = v * v * v
     v7 = v3 * v3 * v
-    candidate = u * v3 * pow_const(curve, u * v7, (curve.p - 5) // 8)
+    candidate = u * v3 * group.pow_const(curve, u * v7, (curve.p - 5) // 8)
     squared = v * candidate * candidate
     is_root = squared == u
     corrected = candidate * curve.sqrt_minus_one
@@ -296,22 +241,10 @@ def decode(curve: EdwardsCurve, encoded: ArrayLike) -> tuple[ExtPoint, Any]:
     y_bytes = xnp.concatenate(
         [encoded[..., :31], encoded[..., 31:32] & np.uint8(0x7F)], axis=-1
     )
-    p_bytes = curve.p.to_bytes(32, "little")
-    verdict = xnp.zeros(y_bytes.shape[:-1], dtype=np.int32)
-    for i in reversed(range(32)):
-        diff = xnp.sign(y_bytes[..., i].astype(np.int32) - np.int32(p_bytes[i]))
-        verdict = xnp.where(verdict != 0, verdict, diff)
-    canonical = verdict == -1
+    canonical = group.bytes_below(xnp, y_bytes, curve.p, byteorder="little")
     y = field_from_le_bytes(curve, y_bytes)
     x, ok = decompress_x(curve, y, sign)
     return from_affine(curve, x, y), canonical & ok
-
-
-def to_affine_ints(curve: EdwardsCurve, point: ExtPoint) -> list[tuple[int, int]]:
-    """A host batch of extended points back to affine Python integers."""
-    xs = np.asarray(point.x / point.z).astype(object)
-    ys = np.asarray(point.y / point.z).astype(object)
-    return [(int(x), int(y)) for x, y in zip(xs, ys)]
 
 
 def encode_affine(x: int, y: int) -> bytes:

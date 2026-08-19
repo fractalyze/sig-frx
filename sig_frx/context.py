@@ -38,7 +38,7 @@ def require_empty(context: ArrayLike | None, scheme: str) -> None:
     if context is None:
         return
     if np.asarray(context).size != 0:
-        raise ValueError(f"{scheme} takes no context string; pass None or empty")
+        raise ValueError(f"{scheme} defines no application context; pass None or empty")
 
 
 def prefix(domain: int, context: ArrayLike | None) -> np.ndarray:

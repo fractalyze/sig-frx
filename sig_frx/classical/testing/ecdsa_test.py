@@ -2,17 +2,15 @@
 """The ECDSA core against RFC 6979's P-256 vectors, and its own rejections.
 
 The accepted cases are the standard's: Appendix A.2.5 publishes the key pair
-and the SHA-256 signatures over "sample" and "test", so key generation,
-signing, and verification are each pinned to published bytes. The rejections
-are derived from those accepted cases — a moved bit in each argument, the
-range bounds on `r` and `s`, and the public-key encoding checks — because a
-verifier that accepts everything passes every positive vector
-(`docs/reference/conventions.md`). secp256k1 has no vectors of standard
-weight in this file yet; the Wycheproof sets are the planned gate, and until
-they land its coverage here is a round trip labeled as the smoke test it is.
-
-Verification runs in the host namespace throughout: the traced path is the
-same code, and its cases carry the shared upstream-blocker marker.
+and the SHA-256 signatures over "sample" and "test". Expressed as KatVectors,
+the shared harness reproduces keygen, signing, and verification byte for byte
+and derives the tampering and batch-axis gates from them — the same driver
+the Wycheproof sets run through. What stays local is what only this scheme
+defines: the seed range refusals, the context refusal, the low-S signing
+option, the r/s range bounds, n - s accepted (malleability policy stays out
+of the core), and traced-equals-host. secp256k1's authority is the
+Wycheproof gate; its round trip here is smoke for the signing path those
+verify-only sets cannot reach.
 """
 
 from __future__ import annotations
@@ -25,6 +23,7 @@ from absl.testing import absltest
 from sig_frx.classical import weierstrass
 from sig_frx.classical.ecdsa import core
 from sig_frx.classical.testing.traced_blocker import TRACED_BLOCKED
+from sig_frx.testing import kat
 
 # RFC 6979 Appendix A.2.5: the P-256 example key pair.
 _X = 0xC9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721
@@ -52,6 +51,28 @@ def _seed() -> np.ndarray:
     return np.frombuffer(_X.to_bytes(32, "big"), dtype=np.uint8)
 
 
+# One fixed key pair serves every verification row; a full keygen ladder per
+# helper call would re-derive it identically.
+_PUBLIC = b"\x04" + _UX.to_bytes(32, "big") + _UY.to_bytes(32, "big")
+
+
+def _kat_vectors() -> list[kat.KatVector]:
+    """A.2.5's cases in the harness's record, one per message."""
+    return [
+        kat.KatVector(
+            case_id=f"RFC 6979 A.2.5 P-256/SHA-256 {message!r}",
+            parameter_set="ECDSA-P256-SHA256",
+            seed=_X.to_bytes(32, "big"),
+            public_key=_PUBLIC,
+            secret_key=_X.to_bytes(32, "big"),
+            message=message,
+            signature=_signature(message),
+            deterministic=True,
+        )
+        for message in _VECTORS
+    ]
+
+
 def _signature(message: bytes) -> bytes:
     r, s = _VECTORS[message]
     return r.to_bytes(32, "big") + s.to_bytes(32, "big")
@@ -59,10 +80,9 @@ def _signature(message: bytes) -> bytes:
 
 def _rows(message: bytes, *signatures: bytes) -> tuple:
     """A batch around one message: `[B, 65]`, `[B, L]`, `[B, 64]`."""
-    public, _ = _p256().keygen(_seed())
     batch = len(signatures)
     return (
-        np.broadcast_to(public, (batch, 65)).copy(),
+        np.broadcast_to(np.frombuffer(_PUBLIC, dtype=np.uint8), (batch, 65)).copy(),
         np.broadcast_to(
             np.frombuffer(message, dtype=np.uint8), (batch, len(message))
         ).copy(),
@@ -70,13 +90,15 @@ def _rows(message: bytes, *signatures: bytes) -> tuple:
     )
 
 
-class KeygenTest(absltest.TestCase):
-    def test_reproduces_the_published_key_pair(self) -> None:
-        public, secret = _p256().keygen(_seed())
-        want = b"\x04" + _UX.to_bytes(32, "big") + _UY.to_bytes(32, "big")
-        self.assertEqual(public.tobytes(), want)
-        self.assertEqual(secret.tobytes(), _X.to_bytes(32, "big"))
+class HarnessTest(absltest.TestCase):
+    def test_the_published_cases_through_the_shared_harness(self) -> None:
+        # keygen, signing, and verification against the published bytes, plus
+        # the derived tampering and batch-axis gates — one driver, the same
+        # one the Wycheproof sets run through.
+        kat.check(_p256(), _kat_vectors())
 
+
+class KeygenTest(absltest.TestCase):
     def test_rejects_out_of_range_seeds(self) -> None:
         scheme = _p256()
         for bad in (0, scheme.curve.n):
@@ -85,17 +107,6 @@ class KeygenTest(absltest.TestCase):
 
 
 class SignTest(absltest.TestCase):
-    def test_reproduces_the_published_signatures(self) -> None:
-        scheme = _p256()
-        for message in _VECTORS:
-            got = scheme.sign(
-                _seed(),
-                np.frombuffer(message, dtype=np.uint8),
-                randomness=None,
-                context=None,
-            )
-            self.assertEqual(got.tobytes(), _signature(message), msg=message)
-
     def test_rejects_a_context(self) -> None:
         with self.assertRaises(ValueError):
             _p256().sign(
@@ -121,13 +132,6 @@ class SignTest(absltest.TestCase):
 
 
 class VerifyTest(absltest.TestCase):
-    def test_accepts_the_published_signatures(self) -> None:
-        scheme = _p256()
-        for message in _VECTORS:
-            keys, messages, signatures = _rows(message, _signature(message))
-            got = scheme.verify(keys, messages, signatures, context=None)
-            self.assertTrue(bool(np.asarray(got)[0]), msg=message)
-
     def test_rejections_and_malleation_in_one_batch(self) -> None:
         scheme = _p256()
         n = scheme.curve.n
@@ -147,19 +151,17 @@ class VerifyTest(absltest.TestCase):
         got = np.asarray(scheme.verify(keys, messages, signatures, context=None))
         self.assertEqual(list(got), [True, False, False, False, False, False, True])
 
-    def test_rejects_a_tampered_message_and_key(self) -> None:
+    def test_rejects_a_malformed_key_encoding(self) -> None:
+        # The harness's tampering pass moves a bit; the header byte and an
+        # off-curve coordinate are this scheme's own encoding refusals.
         scheme = _p256()
         keys, messages, signatures = _rows(
-            b"sample",
-            _signature(b"sample"),
-            _signature(b"sample"),
-            _signature(b"sample"),
+            b"sample", _signature(b"sample"), _signature(b"sample")
         )
-        messages[0, 0] ^= 1
-        keys[1, 0] = 5  # not the uncompressed-point header
-        keys[2, 64] ^= 1  # off the curve
+        keys[0, 0] = 5  # not the uncompressed-point header
+        keys[1, 64] ^= 1  # off the curve
         got = np.asarray(scheme.verify(keys, messages, signatures, context=None))
-        self.assertEqual(list(got), [False, False, False])
+        self.assertEqual(list(got), [False, False])
 
     def test_verify_rejects_a_context(self) -> None:
         scheme = _p256()
@@ -186,9 +188,10 @@ class VerifyTest(absltest.TestCase):
 class Secp256k1SmokeTest(absltest.TestCase):
     """A round trip, which is smoke and not a gate.
 
-    secp256k1 has no RFC 6979 vectors and no ACVP coverage; the Wycheproof
-    sets are the planned authority, tracked on the issue. Until they land,
-    this pins only that signing and verification agree with each other.
+    secp256k1's verification authority is the Wycheproof gate
+    (ecdsa_wycheproof_test); those sets are verify-only, so what this round
+    trip uniquely reaches is the secp256k1 signing path agreeing with the
+    verifier it is gated against.
     """
 
     def test_round_trip_and_a_moved_bit(self) -> None:

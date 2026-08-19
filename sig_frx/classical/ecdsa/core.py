@@ -45,7 +45,7 @@ from frx.typing import ArrayLike
 from sig_frx import context as context_rules
 from sig_frx import hashes
 from sig_frx.arrays import namespace
-from sig_frx.classical import weierstrass
+from sig_frx.classical import group, weierstrass
 from sig_frx.classical.ecdsa import rfc6979
 from sig_frx.signature import Signature
 
@@ -68,21 +68,6 @@ class MessageHash:
 
 # The FIPS 186-5 pairing both curves are deployed with.
 SHA256 = MessageHash(byte_hash=hashes.sha256, host_constructor=hashlib.sha256)
-
-
-def _bytes_below(xnp: Any, data: Any, bound: int) -> Any:
-    """Whether big-endian `[..., 32]` bytes name an integer `< bound`.
-
-    Bytewise lexicographic compare — the first differing byte decides — so the
-    order is read off the encoding, where it still exists; a field element has
-    already lost it.
-    """
-    bound_bytes = bound.to_bytes(32, "big")
-    verdict = xnp.zeros(data.shape[:-1], dtype=np.int32)
-    for i in range(32):
-        diff = xnp.sign(data[..., i].astype(np.int32) - np.int32(bound_bytes[i]))
-        verdict = xnp.where(verdict != 0, verdict, diff)
-    return verdict == -1
 
 
 def _nonzero(xnp: Any, data: Any) -> Any:
@@ -122,12 +107,7 @@ class Ecdsa:
         range is refused rather than reduced — reduction would silently map
         two seeds to one key.
         """
-        seed_bytes = np.asarray(seed, dtype=np.uint8).reshape(-1)
-        if seed_bytes.shape[0] != self.secret_key_size:
-            raise ValueError(f"a seed is {self.secret_key_size} bytes")
-        scalar = int.from_bytes(seed_bytes.tobytes(), "big")
-        if not 1 <= scalar <= self.curve.n - 1:
-            raise ValueError("the seed scalar is outside [1, n-1]")
+        seed_bytes, scalar = self._secret_scalar(seed, "seed")
         x, y = self._host_multiple_of_g(scalar)
         public = b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big")
         return (
@@ -152,13 +132,8 @@ class Ecdsa:
         """
         del randomness  # deterministic (RFC 6979); the seam documents this.
         context_rules.require_empty(context, "ECDSA")
-        secret = np.asarray(secret_key, dtype=np.uint8).reshape(-1)
-        if secret.shape[0] != self.secret_key_size:
-            raise ValueError(f"a secret key is {self.secret_key_size} bytes")
-        x = int.from_bytes(secret.tobytes(), "big")
+        _, x = self._secret_scalar(secret_key, "secret key")
         n = self.curve.n
-        if not 1 <= x <= n - 1:
-            raise ValueError("the secret scalar is outside [1, n-1]")
 
         h1 = self.hash.host_constructor(
             np.asarray(message, dtype=np.uint8).tobytes()
@@ -194,7 +169,7 @@ class Ecdsa:
         signature = xnp.asarray(signature)
 
         digest = self.hash.byte_hash(public_key, message, signature).digest(message)
-        z_bits = weierstrass.bits_of(digest)[..., :256]
+        z_bits = group.bits_of(digest)[..., :256]
 
         # SEC 1 §2.3.4: an uncompressed point is `04 ‖ X ‖ Y` with both
         # coordinates in [0, p-1], and the point must satisfy the curve
@@ -205,8 +180,8 @@ class Ecdsa:
         qy = weierstrass.field_from_bytes(curve, qy_bytes)
         key_ok = (
             (public_key[..., 0] == np.uint8(4))
-            & _bytes_below(xnp, qx_bytes, curve.p)
-            & _bytes_below(xnp, qy_bytes, curve.p)
+            & group.bytes_below(xnp, qx_bytes, curve.p, byteorder="big")
+            & group.bytes_below(xnp, qy_bytes, curve.p, byteorder="big")
             & weierstrass.on_curve(curve, qx, qy)
         )
 
@@ -215,43 +190,71 @@ class Ecdsa:
         s_bytes = signature[..., 32:64]
         range_ok = (
             _nonzero(xnp, r_bytes)
-            & _bytes_below(xnp, r_bytes, curve.n)
+            & group.bytes_below(xnp, r_bytes, curve.n, byteorder="big")
             & _nonzero(xnp, s_bytes)
-            & _bytes_below(xnp, s_bytes, curve.n)
+            & group.bytes_below(xnp, s_bytes, curve.n, byteorder="big")
         )
 
+        # The two x-candidates: x(R) mod n = r also admits x(R) = r + n,
+        # reachable only while r + n < p — a sliver of size p - n on either
+        # curve. Stacked on a leading axis so one square-root chain lifts
+        # both; a junk root (x not on the curve) fails lift_x's own square
+        # check, so an invalid candidate drops out arithmetically.
+        first_x = weierstrass.field_from_bytes(curve, r_bytes)
+        candidate_x = xnp.stack(
+            [first_x, first_x + np.array(curve.n % curve.p, dtype=curve.field)]
+        )
+        root, is_point = weierstrass.lift_x(curve, candidate_x)
+        lifted = weierstrass.from_affine(curve, candidate_x, root)
+
+        # The four scalar multiples — z·G, r·Q, s·R'₁, s·R'₂ — have no data
+        # dependencies, so they ride one stacked ladder call instead of four:
+        # same 256 steps, a quarter of the dispatches (and a quarter of the
+        # traced graph).
+        s_bits = group.bits_of(s_bytes)
+        generator = weierstrass.Point(
+            *(xnp.broadcast_to(c, first_x.shape) for c in curve.generator)
+        )
         point_q = weierstrass.from_affine(curve, qx, qy)
+        bases = weierstrass.Point(
+            *(
+                xnp.stack([g, q, lifted_coord[0], lifted_coord[1]])
+                for g, q, lifted_coord in zip(generator, point_q, lifted)
+            )
+        )
+        multiples = weierstrass.scalar_mul(
+            curve,
+            xnp.stack([z_bits, group.bits_of(r_bytes), s_bits, s_bits]),
+            bases,
+        )
         target = weierstrass.add(
             curve,
-            weierstrass.scalar_mul(curve, z_bits, curve.generator),
-            weierstrass.scalar_mul(curve, weierstrass.bits_of(r_bytes), point_q),
+            weierstrass.Point(*(c[0] for c in multiples)),
+            weierstrass.Point(*(c[1] for c in multiples)),
         )
-        s_bits = weierstrass.bits_of(s_bytes)
-
-        def candidate_matches(candidate_x: Any) -> Any:
-            rhs = (candidate_x * candidate_x + curve.coeff_a) * candidate_x + np.array(
-                curve.b % curve.p, dtype=curve.field
-            )
-            root = weierstrass.sqrt(curve, rhs)
-            # A junk root (rhs a non-residue) fails its own square check, so
-            # the candidate drops out arithmetically, not by branching.
-            is_point = root * root == rhs
-            lifted = weierstrass.from_affine(curve, candidate_x, root)
-            multiple = weierstrass.scalar_mul(curve, s_bits, lifted)
-            matches = weierstrass.equal(multiple, target) | weierstrass.equal(
-                multiple, weierstrass.negate(target)
-            )
-            return is_point & matches
-
-        first_x = weierstrass.field_from_bytes(curve, r_bytes)
-        found = candidate_matches(first_x)
-        # x(R) mod n = r also admits x(R) = r + n, reachable only while
-        # r + n < p — a sliver of size p - n on either curve.
-        wraps = _bytes_below(xnp, r_bytes, curve.p - curve.n)
-        second_x = first_x + np.array(curve.n % curve.p, dtype=curve.field)
-        found = found | (wraps & candidate_matches(second_x))
+        s_multiple = weierstrass.Point(*(c[2:] for c in multiples))
+        matches = group.equal(s_multiple, target) | group.equal(
+            s_multiple, weierstrass.negate(target)
+        )
+        found_per_candidate = is_point & matches
+        wraps = group.bytes_below(xnp, r_bytes, curve.p - curve.n, byteorder="big")
+        found = found_per_candidate[0] | (wraps & found_per_candidate[1])
 
         return key_ok & range_ok & found
+
+    def _secret_scalar(self, data: ArrayLike, role: str) -> tuple[Any, int]:
+        """The 32-byte encoding as `(bytes, scalar)`, refused outside [1, n-1].
+
+        Out-of-range is refused rather than reduced — reduction would silently
+        map two encodings to one key (SEC 1 §3.2.1's validity range).
+        """
+        raw = np.asarray(data, dtype=np.uint8).reshape(-1)
+        if raw.shape[0] != self.secret_key_size:
+            raise ValueError(f"a {role} is {self.secret_key_size} bytes")
+        scalar = int.from_bytes(raw.tobytes(), "big")
+        if not 1 <= scalar <= self.curve.n - 1:
+            raise ValueError(f"the {role} scalar is outside [1, n-1]")
+        return raw, scalar
 
     def _host_multiple_of_g(self, scalar: int) -> tuple[int, int]:
         """`scalar·G` as affine integers, on the host path.
@@ -259,14 +262,11 @@ class Ecdsa:
         The same ladder verification traces, run concretely at `B = 1` — one
         group-law implementation, per the substrate's contract.
         """
-        bits = weierstrass.bits_of(
-            np.frombuffer(scalar.to_bytes(32, "big"), dtype=np.uint8)
-        )[None, :]
-        point = weierstrass.scalar_mul(self.curve, bits, self.curve.generator)
-        x, y = weierstrass.to_affine(self.curve, point)
-        return int(np.asarray(x).astype(object)[0]), int(
-            np.asarray(y).astype(object)[0]
+        point = weierstrass.scalar_mul(
+            self.curve, group.int_bits(scalar), self.curve.generator
         )
+        ((x, y),) = group.to_affine_ints(point)
+        return x, y
 
 
 if TYPE_CHECKING:

@@ -45,8 +45,7 @@ from frx.typing import ArrayLike
 
 from sig_frx import context as context_rules
 from sig_frx.arrays import namespace
-from sig_frx.classical import edwards
-from sig_frx.classical.weierstrass import bits_of
+from sig_frx.classical import edwards, group
 from sig_frx.signature import Signature
 
 
@@ -59,29 +58,24 @@ def _clamp(data: bytes) -> int:
     return int.from_bytes(scalar, "little")
 
 
-def _le_bytes_below(xnp: Any, data: Any, bound: int) -> Any:
-    """Whether little-endian `[..., 32]` bytes name an integer `< bound`."""
-    bound_bytes = bound.to_bytes(32, "little")
-    verdict = xnp.zeros(data.shape[:-1], dtype=np.int32)
-    for i in reversed(range(32)):
-        diff = xnp.sign(data[..., i].astype(np.int32) - np.int32(bound_bytes[i]))
-        verdict = xnp.where(verdict != 0, verdict, diff)
-    return verdict == -1
-
-
 def _sha512_rows(xnp: Any, data: Any) -> Any:
-    """SHA-512 over the last axis, per batch row — host only, for now.
+    """SHA-512 over the last axis, per batch row — no device row exists yet.
 
-    The traced path needs a device SHA-512 row in hash-frx; reaching for a
-    host hash under a tracer would read tracer bytes, which cannot work, so
-    the honest behavior is to refuse loudly until the dependency exists.
+    A concrete batch — host or device — reads its bytes back and hashes
+    through `hashlib`: eager is the same code without `jit`, and reading
+    concrete bytes is exactly what a host row would do. What cannot work is a
+    *tracer*, whose bytes do not exist yet; that call needs the device
+    SHA-512 row hash-frx does not ship (fractalyze/hash-frx#66), and refuses
+    loudly rather than approximating.
     """
-    if xnp is not np:
+    del xnp
+    try:
+        rows = np.asarray(data, dtype=np.uint8)
+    except Exception as error:
         raise NotImplementedError(
             "batched Ed25519 verification under a tracer needs a device "
             "SHA-512, which hash-frx does not ship yet"
-        )
-    rows = np.asarray(data, dtype=np.uint8)
+        ) from error
     digests = [hashlib.sha512(row.tobytes()).digest() for row in rows]
     return np.frombuffer(b"".join(digests), dtype=np.uint8).reshape(
         rows.shape[:-1] + (64,)
@@ -159,7 +153,7 @@ class Ed25519:
         point_a, a_ok = edwards.decode(curve, public_key)
         point_r, r_ok = edwards.decode(curve, signature[..., :32])
         s_bytes = signature[..., 32:64]
-        s_ok = _le_bytes_below(xnp, s_bytes, curve.order)
+        s_ok = group.bytes_below(xnp, s_bytes, curve.order, byteorder="little")
 
         digest = _sha512_rows(
             xnp,
@@ -167,21 +161,18 @@ class Ed25519:
         )
         # Both scalars are little-endian integers; the ladder reads bits most
         # significant first, so the byte axis reverses on the way in.
-        k_bits = bits_of(digest[..., ::-1])
-        s_bits = bits_of(s_bytes[..., ::-1])
+        k_bits = group.bits_of(digest[..., ::-1])
+        s_bits = group.bits_of(s_bytes[..., ::-1])
 
         lhs = edwards.scalar_mul(curve, s_bits, curve.generator)
         rhs = edwards.add(curve, point_r, edwards.scalar_mul(curve, k_bits, point_a))
-        return a_ok & r_ok & s_ok & edwards.equal(lhs, rhs)
+        return a_ok & r_ok & s_ok & group.equal(lhs, rhs)
 
     def _encode_multiple_of_b(self, scalar: int) -> bytes:
         """`scalar·B` encoded per §5.1.2, on the host path."""
         curve = self.curve
-        bits = bits_of(np.frombuffer(scalar.to_bytes(32, "big"), dtype=np.uint8))[
-            None, :
-        ]
-        point = edwards.scalar_mul(curve, bits, curve.generator)
-        ((x, y),) = edwards.to_affine_ints(curve, point)
+        point = edwards.scalar_mul(curve, group.int_bits(scalar), curve.generator)
+        ((x, y),) = group.to_affine_ints(point)
         return edwards.encode_affine(x, y)
 
 

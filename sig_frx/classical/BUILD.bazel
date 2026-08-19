@@ -7,6 +7,24 @@ load("@sig_frx_pip//:requirements.bzl", "requirement")
 # before any of keygen, sign or verify exists. frx is a dependency because the
 # ladder's loop is `lax.fori_loop` under a tracer, and because the same
 # formulas run concretely on the signing path and traced on verification.
+# The curve-family-agnostic plumbing both substrates share: byte/bit
+# reshapes, the bytewise range compare, the fixed-shape ladder, and the host
+# readback. Split out when the Edwards substrate arrived as the second
+# consumer.
+py_library(
+    name = "group",
+    srcs = [
+        "__init__.py",
+        "group.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//sig_frx:arrays",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
 py_library(
     name = "weierstrass",
     srcs = [
@@ -15,6 +33,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":group",
         "//sig_frx:arrays",
         requirement("frx"),
         requirement("numpy"),
@@ -33,6 +52,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":group",
         "//sig_frx:arrays",
         requirement("frx"),
         requirement("numpy"),

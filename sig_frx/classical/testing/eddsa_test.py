@@ -4,10 +4,13 @@
 The curve constants are held to what the standard asserts of them — `d` is
 the §5.1 table's decimal, the base point satisfies the equation and has order
 `L` — and the extended-coordinate formulas to the affine rule transcribed
-into `edwards_reference`. The scheme is then pinned to §7.1's TEST 1-3: key
-pair, signature bytes, and acceptance, with the rejections derived from them.
-TEST 1 signs the empty message, which is what exercises the zero-length
-message axis end to end.
+into `edwards_reference`. §7.1's TEST 1-3 then run as KatVectors through the
+shared harness, which reproduces the key pairs, the signature bytes, and
+acceptance, and derives the tampering and batch-axis gates — TEST 1 signs
+the empty message, which is exactly the empty-input case the tampering pass
+skips per input rather than per case. What stays local is what only this
+scheme defines: the flipped sign bit, `S = L`, the non-canonical `y = p`
+encoding, and the context refusal.
 """
 
 from __future__ import annotations
@@ -17,9 +20,10 @@ import random
 import numpy as np
 from absl.testing import absltest
 
-from sig_frx.classical import edwards
+from sig_frx.classical import edwards, group
 from sig_frx.classical.eddsa import ed25519
 from sig_frx.classical.testing import edwards_reference as ref
+from sig_frx.testing import kat
 
 # RFC 8032 §5.1's table prints d as this decimal; the curve computes it from
 # the -121665/121666 the same table defines it by.
@@ -53,6 +57,23 @@ _VECTORS = (
 )
 
 
+def _kat_vectors() -> list[kat.KatVector]:
+    """§7.1's TEST 1-3 in the harness's record — the seed is the secret key."""
+    return [
+        kat.KatVector(
+            case_id=f"RFC 8032 §7.1 message {message_hex!r}",
+            parameter_set="Ed25519",
+            seed=bytes.fromhex(secret_hex),
+            public_key=bytes.fromhex(public_hex),
+            secret_key=bytes.fromhex(secret_hex),
+            message=bytes.fromhex(message_hex),
+            signature=bytes.fromhex(signature_hex),
+            deterministic=True,
+        )
+        for secret_hex, public_hex, message_hex, signature_hex in _VECTORS
+    ]
+
+
 def _bytes(hex_string: str) -> np.ndarray:
     return np.frombuffer(bytes.fromhex(hex_string), dtype=np.uint8)
 
@@ -78,11 +99,6 @@ class CurveConstantsTest(absltest.TestCase):
 
 
 class GroupLawTest(absltest.TestCase):
-    def _affine(self, point: edwards.ExtPoint) -> list[tuple[int, int]]:
-        xs = np.asarray(point.x / point.z).astype(object)
-        ys = np.asarray(point.y / point.z).astype(object)
-        return [(int(x), int(y)) for x, y in zip(xs, ys)]
-
     def test_extended_formulas_match_the_affine_rule(self) -> None:
         curve = edwards.ED25519
         rng = random.Random("edwards")
@@ -108,43 +124,19 @@ class GroupLawTest(absltest.TestCase):
             curve, lift([a for a, _ in pairs]), lift([b for _, b in pairs])
         )
         want = [ref.add(curve.p, curve.d, a, b) for a, b in pairs]
-        self.assertEqual(self._affine(got), want)
+        self.assertEqual(group.to_affine_ints(got), want)
         doubled = edwards.double(curve, lift([p for p, _ in pairs]))
         self.assertEqual(
-            self._affine(doubled),
+            group.to_affine_ints(doubled),
             [ref.add(curve.p, curve.d, p, p) for p, _ in pairs],
         )
 
 
 class Ed25519Test(absltest.TestCase):
-    def test_reproduces_the_published_key_pairs(self) -> None:
-        scheme = _scheme()
-        for secret_hex, public_hex, _, _ in _VECTORS:
-            public, secret = scheme.keygen(_bytes(secret_hex))
-            self.assertEqual(public.tobytes().hex(), public_hex)
-            self.assertEqual(secret.tobytes().hex(), secret_hex)
-
-    def test_reproduces_the_published_signatures(self) -> None:
-        scheme = _scheme()
-        for secret_hex, _, message_hex, signature_hex in _VECTORS:
-            got = scheme.sign(
-                _bytes(secret_hex),
-                _bytes(message_hex),
-                randomness=None,
-                context=None,
-            )
-            self.assertEqual(got.tobytes().hex(), signature_hex)
-
-    def test_accepts_the_published_signatures(self) -> None:
-        scheme = _scheme()
-        for _, public_hex, message_hex, signature_hex in _VECTORS:
-            verdict = scheme.verify(
-                _bytes(public_hex)[None, :],
-                _bytes(message_hex)[None, :],
-                _bytes(signature_hex)[None, :],
-                context=None,
-            )
-            self.assertTrue(bool(np.asarray(verdict)[0]), msg=public_hex)
+    def test_the_published_cases_through_the_shared_harness(self) -> None:
+        # Key pairs, signature bytes, acceptance, and the derived tampering
+        # and batch-axis gates, all off §7.1's own cases.
+        kat.check(_scheme(), _kat_vectors())
 
     def test_rejections_in_one_batch(self) -> None:
         scheme = _scheme()
@@ -163,22 +155,6 @@ class Ed25519Test(absltest.TestCase):
             context=None,
         )
         self.assertEqual(list(np.asarray(verdicts)), [True] + [False] * 4)
-
-    def test_rejects_a_tampered_message_and_key(self) -> None:
-        scheme = _scheme()
-        _, public_hex, message_hex, signature_hex = _VECTORS[1]
-        public = _bytes(public_hex)[None, :].copy()
-        message = _bytes(message_hex)[None, :].copy()
-        signature = _bytes(signature_hex)[None, :]
-        message[0, 0] ^= 1
-        self.assertFalse(
-            bool(np.asarray(scheme.verify(public, message, signature, context=None))[0])
-        )
-        message[0, 0] ^= 1
-        public[0, 0] ^= 1
-        self.assertFalse(
-            bool(np.asarray(scheme.verify(public, message, signature, context=None))[0])
-        )
 
     def test_rejects_a_non_canonical_y(self) -> None:
         # y = p encodes as p's little-endian bytes: a value the decoding must

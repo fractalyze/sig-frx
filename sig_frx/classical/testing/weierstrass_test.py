@@ -26,7 +26,7 @@ import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest, parameterized
 
-from sig_frx.classical import weierstrass
+from sig_frx.classical import group, weierstrass
 from sig_frx.classical.testing import sec1_reference as ref
 from sig_frx.classical.testing.traced_blocker import TRACED_BLOCKED as _TRACED_BLOCKED
 
@@ -74,10 +74,8 @@ def _affine(curve: weierstrass.Curve, point: weierstrass.Point) -> list:
 
 
 def _bits(k: int, width: int = 256) -> np.ndarray:
-    """`k` as big-endian bytes, through the module's own bit expansion."""
-    return weierstrass.bits_of(
-        np.frombuffer(k.to_bytes(width // 8, "big"), dtype=np.uint8)
-    )
+    """`k` as big-endian bytes, through the shared bit expansion."""
+    return group.bits_of(np.frombuffer(k.to_bytes(width // 8, "big"), dtype=np.uint8))
 
 
 class CurveConstantsTest(parameterized.TestCase):
@@ -187,14 +185,14 @@ class ScalarMulTest(parameterized.TestCase):
 class BitsTest(absltest.TestCase):
     def test_bits_of_reads_big_endian_msb_first(self) -> None:
         data = np.frombuffer(bytes([0x80, 0x01]), dtype=np.uint8)
-        got = weierstrass.bits_of(data)
+        got = group.bits_of(data)
         want = [1] + [0] * 7 + [0] * 7 + [1]
         self.assertEqual(list(got), want)
         self.assertEqual(got.shape, (16,))
 
     def test_bits_of_keeps_leading_axes(self) -> None:
         data = np.zeros((3, 2, 4), dtype=np.uint8)
-        self.assertEqual(weierstrass.bits_of(data).shape, (3, 2, 32))
+        self.assertEqual(group.bits_of(data).shape, (3, 2, 32))
 
 
 if __name__ == "__main__":
