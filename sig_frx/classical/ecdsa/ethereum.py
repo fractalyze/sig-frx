@@ -110,20 +110,19 @@ def recover_address(
     zero the address row, per the core's wire-data rule.
     """
     signature = np.asarray(signature, dtype=np.uint8)
-    half_n = weierstrass.SECP256K1.n // 2
-    ids, policy_ok = [], []
-    for value, entry in zip(np.asarray(v), signature):
+    ids, v_ok = [], []
+    for value in np.asarray(v):
         try:
             recovery_id, encoded_chain = v_decode(int(value))
         except ValueError:
             ids.append(0)
-            policy_ok.append(False)
+            v_ok.append(False)
             continue
-        low_s = int.from_bytes(entry[32:].tobytes(), "big") <= half_n
         ids.append(recovery_id)
-        policy_ok.append(low_s and (encoded_chain is None or encoded_chain == chain_id))
+        v_ok.append(encoded_chain is None or encoded_chain == chain_id)
     keys, ok = _SCHEME.recover_digest(digest, signature, np.array(ids))
-    ok = ok & np.array(policy_ok, dtype=bool)
+    low = np.asarray(core.is_low_s(_SCHEME.curve, signature))  # EIP-2
+    ok = ok & np.array(v_ok, dtype=bool) & low
     addresses = np.where(ok[..., None], address_from_key(keys), np.uint8(0))
     return addresses, ok
 

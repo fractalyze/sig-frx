@@ -85,6 +85,21 @@ def _nonzero(xnp: Any, data: Any) -> Any:
     return xnp.any(data != 0, axis=-1)
 
 
+def is_low_s(curve: weierstrass.Curve, signature: ArrayLike) -> Any:
+    """Whether each `r ‖ s` signature carries the low half of `s`: `bool[B]`.
+
+    A curve-level fact with chain-policy consumers: SEC 1 accepts both
+    halves, so the core's own verification never consults this — the
+    variants that reject the high half (their malleability rules) share the
+    predicate instead of each re-deriving `n/2`.
+    """
+    xnp = namespace(signature)
+    signature = xnp.asarray(signature)
+    return group.bytes_below(
+        xnp, signature[..., 32:64], curve.n // 2 + 1, byteorder="big"
+    )
+
+
 @dataclass(frozen=True)
 class Ecdsa:
     """ECDSA per SEC 1 over an injected curve and hash, on the `Signature` seam.
