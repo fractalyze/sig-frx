@@ -327,3 +327,67 @@ def sqrt(curve: Curve, value: ArrayLike) -> Any:
     if curve.p % 4 != 3:
         raise ValueError("sqrt shortcut requires p ≡ 3 (mod 4)")
     return group.pow_const(curve, value, (curve.p + 1) // 4)
+
+
+def lift_x_to_parity(
+    curve: Curve, x: ArrayLike, parity: ArrayLike
+) -> tuple[Point, Any]:
+    """The point at `x` whose y-representative has the asked parity, with
+    membership — `lift_x` with the ± choice made.
+
+    Host-path by construction: parity is a fact about the canonical integer
+    representative, so the root is read back and negated where it disagrees.
+    `parity` broadcasts against `x`, entries in {0, 1}. Where `x` is on no
+    point the verdict is false and the y is junk the caller's mask drops —
+    `lift_x`'s own contract. Every encoding that names a point by x plus one
+    bit (a recovery id, a compressed key, an implicit-even convention) is
+    this one operation, so the readback idiom lives here once.
+    """
+    root, on_curve = lift_x(curve, x)
+    shape = np.asarray(root).shape
+    wanted = np.broadcast_to(np.asarray(parity), shape).reshape(-1)
+    values = [
+        y if y % 2 == want else curve.p - y
+        for y, want in zip(
+            (int(v) for v in np.asarray(root).astype(object).reshape(-1)),
+            (int(w) for w in wanted),
+        )
+    ]
+    y = np.array(values, dtype=curve.field).reshape(shape)
+    return from_affine(curve, x, y), on_curve
+
+
+def generator_at(curve: Curve, batch: int) -> Point:
+    """`G` broadcast to a `[batch]` batch — the base row a stacked host
+    ladder pairs with per-entry points.
+
+    Host-path (`np` views); the traced verification path broadcasts through
+    its own namespace instead.
+    """
+    return Point(*(np.broadcast_to(c, (batch,)) for c in curve.generator))
+
+
+def host_multiple_of_g(curve: Curve, scalar: int) -> tuple[int, int]:
+    """`scalar·G` as affine Python integers, on the host path.
+
+    The same ladder verification traces, run concretely at `B = 1` — one
+    group-law implementation, per this module's contract.
+    """
+    point = scalar_mul(curve, group.int_bits(scalar), curve.generator)
+    ((x, y),) = group.to_affine_ints(point)
+    return x, y
+
+
+def secret_scalar(curve: Curve, data: ArrayLike, role: str) -> tuple[np.ndarray, int]:
+    """A 32-byte big-endian secret encoding as `(bytes, scalar)`.
+
+    Refused outside `[1, n-1]` rather than reduced — reduction would
+    silently map two encodings to one key (SEC 1 §3.2.1's validity range).
+    """
+    raw = np.asarray(data, dtype=np.uint8).reshape(-1)
+    if raw.shape[0] != 32:
+        raise ValueError(f"a {role} is 32 bytes")
+    scalar = int.from_bytes(raw.tobytes(), "big")
+    if not 1 <= scalar <= curve.n - 1:
+        raise ValueError(f"the {role} scalar is outside [1, n-1]")
+    return raw, scalar

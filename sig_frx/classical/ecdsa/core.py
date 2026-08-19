@@ -117,8 +117,8 @@ class Ecdsa:
         range is refused rather than reduced — reduction would silently map
         two seeds to one key.
         """
-        seed_bytes, scalar = self._secret_scalar(seed, "seed")
-        x, y = self._host_multiple_of_g(scalar)
+        seed_bytes, scalar = weierstrass.secret_scalar(self.curve, seed, "seed")
+        x, y = weierstrass.host_multiple_of_g(self.curve, scalar)
         public = b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big")
         return (
             np.frombuffer(public, dtype=np.uint8).copy(),
@@ -140,12 +140,10 @@ class Ecdsa:
         required empty: ECDSA's standards define none, and accepting one only
         to ignore it would verify something other than what the caller asked.
         """
-        del randomness  # deterministic (RFC 6979); the seam documents this.
-        context_rules.require_empty(context, "ECDSA")
-        _, x = self._secret_scalar(secret_key, "secret key")
-        r, s, _ = self._signature_scalars(x, message)
-        signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
-        return np.frombuffer(signature, dtype=np.uint8).copy()
+        signature, _ = self.sign_recoverable(
+            secret_key, message, randomness=randomness, context=context
+        )
+        return signature
 
     def sign_recoverable(
         self,
@@ -162,9 +160,9 @@ class Ecdsa:
         is; how it rides the wire (`v`, a header byte) is the variant's
         encoding. Same signature bytes as `sign`, by construction.
         """
-        del randomness  # deterministic (RFC 6979), as in `sign`.
+        del randomness  # deterministic (RFC 6979); the seam documents this.
         context_rules.require_empty(context, "ECDSA")
-        _, x = self._secret_scalar(secret_key, "secret key")
+        _, x = weierstrass.secret_scalar(self.curve, secret_key, "secret key")
         r, s, recovery_id = self._signature_scalars(x, message)
         signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
         return np.frombuffer(signature, dtype=np.uint8).copy(), recovery_id
@@ -184,7 +182,7 @@ class Ecdsa:
         ).digest()
         e = rfc6979.bits2int(h1, n.bit_length()) % n
         for k in rfc6979.nonces(n, x, h1, self.hash.host_constructor):
-            rx, ry = self._host_multiple_of_g(k)
+            rx, ry = weierstrass.host_multiple_of_g(self.curve, k)
             r = rx % n
             if r == 0:  # SEC 1 §4.1.3 discards the draw and takes the next
                 continue
@@ -319,15 +317,11 @@ class Ecdsa:
         if not message.shape[0] == signature.shape[0] == recovery_id.shape[0]:
             raise ValueError("the batch axes disagree")
         n = self.curve.n
-        # The host face of the hash pair, as signing uses — this is the
-        # concrete path, and the RFC 6979 KATs already bind the two faces.
+        # On host values `byte_hash` dispatches to the record's host face —
+        # the same function signing uses, already batched over the rows.
+        digest = np.asarray(self.hash.byte_hash(message).digest(message))
         digest_scalars = [
-            rfc6979.bits2int(
-                self.hash.host_constructor(entry.tobytes()).digest(),
-                n.bit_length(),
-            )
-            % n
-            for entry in message
+            rfc6979.bits2int(entry.tobytes(), n.bit_length()) % n for entry in digest
         ]
         return self._recover(digest_scalars, signature, recovery_id)
 
@@ -352,21 +346,19 @@ class Ecdsa:
         # §4.1.6's plain-integer checks: the candidate x with the wrapped
         # offset, and the range bounds. Failed entries keep an in-field dummy
         # so the batch stays rectangular; their verdict is already sealed.
-        ok, xs = [], []
+        checks, xs = [], []
         for r, s, j in zip(r_scalars, s_scalars, ids):
             x = r + (j >> 1) * n
-            ok.append(0 <= j <= 3 and 1 <= r < n and 1 <= s < n and x < p)
+            checks.append(0 <= j <= 3 and 1 <= r < n and 1 <= s < n and x < p)
             xs.append(x % p)
+        ok = np.array(checks, dtype=bool)
 
-        # R rebuilt from x through the substrate's own lift; the parity bit
-        # then picks between the root and its negation.
-        x_field = np.array(xs, dtype=curve.field)
-        root, is_point = weierstrass.lift_x(curve, x_field)
-        ok = [valid and bool(lifted) for valid, lifted in zip(ok, np.asarray(is_point))]
-        y_scalars = [
-            y if y % 2 == (j & 1) else p - y
-            for y, j in zip((int(v) for v in np.asarray(root).astype(object)), ids)
-        ]
+        # R rebuilt from x through the substrate's own lift; the id's bit 0
+        # is the parity that picks between the root and its negation.
+        point_r, is_point = weierstrass.lift_x_to_parity(
+            curve, np.array(xs, dtype=curve.field), np.array(ids) & 1
+        )
+        ok &= np.asarray(is_point)
 
         # Q = r⁻¹(sR - eG), taken as u₁G + u₂R with u₁ = -e/r, u₂ = s/r
         # (mod n): exact host arithmetic for the scalars, one stacked ladder
@@ -377,28 +369,15 @@ class Ecdsa:
             u1_scalars.append(-e * r_inverse % n)
             u2_scalars.append(s * r_inverse % n)
 
-        def bits(scalars: list[int]) -> np.ndarray:
-            return group.bits_of(
-                np.stack(
-                    [
-                        np.frombuffer(value.to_bytes(32, "big"), dtype=np.uint8)
-                        for value in scalars
-                    ]
-                )
-            )
-
         batch = len(ids)
-        generator = weierstrass.Point(
-            *(np.broadcast_to(c, (batch,)) for c in curve.generator)
-        )
-        point_r = weierstrass.from_affine(
-            curve, x_field, np.array(y_scalars, dtype=curve.field)
-        )
+        generator = weierstrass.generator_at(curve, batch)
         bases = weierstrass.Point(
             *(np.stack([g, rc]) for g, rc in zip(generator, point_r))
         )
         multiples = weierstrass.scalar_mul(
-            curve, np.stack([bits(u1_scalars), bits(u2_scalars)]), bases
+            curve,
+            np.stack([group.ints_bits(u1_scalars), group.ints_bits(u2_scalars)]),
+            bases,
         )
         public = weierstrass.add(
             curve,
@@ -409,47 +388,16 @@ class Ecdsa:
         # The identity has no encoding, so it is a rejection, not a key
         # (§4.1.6 rejects it by name). The readback divides by Z, so
         # rejected rows are steered to G first and zeroed after.
-        ok = [
-            valid and not bool(gone)
-            for valid, gone in zip(
-                ok, np.asarray(weierstrass.is_identity(curve, public))
-            )
-        ]
-        flag = np.array([int(valid) for valid in ok], dtype=curve.field)
-        readable = group.select(curve, flag, public, weierstrass.Point(*generator))
+        ok &= ~np.asarray(weierstrass.is_identity(curve, public))
+        flag = ok.astype(np.int32).astype(curve.field)
+        readable = group.select(curve, flag, public, generator)
         keys = np.zeros((batch, 65), dtype=np.uint8)
         for i, ((qx, qy), valid) in enumerate(zip(group.to_affine_ints(readable), ok)):
             if valid:
                 keys[i, 0] = 4
                 keys[i, 1:33] = np.frombuffer(qx.to_bytes(32, "big"), dtype=np.uint8)
                 keys[i, 33:] = np.frombuffer(qy.to_bytes(32, "big"), dtype=np.uint8)
-        return keys, np.array(ok, dtype=bool)
-
-    def _secret_scalar(self, data: ArrayLike, role: str) -> tuple[Any, int]:
-        """The 32-byte encoding as `(bytes, scalar)`, refused outside [1, n-1].
-
-        Out-of-range is refused rather than reduced — reduction would silently
-        map two encodings to one key (SEC 1 §3.2.1's validity range).
-        """
-        raw = np.asarray(data, dtype=np.uint8).reshape(-1)
-        if raw.shape[0] != self.secret_key_size:
-            raise ValueError(f"a {role} is {self.secret_key_size} bytes")
-        scalar = int.from_bytes(raw.tobytes(), "big")
-        if not 1 <= scalar <= self.curve.n - 1:
-            raise ValueError(f"the {role} scalar is outside [1, n-1]")
-        return raw, scalar
-
-    def _host_multiple_of_g(self, scalar: int) -> tuple[int, int]:
-        """`scalar·G` as affine integers, on the host path.
-
-        The same ladder verification traces, run concretely at `B = 1` — one
-        group-law implementation, per the substrate's contract.
-        """
-        point = weierstrass.scalar_mul(
-            self.curve, group.int_bits(scalar), self.curve.generator
-        )
-        ((x, y),) = group.to_affine_ints(point)
-        return x, y
+        return keys, ok
 
 
 if TYPE_CHECKING:
