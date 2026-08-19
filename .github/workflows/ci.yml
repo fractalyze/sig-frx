@@ -48,6 +48,7 @@ jobs:
           - backend: cpu
             runs_on: [self-hosted, cpu]
             platforms: cpu
+            targets: "//..."
             flags: >-
               --config=remote
               --tls_certificate=/etc/rbe-certs/ca.pem
@@ -58,9 +59,26 @@ jobs:
           # a green leg really did run on the device. Preallocation is off
           # because bazel runs the test actions concurrently against that one
           # device, and each process would otherwise claim most of its memory.
+          #
+          # The excluded four are every target that reaches a Keccak sponge
+          # through `vmap`. The marker survives batching with a rank its
+          # dedicated emitter's operand ABI does not admit
+          # ([fractalyze/hash-frx#174](https://github.com/fractalyze/hash-frx/issues/174)),
+          # so they abort on the device and pass everywhere else — they still
+          # run on the CPU leg above. Listing them rather than muting the leg
+          # keeps the other targets' verdict meaningful: a leg that is red for a
+          # known reason cannot report a new one. Bazel rejects a pattern naming
+          # a target that no longer exists, so this list fails loudly rather
+          # than rotting, and it goes away with #174.
           - backend: gpu
             runs_on: [self-hosted, gpu]
             platforms: cuda
+            targets: >-
+              //...
+              -//sig_frx/lattice/mldsa/testing:ml_dsa_kat_test
+              -//sig_frx/lattice/mldsa/testing:ml_dsa_test
+              -//sig_frx/lattice/mldsa/testing:sampling_test
+              -//sig_frx/testing:hashes_test
             flags: --test_env=XLA_PYTHON_CLIENT_PREALLOCATE=false
     runs-on: ${{ matrix.runs_on }}
     steps:
@@ -79,7 +97,7 @@ jobs:
           set -euo pipefail
           bazel --bazelrc=.bazelrc.ci test ${{ matrix.flags }} \
             ${{ github.event_name == 'schedule' && '--test_tag_filters=-local_only' || '' }} \
-            --test_env=FRX_PLATFORMS=${{ matrix.platforms }} -- //...
+            --test_env=FRX_PLATFORMS=${{ matrix.platforms }} -- ${{ matrix.targets }}
 
       # Capture the runner-local test.log a failed test leaves behind — the CI
       # stream only carries the FAIL summary, not the test output.
