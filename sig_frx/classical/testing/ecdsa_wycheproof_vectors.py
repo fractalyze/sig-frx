@@ -17,8 +17,12 @@ represented at a fraction of the tampering cost.
 
 from __future__ import annotations
 
+import functools
+
 from python.runfiles import Runfiles
 
+from sig_frx.classical import weierstrass
+from sig_frx.classical.ecdsa import core
 from sig_frx.testing import kat
 
 _RUNFILES = Runfiles.Create()
@@ -37,13 +41,23 @@ SETS = {
     ),
 }
 
-SIGNATURE_SIZE = 64
+# The scheme under test per curve — one home, so the slice and the sweep
+# cannot disagree about the instance the vectors gate.
+SCHEMES = {
+    "secp256k1": core.Ecdsa(weierstrass.SECP256K1, core.SHA256),
+    "secp256r1": core.Ecdsa(weierstrass.SECP256R1, core.SHA256),
+}
+
+# The split predicate is the scheme's own declared wire size — the seam field
+# consumers allocate by — not a constant that could drift from it.
+SIGNATURE_SIZE = core.Ecdsa.signature_max_size
 
 # Cases whose signature is not 64 bytes, per curve — all published failures.
 # Pinned so a regenerated set that changes the boundary trips an expectation.
 DROPPED = {"secp256k1": 18, "secp256r1": 21}
 
 
+@functools.cache
 def load(curve: str) -> tuple[list[kat.KatVector], list[kat.KatVector]]:
     """The set for `curve`, as `(runnable, dropped-by-encoding)`."""
     repo, file_name, label = SETS[curve]

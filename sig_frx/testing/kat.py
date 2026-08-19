@@ -392,11 +392,13 @@ def _corrupt_public_key(vector: KatVector) -> KatVector:
     return replace(vector, public_key=_flip_first_bit(vector.public_key))
 
 
-# The three inputs a verifier is given, each of which must be able to break it.
+# The three inputs a verifier is given, each of which must be able to break
+# it. Keyed by the KatVector attribute; a failure message spells the label as
+# the attribute with its underscore read as a space.
 _TAMPERINGS: tuple[tuple[str, Callable[[KatVector], KatVector]], ...] = (
     ("signature", _corrupt_signature),
     ("message", _corrupt_message),
-    ("public key", _corrupt_public_key),
+    ("public_key", _corrupt_public_key),
 )
 
 # The batch `_check_batch_axis` builds, and which of its entries carry a moved
@@ -742,34 +744,38 @@ def _check_batch_axis(scheme: Signature, vectors: Sequence[KatVector]) -> None:
 def _check_tampering(scheme: Signature, group: Sequence[KatVector]) -> None:
     """Every accepted case must be rejected once one of its three inputs moves.
 
-    One bit, in one entry of the batch, with the other entries' verdicts pinned:
-    a `verify` that reduced over the batch instead of deciding per entry fails
-    here rather than passing everything forever.
+    One call per input kind, with a bit moved in *every* entry that has one:
+    each tampered entry must come back rejected. Whether a verdict belongs to
+    its own entry — the reduction failure this pass used to also probe, one
+    entry at a time and at a quadratic number of calls — is `_check_batch_axis`'s
+    job, which mixes pinned and tampered entries in one batch; splitting the
+    two keeps this pass linear in the group.
+
+    An entry whose input is empty has no bit to move — Wycheproof publishes an
+    accepted case over the empty message — so it rides along untampered, and
+    its verdict is pinned to stay accepted.
     """
     if not group:
         return
     for field, corrupt in _TAMPERINGS:
-        for index in range(len(group)):
-            # An empty input has no bit to move — Wycheproof publishes an
-            # accepted case over the empty message — so that (input, case)
-            # pair is not coverage lost, it is an empty input space.
-            if not getattr(group[index], field.replace(" ", "_")):
-                continue
-            tampered = list(group)
-            tampered[index] = corrupt(group[index])
-            verdicts = _verify_batch(scheme, tampered)
-            if verdicts[index]:
+        tampered_at = [bool(getattr(v, field)) for v in group]
+        if not any(tampered_at):
+            continue
+        batch = [corrupt(v) if moved else v for v, moved in zip(group, tampered_at)]
+        for vector, moved, verdict in zip(
+            group, tampered_at, _verify_batch(scheme, batch)
+        ):
+            if moved and verdict:
                 raise KatError(
-                    f"{group[index].case_id}: accepted after a bit flip in the "
-                    f"{field}"
+                    f"{vector.case_id}: accepted after a bit flip in the "
+                    f"{field.replace('_', ' ')}"
                 )
-            for other, verdict in enumerate(verdicts):
-                if other != index and not verdict:
-                    raise KatError(
-                        f"{group[other].case_id}: rejected because a different "
-                        f"entry of the batch was tampered with — verify is not "
-                        f"deciding per entry"
-                    )
+            if not moved and not verdict:
+                raise KatError(
+                    f"{vector.case_id}: rejected while carrying the published "
+                    f"inputs, because other entries of the batch were tampered "
+                    f"with — verify is not deciding per entry"
+                )
 
 
 def _verify_batch(scheme: Signature, group: Sequence[KatVector]) -> list[bool]:
