@@ -294,6 +294,59 @@ def load_acvp(prompt_path: Path | str, expected_path: Path | str) -> list[KatVec
 # ---------------------------------------------------------------------------
 
 
+def load_wycheproof_p1363(path: Path | str, parameter_set: str) -> list[KatVector]:
+    """Normalize one Wycheproof fixed-width ECDSA verification set.
+
+    Verify-only by publication: each group carries one uncompressed public key
+    over many cases, and no case carries a seed or a secret key, so `check`'s
+    keygen and signing passes have nothing to run and the verdicts are the
+    gate. `parameter_set` is the caller's label — the file names its curve and
+    hash, but the string a failure message needs is the caller's instance.
+
+    Only the `valid` and `invalid` verdicts are accepted. Other Wycheproof
+    families publish `acceptable` for cases whose verdict is a policy choice;
+    picking a policy silently here would turn those cases into whatever the
+    implementation already does, so a third verdict is refused until someone
+    states one.
+    """
+    data = json.loads(Path(path).read_text())
+    schema = data.get("schema")
+    if schema != "ecdsa_p1363_verify_schema_v1.json":
+        raise KatError(
+            f"expected the fixed-width ECDSA verification schema, got {schema!r}; "
+            f"the DER sets gate a parser, not the seam's encoding"
+        )
+    vectors: list[KatVector] = []
+    for group in data["testGroups"]:
+        public_key = bytes.fromhex(group["publicKey"]["uncompressed"])
+        for test in group["tests"]:
+            result = test["result"]
+            if result not in ("valid", "invalid"):
+                raise KatError(
+                    f"{parameter_set} tcId {test['tcId']} publishes verdict "
+                    f"{result!r}, which is a policy choice this loader refuses "
+                    f"to make"
+                )
+            vectors.append(
+                KatVector(
+                    case_id=(
+                        f"{parameter_set} tcId {test['tcId']} ({test['comment']})"
+                    ),
+                    parameter_set=parameter_set,
+                    public_key=public_key,
+                    message=bytes.fromhex(test["msg"]),
+                    signature=bytes.fromhex(test["sig"]),
+                    valid=result == "valid",
+                )
+            )
+    if len(vectors) != data["numberOfTests"]:
+        raise KatError(
+            f"{parameter_set}: the file declares {data['numberOfTests']} cases "
+            f"and holds {len(vectors)}; the fetch or the schema drifted"
+        )
+    return vectors
+
+
 def to_bytes(value: Any) -> bytes:
     """The wire form of a key or signature, for comparison against a vector.
 
@@ -697,6 +750,11 @@ def _check_tampering(scheme: Signature, group: Sequence[KatVector]) -> None:
         return
     for field, corrupt in _TAMPERINGS:
         for index in range(len(group)):
+            # An empty input has no bit to move — Wycheproof publishes an
+            # accepted case over the empty message — so that (input, case)
+            # pair is not coverage lost, it is an empty input space.
+            if not getattr(group[index], field.replace(" ", "_")):
+                continue
             tampered = list(group)
             tampered[index] = corrupt(group[index])
             verdicts = _verify_batch(scheme, tampered)

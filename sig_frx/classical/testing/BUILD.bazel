@@ -54,6 +54,53 @@ py_test(
     ],
 )
 
+# The Wycheproof loading and the encoding-boundary split, shared by the
+# per-PR slice and the scheduled sweep so the two cannot disagree about what
+# "runnable" means.
+py_library(
+    name = "ecdsa_wycheproof_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "ecdsa_wycheproof_vectors.py",
+    ],
+    data = [
+        "@wycheproof_ecdsa_secp256k1_p1363//file",
+        "@wycheproof_ecdsa_secp256r1_p1363//file",
+    ],
+    deps = [
+        "//sig_frx/testing:kat",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_test(
+    name = "ecdsa_wycheproof_test",
+    size = "large",
+    srcs = ["ecdsa_wycheproof_test.py"],
+    deps = [
+        ":ecdsa_wycheproof_vectors",
+        "//sig_frx/classical:weierstrass",
+        "//sig_frx/classical/ecdsa:core",
+        "//sig_frx/testing:kat",
+        requirement("absl_py"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
+    name = "ecdsa_wycheproof_sweep_test",
+    size = "enormous",
+    srcs = ["ecdsa_wycheproof_sweep_test.py"],
+    tags = ["slow_kat"],
+    deps = [
+        ":ecdsa_wycheproof_vectors",
+        "//sig_frx/classical:weierstrass",
+        "//sig_frx/classical/ecdsa:core",
+        "//sig_frx/testing:kat",
+        requirement("absl_py"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 py_test(
     name = "ecdsa_test",
     size = "medium",
