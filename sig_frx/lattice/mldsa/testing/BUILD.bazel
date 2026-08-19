@@ -111,11 +111,15 @@ py_test(
     # concrete path, a per-operation dispatch is what a GPU is worst at, and the
     # size a target carries has to cover the slowest leg it runs on.
     #
-    # The timeout is raised off `large`'s 900 s because this target drives a
-    # published vector per message length, so it compiles once per distinct shape
-    # — where its siblings reuse a handful. On the leg that routes the Keccak
-    # marker each of those shapes traces a whole-hash composite, which is what
-    # puts it 4x above the sibling that signs the same parameter set.
+    # The timeout is raised off `large`'s 900 s, which this exceeds: 1343 s on the
+    # GPU leg against 56 s on CPU. That 24x is well clear of the 2.7-3.8x the
+    # other targets on this leg cost, and `eternal` is the next bucket bazel
+    # offers rather than a measured ceiling.
+    #
+    # The gap is not explained here. What is visible is that this target drives a
+    # published vector per message length where its siblings reuse a handful, so
+    # per-shape compilation is the first place to look — but it has not been
+    # profiled, and the sibling that signs the same parameter set costs 186 s.
     size = "large",
     timeout = "eternal",
     srcs = ["ml_dsa_kat_test.py"],
