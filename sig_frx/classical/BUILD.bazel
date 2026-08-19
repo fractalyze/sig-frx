@@ -1,0 +1,23 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# The short-Weierstrass curve substrate: fields minted from the curve moduli,
+# the complete projective group law, and the fixed-shape scalar ladder. Depends
+# on no hash and no scheme logic — the group law is testable against SEC 1
+# before any of keygen, sign or verify exists. frx is a dependency because the
+# ladder's loop is `lax.fori_loop` under a tracer, and because the same
+# formulas run concretely on the signing path and traced on verification.
+py_library(
+    name = "weierstrass",
+    srcs = [
+        "__init__.py",
+        "weierstrass.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//sig_frx:arrays",
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)
