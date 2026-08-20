@@ -306,7 +306,8 @@ py_test(
 # raw-bytes marker composite (hash-frx#183) roughly doubled this compile
 # (measured 215s -> 421s on one box), and the CPU leg shares its runner with
 # the KAT suite — `large`'s 900s stopped covering the slowest leg. The compile
-# cost itself is tracked upstream; shrink this back when it lands.
+# cost itself is an upstream property (fractalyze/hash-frx#197), not this
+# test's workload.
 py_test(
     name = "slh_dsa_traced_test",
     size = "large",
