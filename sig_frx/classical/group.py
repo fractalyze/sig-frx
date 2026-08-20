@@ -51,6 +51,22 @@ def int_bits(scalar: int, size: int = 32) -> np.ndarray:
     return bits_of(np.frombuffer(scalar.to_bytes(size, "big"), dtype=np.uint8))[None, :]
 
 
+def ints_bits(scalars: list[int], size: int = 32) -> np.ndarray:
+    """A batch of Python integers as `[B, 8·size]` ladder bits.
+
+    `int_bits`'s batch sibling, for the host paths that assemble per-entry
+    scalars and drive one stacked ladder with them.
+    """
+    return bits_of(
+        np.stack(
+            [
+                np.frombuffer(value.to_bytes(size, "big"), dtype=np.uint8)
+                for value in scalars
+            ]
+        )
+    )
+
+
 def bytes_below(
     xnp: Any, data: Any, bound: int, *, byteorder: Literal["little", "big"]
 ) -> Any:

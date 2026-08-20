@@ -11,6 +11,13 @@ option, the r/s range bounds, n - s accepted (malleability policy stays out
 of the core), and traced-equals-host. secp256k1's authority is the
 Wycheproof gate; its round trip here is smoke for the signing path those
 verify-only sets cannot reach.
+
+Recovery (SEC 1 §4.1.6) publishes no vectors, so its authority is
+cross-consistency (`conventions.md`): round trips against keygen's own key,
+the wrapping-x case held to verification's independent second-candidate
+branch, and the rejection set. The identity-result guard is exercised at the
+scalar seam below the message hash, because reaching it through H would take
+a preimage.
 """
 
 from __future__ import annotations
@@ -20,7 +27,7 @@ import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
 
-from sig_frx.classical import weierstrass
+from sig_frx.classical import group, weierstrass
 from sig_frx.classical.ecdsa import core
 from sig_frx.classical.testing.traced_blocker import TRACED_BLOCKED
 from sig_frx.testing import kat
@@ -211,6 +218,217 @@ class Secp256k1SmokeTest(absltest.TestCase):
             )
         )
         self.assertEqual(list(got), [True, False])
+
+
+def _curve_point_from(curve: weierstrass.Curve, start: int) -> tuple[int, int]:
+    """The first `x >= start` on the curve, with a square root of its rhs.
+
+    Host integers, because this is test-vector construction: the x >= n
+    recovery ids sit behind a ~2^-64 draw at best, so the only way to gate
+    them is to build a wrapping x directly (the issue's point — mishandling
+    them is untestable through honest signatures).
+    """
+    x = start
+    while True:
+        rhs = (pow(x, 3, curve.p) + curve.a * x + curve.b) % curve.p
+        root = pow(rhs, (curve.p + 1) // 4, curve.p)
+        if root * root % curve.p == rhs:
+            return x, root
+        x += 1
+
+
+def _non_residue_r(curve: weierstrass.Curve) -> int:
+    """The first `r >= 1` whose curve equation rhs has no square root."""
+    r = 1
+    while True:
+        rhs = (pow(r, 3, curve.p) + curve.a * r + curve.b) % curve.p
+        if rhs != 0 and pow(rhs, (curve.p - 1) // 2, curve.p) != 1:
+            return r
+        r += 1
+
+
+def _recover_rows(*signatures: bytes) -> tuple[np.ndarray, np.ndarray]:
+    """A recovery batch around b"sample": `[B, L]` messages, `[B, 64]` sigs."""
+    batch = len(signatures)
+    messages = np.broadcast_to(
+        np.frombuffer(b"sample", dtype=np.uint8), (batch, 6)
+    ).copy()
+    return messages, np.stack([np.frombuffer(s, dtype=np.uint8) for s in signatures])
+
+
+class SignRecoverableTest(absltest.TestCase):
+    def test_the_signature_matches_sign_and_the_id_is_a_parity(self) -> None:
+        scheme = _p256()
+        message = np.frombuffer(b"sample", dtype=np.uint8)
+        plain = scheme.sign(_seed(), message, randomness=None, context=None)
+        signature, recovery_id = scheme.sign_recoverable(
+            _seed(), message, randomness=None, context=None
+        )
+        self.assertEqual(signature.tobytes(), plain.tobytes())
+        # The x >= n ids sit behind a ~2^-64 draw, so an honest signature's
+        # id is a parity bit.
+        self.assertIn(recovery_id, (0, 1))
+
+    def test_rejects_a_context(self) -> None:
+        with self.assertRaises(ValueError):
+            _p256().sign_recoverable(
+                _seed(),
+                np.zeros(4, dtype=np.uint8),
+                randomness=None,
+                context=np.array([1], dtype=np.uint8),
+            )
+
+
+class RecoverTest(absltest.TestCase):
+    def test_recovers_the_published_key(self) -> None:
+        scheme = _p256()
+        for message in _VECTORS:
+            data = np.frombuffer(message, dtype=np.uint8)
+            signature, recovery_id = scheme.sign_recoverable(
+                _seed(), data, randomness=None, context=None
+            )
+            keys, ok = scheme.recover(
+                data[None], signature[None], np.array([recovery_id]), context=None
+            )
+            self.assertEqual(list(ok), [True])
+            self.assertEqual(keys[0].tobytes(), _PUBLIC)
+
+    def test_round_trips_random_keys_in_one_batch(self) -> None:
+        for curve in (weierstrass.SECP256K1, weierstrass.SECP256R1):
+            scheme = core.Ecdsa(curve, core.SHA256)
+            seeds = [
+                np.frombuffer(d.to_bytes(32, "big"), dtype=np.uint8)
+                for d in (1, 0xDEADBEEF, curve.n - 1)
+            ]
+            pairs = [scheme.keygen(seed) for seed in seeds]
+            messages = np.stack(
+                [np.frombuffer(b"message%d" % i, dtype=np.uint8) for i in range(3)]
+            )
+            signed = [
+                scheme.sign_recoverable(secret, message, randomness=None, context=None)
+                for (_, secret), message in zip(pairs, messages)
+            ]
+            keys, ok = scheme.recover(
+                messages,
+                np.stack([signature for signature, _ in signed]),
+                np.array([recovery_id for _, recovery_id in signed]),
+                context=None,
+            )
+            self.assertEqual(list(ok), [True, True, True])
+            for (public, _), got in zip(pairs, keys):
+                self.assertEqual(got.tobytes(), public.tobytes())
+
+    def test_low_s_normalization_flips_the_recovery_id(self) -> None:
+        # A.2.5's "sample" s is the high half, so the low-S instance flips it —
+        # which negates R, so the id's parity bit must flip with it, and both
+        # forms must recover the same key.
+        message = np.frombuffer(b"sample", dtype=np.uint8)
+        plain_sig, plain_id = _p256().sign_recoverable(
+            _seed(), message, randomness=None, context=None
+        )
+        low_scheme = core.Ecdsa(weierstrass.SECP256R1, core.SHA256, low_s=True)
+        low_sig, low_id = low_scheme.sign_recoverable(
+            _seed(), message, randomness=None, context=None
+        )
+        self.assertNotEqual(low_sig.tobytes(), plain_sig.tobytes())
+        self.assertEqual(low_id, plain_id ^ 1)
+        keys, ok = _p256().recover(
+            np.stack([message, message]),
+            np.stack([plain_sig, low_sig]),
+            np.array([plain_id, low_id]),
+            context=None,
+        )
+        self.assertEqual(list(ok), [True, True])
+        for got in keys:
+            self.assertEqual(got.tobytes(), _PUBLIC)
+
+    def test_a_wrapping_x_agrees_with_verification(self) -> None:
+        # A crafted r whose point sits at x = r + n: recovery must rebuild it
+        # through the second pair of ids, and verification's own r + n
+        # candidate branch — an independent implementation of the same
+        # sliver — must accept the recovered key. Gating either branch
+        # against the other is the only cross-check the ~2^-64 draw allows.
+        scheme = core.Ecdsa(weierstrass.SECP256K1, core.SHA256)
+        curve = scheme.curve
+        x, y = _curve_point_from(curve, curve.n + 1)
+        r, s = x - curve.n, 12345
+        signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        messages, signatures = _recover_rows(signature)
+        keys, ok = scheme.recover(
+            messages, signatures, np.array([2 | (y & 1)]), context=None
+        )
+        self.assertEqual(list(ok), [True])
+        verdict = scheme.verify(keys, messages, signatures, context=None)
+        self.assertEqual(list(np.asarray(verdict)), [True])
+        # The same bytes under the non-wrapping id name a different point, so
+        # they must not recover the same key.
+        other_keys, other_ok = scheme.recover(
+            messages, signatures, np.array([y & 1]), context=None
+        )
+        if other_ok[0]:
+            self.assertNotEqual(other_keys[0].tobytes(), keys[0].tobytes())
+
+    def test_rejections_in_one_batch(self) -> None:
+        scheme = _p256()
+        curve = scheme.curve
+        n = curve.n
+        good = _signature(b"sample")
+        _, good_id = scheme.sign_recoverable(
+            _seed(),
+            np.frombuffer(b"sample", dtype=np.uint8),
+            randomness=None,
+            context=None,
+        )
+        zero_r = b"\x00" * 32 + good[32:]
+        zero_s = good[:32] + b"\x00" * 32
+        r_is_n = n.to_bytes(32, "big") + good[32:]
+        s_is_n = good[:32] + n.to_bytes(32, "big")
+        # r = p - n puts the wrapped candidate at exactly x = p — out of the
+        # field, so the second-id sliver's own bound rejects it.
+        beyond_p = (curve.p - n).to_bytes(32, "big") + good[32:]
+        off_curve = _non_residue_r(curve).to_bytes(32, "big") + good[32:]
+        messages, signatures = _recover_rows(
+            good, zero_r, zero_s, r_is_n, s_is_n, good, beyond_p, off_curve
+        )
+        ids = np.array([good_id, 0, 0, 0, 0, 4, 2, 0])
+        keys, ok = scheme.recover(messages, signatures, ids, context=None)
+        self.assertEqual(
+            list(ok), [True, False, False, False, False, False, False, False]
+        )
+        # A rejected entry's key is zeroed, not a garbage point.
+        self.assertFalse(keys[1:].any())
+        self.assertEqual(keys[0].tobytes(), _PUBLIC)
+
+    def test_the_identity_result_is_rejected(self) -> None:
+        # sR = eG makes the recovered point the identity, which has no
+        # encoding. e is pinned to the digest by construction, so reaching
+        # this through `recover` would take a hash preimage — the guard is
+        # exercised at the scalar seam instead, per the docstring's rule that
+        # unreachable-in-production is not untested.
+        scheme = core.Ecdsa(weierstrass.SECP256K1, core.SHA256)
+        curve = scheme.curve
+        k, s = 7, 1234
+        point = weierstrass.scalar_mul(curve, group.int_bits(k), curve.generator)
+        ((rx, ry),) = group.to_affine_ints(point)
+        r = rx % curve.n
+        e = s * k % curve.n
+        signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        _, signatures = _recover_rows(signature)
+        keys, ok = scheme._recover(
+            [e], signatures, np.array([2 * (rx >= curve.n) + (ry & 1)])
+        )
+        self.assertEqual(list(ok), [False])
+        self.assertFalse(keys.any())
+
+    def test_rejects_a_context(self) -> None:
+        messages, signatures = _recover_rows(_signature(b"sample"))
+        with self.assertRaises(ValueError):
+            _p256().recover(
+                messages,
+                signatures,
+                np.array([0]),
+                context=np.array([1], dtype=np.uint8),
+            )
 
 
 if __name__ == "__main__":

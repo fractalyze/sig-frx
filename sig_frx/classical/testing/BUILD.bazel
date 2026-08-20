@@ -134,6 +134,7 @@ py_test(
     srcs = ["ecdsa_test.py"],
     deps = [
         ":traced_blocker",
+        "//sig_frx/classical:group",
         "//sig_frx/classical:weierstrass",
         "//sig_frx/classical/ecdsa:core",
         "//sig_frx/testing:kat",
