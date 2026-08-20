@@ -22,6 +22,8 @@ a preimage.
 
 from __future__ import annotations
 
+import hashlib
+
 import frx
 import frx.numpy as fnp
 import numpy as np
@@ -218,6 +220,41 @@ class Secp256k1SmokeTest(absltest.TestCase):
             )
         )
         self.assertEqual(list(got), [True, False])
+
+
+class DigestSurfaceTest(absltest.TestCase):
+    """The digest-level names held to the message-level seam.
+
+    When the digest is H(message) for the record's own H and the injected
+    HMAC face matches the record's, the two surfaces must be one function —
+    the only cross-check the pre-hashed variant admits without new vectors.
+    """
+
+    def test_sign_digest_recoverable_matches_the_message_path(self) -> None:
+        scheme = _p256()
+        message = np.frombuffer(b"sample", dtype=np.uint8)
+        digest = np.frombuffer(hashlib.sha256(b"sample").digest(), dtype=np.uint8)
+        want_sig, want_id = scheme.sign_recoverable(
+            _seed(), message, randomness=None, context=None
+        )
+        got_sig, got_id = scheme.sign_digest_recoverable(
+            _seed(), digest, nonce_hash=hashlib.sha256
+        )
+        self.assertEqual(got_sig.tobytes(), want_sig.tobytes())
+        self.assertEqual(got_id, want_id)
+
+    def test_recover_digest_matches_the_message_path(self) -> None:
+        scheme = _p256()
+        message = np.frombuffer(b"sample", dtype=np.uint8)
+        digest = np.frombuffer(hashlib.sha256(b"sample").digest(), dtype=np.uint8)
+        signature, recovery_id = scheme.sign_recoverable(
+            _seed(), message, randomness=None, context=None
+        )
+        keys, ok = scheme.recover_digest(
+            digest[None], signature[None], np.array([recovery_id])
+        )
+        self.assertEqual(list(ok), [True])
+        self.assertEqual(keys[0].tobytes(), _PUBLIC)
 
 
 def _curve_point_from(curve: weierstrass.Curve, start: int) -> tuple[int, int]:

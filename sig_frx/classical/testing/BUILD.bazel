@@ -143,3 +143,18 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+py_test(
+    name = "ethereum_test",
+    size = "medium",
+    srcs = ["ethereum_test.py"],
+    deps = [
+        "//sig_frx:hashes",
+        "//sig_frx/classical:weierstrass",
+        "//sig_frx/classical/ecdsa:core",
+        "//sig_frx/classical/ecdsa:ethereum",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
