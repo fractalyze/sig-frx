@@ -231,10 +231,5 @@ def decompress(public_key: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
         curve, [x % curve.p for x in x_ints], [int(entry[0]) & 1 for entry in flat]
     )
     ok = ok & on_curve
-    out = np.zeros((flat.shape[0], 65), dtype=np.uint8)
-    for i, ((_, y), valid) in enumerate(zip(secp.affine_ints(curve, points), ok)):
-        if valid:
-            out[i, 0] = 4
-            out[i, 1:33] = flat[i, 1:]
-            out[i, 33:] = np.frombuffer(y.to_bytes(32, "big"), dtype=np.uint8)
+    out = secp.uncompressed_rows(curve, points, ok)
     return out.reshape(key.shape[:-1] + (65,)), ok.reshape(key.shape[:-1])

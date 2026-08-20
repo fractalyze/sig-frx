@@ -38,10 +38,20 @@ class Ciphersuite(Protocol):
     `[0, order)`. `deserialize_element` validates per the suite (on-curve,
     canonical, not the identity) and raises `ValueError` on anything else —
     the MUST-abort conditions of §5.2 and §5.3 surface as exceptions here.
+
+    `scalar_field` is the suite's zk_dtypes field for `order`: the round
+    functions run their mod-order formula cores on it, while scalars still
+    cross this seam as integers. Its constructor and int operands abort at
+    `order` and above instead of reducing, while negative ints reduce
+    (fractalyze/zk_dtypes#179) — the seam's scalar contract and the
+    identifier checks keep every operand in range.
     """
 
     order: int
     element_size: int
+
+    @property
+    def scalar_field(self) -> Any: ...
 
     def h1(self, message: bytes) -> int: ...
 
@@ -127,6 +137,16 @@ def commit(
     )
 
 
+def _require_nonzero_scalar(cs: Ciphersuite, identifier: int) -> None:
+    """RFC 9591's identifier domain check: a NonZeroScalar, `[1, order-1]`.
+
+    Runs before an identifier meets a field op — an out-of-range int
+    operand aborts instead of reducing (see the Protocol docstring).
+    """
+    if not 1 <= identifier <= cs.order - 1:
+        raise ValueError("a participant identifier is a NonZeroScalar")
+
+
 def _validated_commitment_list(
     cs: Ciphersuite, commitment_list: list[Commitment]
 ) -> dict[int, tuple[Any, Any]]:
@@ -144,8 +164,7 @@ def _validated_commitment_list(
         )
     decoded = {}
     for entry in commitment_list:
-        if not 1 <= entry.identifier <= cs.order - 1:
-            raise ValueError("a participant identifier is a NonZeroScalar")
+        _require_nonzero_scalar(cs, entry.identifier)
         decoded[entry.identifier] = (
             cs.deserialize_element(entry.hiding),
             cs.deserialize_element(entry.binding),
@@ -157,10 +176,10 @@ def encode_group_commitment_list(
     cs: Ciphersuite, commitment_list: list[Commitment]
 ) -> bytes:
     """RFC 9591 §4.3: the byte string the binding factors hash over."""
-    encoded = b""
-    for entry in commitment_list:
-        encoded += cs.serialize_scalar(entry.identifier) + entry.hiding + entry.binding
-    return encoded
+    return b"".join(
+        cs.serialize_scalar(entry.identifier) + entry.hiding + entry.binding
+        for entry in commitment_list
+    )
 
 
 def compute_binding_factors(
@@ -216,13 +235,38 @@ def derive_interpolating_value(
         raise ValueError("the identifier is not among the participants")
     if len(set(participants)) != len(participants):
         raise ValueError("a participant appears more than once")
-    numerator, denominator = 1, 1
+    for entry in participants:
+        _require_nonzero_scalar(cs, entry)
+    field = cs.scalar_field
+    numerator, denominator = field(1), field(1)
     for other in participants:
         if other == identifier:
             continue
-        numerator = numerator * other % cs.order
-        denominator = denominator * (other - identifier) % cs.order
-    return numerator * pow(denominator, -1, cs.order) % cs.order
+        numerator = numerator * other
+        denominator = denominator * (other - identifier)
+    return int(numerator / denominator)
+
+
+def _signing_context(
+    cs: Ciphersuite,
+    commitment_list: list[Commitment],
+    group_public_key: bytes,
+    message: bytes,
+) -> tuple[dict[int, tuple[Any, Any]], dict[int, int], Any, int]:
+    """The round-two prologue all three §5 surfaces share.
+
+    Validate the list, bind, commit, challenge — one home so the surfaces
+    cannot drift on the MUST-checks; `aggregate` ignores the challenge.
+    """
+    decoded = _validated_commitment_list(cs, commitment_list)
+    binding_factors = compute_binding_factors(
+        cs, group_public_key, commitment_list, message
+    )
+    group_commitment = compute_group_commitment(cs, decoded, binding_factors)
+    challenge = compute_challenge(
+        cs, cs.serialize_element(group_commitment), group_public_key, message
+    )
+    return decoded, binding_factors, group_commitment, challenge
 
 
 def sign_share(
@@ -241,26 +285,22 @@ def sign_share(
     coordinator that swapped them would otherwise make this share sign a
     different group commitment.
     """
-    decoded = _validated_commitment_list(cs, commitment_list)
+    _, binding_factors, _, challenge = _signing_context(
+        cs, commitment_list, group_public_key, message
+    )
     own = [c for c in commitment_list if c.identifier == identifier]
     if not own or own[0] != Commitment(
         identifier, nonces.hiding_commitment, nonces.binding_commitment
     ):
         raise ValueError("this participant's round-one commitments are not in the list")
-    binding_factors = compute_binding_factors(
-        cs, group_public_key, commitment_list, message
-    )
-    group_commitment = compute_group_commitment(cs, decoded, binding_factors)
     participants = [c.identifier for c in commitment_list]
     lambda_i = derive_interpolating_value(cs, participants, identifier)
-    challenge = compute_challenge(
-        cs, cs.serialize_element(group_commitment), group_public_key, message
+    field = cs.scalar_field
+    share = int(
+        field(nonces.hiding)
+        + field(nonces.binding) * binding_factors[identifier]
+        + field(lambda_i) * secret_share * challenge
     )
-    share = (
-        nonces.hiding
-        + nonces.binding * binding_factors[identifier]
-        + lambda_i * secret_share * challenge
-    ) % cs.order
     return cs.serialize_scalar(share)
 
 
@@ -276,13 +316,12 @@ def aggregate(
     Every share deserializes first — §5.3's MUST — so a corrupt share aborts
     here; *which* share is corrupt is `verify_share`'s question.
     """
-    decoded = _validated_commitment_list(cs, commitment_list)
-    scalars = [cs.deserialize_scalar(share) for share in signature_shares]
-    binding_factors = compute_binding_factors(
-        cs, group_public_key, commitment_list, message
+    _, _, group_commitment, _ = _signing_context(
+        cs, commitment_list, group_public_key, message
     )
-    group_commitment = compute_group_commitment(cs, decoded, binding_factors)
-    z = sum(scalars) % cs.order
+    scalars = [cs.deserialize_scalar(share) for share in signature_shares]
+    field = cs.scalar_field
+    z = int(sum(field(scalar) for scalar in scalars))
     return cs.serialize_element(group_commitment) + cs.serialize_scalar(z)
 
 
@@ -290,7 +329,6 @@ def verify_share(
     cs: Ciphersuite,
     identifier: int,
     participant_public_key: bytes,
-    commitment: Commitment,
     signature_share: bytes,
     commitment_list: list[Commitment],
     group_public_key: bytes,
@@ -299,20 +337,17 @@ def verify_share(
     """RFC 9591 §5.3's `verify_signature_share`: identify a bad share.
 
     `[z_i]B = (D_i + [ρ_i]E_i) + [c·λ_i]PK_i` — false names the misbehaving
-    participant, which the aggregate signature alone cannot.
+    participant, which the aggregate signature alone cannot. The RFC's
+    `comm_i` input is the list entry under `identifier` — taking it as a
+    separate argument would let the two silently disagree.
     """
-    decoded = _validated_commitment_list(cs, commitment_list)
+    decoded, binding_factors, _, challenge = _signing_context(
+        cs, commitment_list, group_public_key, message
+    )
     share = cs.deserialize_scalar(signature_share)
-    binding_factors = compute_binding_factors(
-        cs, group_public_key, commitment_list, message
-    )
-    group_commitment = compute_group_commitment(cs, decoded, binding_factors)
-    challenge = compute_challenge(
-        cs, cs.serialize_element(group_commitment), group_public_key, message
-    )
     participants = [c.identifier for c in commitment_list]
     lambda_i = derive_interpolating_value(cs, participants, identifier)
-    hiding, binding_commitment = decoded[commitment.identifier]
+    hiding, binding_commitment = decoded[identifier]
     commitment_share = cs.element_add(
         hiding,
         cs.element_scalar_mult(binding_commitment, binding_factors[identifier]),
@@ -321,7 +356,7 @@ def verify_share(
         commitment_share,
         cs.element_scalar_mult(
             cs.deserialize_element(participant_public_key),
-            challenge * lambda_i % cs.order,
+            int(cs.scalar_field(challenge) * lambda_i),
         ),
     )
     return cs.scalar_base_mult(share) == cs.serialize_element(expected)
@@ -329,10 +364,12 @@ def verify_share(
 
 def polynomial_evaluate(cs: Ciphersuite, x: int, coefficients: list[int]) -> int:
     """RFC 9591 Appendix C.1.1: Horner evaluation over the scalar field."""
-    value = 0
+    field = cs.scalar_field
+    x_field = field(x)
+    value = field(0)
     for coefficient in reversed(coefficients):
-        value = (value * x + coefficient) % cs.order
-    return value
+        value = value * x_field + coefficient
+    return int(value)
 
 
 def secret_share_split(
@@ -368,13 +405,16 @@ def vss_verify(
     cs: Ciphersuite, identifier: int, share: int, commitment: list[bytes]
 ) -> bool:
     """RFC 9591 Appendix C.2: `[f(i)]B = Σ i^j·φ_j` — a participant's check."""
+    _require_nonzero_scalar(cs, identifier)
+    field = cs.scalar_field
+    power = field(1)
     expected = cs.identity_element()
-    for j, coefficient_commitment in enumerate(commitment):
+    for coefficient_commitment in commitment:
         expected = cs.element_add(
             expected,
             cs.element_scalar_mult(
-                cs.deserialize_element(coefficient_commitment),
-                pow(identifier, j, cs.order),
+                cs.deserialize_element(coefficient_commitment), int(power)
             ),
         )
+        power = power * identifier
     return cs.scalar_base_mult(share) == cs.serialize_element(expected)

@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import hashlib
 
+_DIGEST_SIZE = hashlib.sha256().digest_size
+_BLOCK_SIZE = hashlib.sha256().block_size
+
 
 def expand_message_xmd(message: bytes, dst: bytes, length: int) -> bytes:
     """RFC 9380 §5.3.1 over SHA-256, transcribed for a Merkle-Damgård `H`.
@@ -20,8 +23,8 @@ def expand_message_xmd(message: bytes, dst: bytes, length: int) -> bytes:
     this package ships uses it, and the parameter arrives with the first
     suite that does not.
     """
-    digest_size = hashlib.sha256().digest_size
-    block_size = hashlib.sha256().block_size
+    digest_size = _DIGEST_SIZE
+    block_size = _BLOCK_SIZE
     ell = -(-length // digest_size)
     if ell > 255 or length > 65535 or len(dst) > 255:
         raise ValueError("expand_message_xmd parameters out of range")

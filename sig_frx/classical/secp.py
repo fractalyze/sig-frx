@@ -7,10 +7,11 @@ and point × scalar as ufuncs over fused C++ kernels — so nothing in this repo
 implements curve arithmetic for these curves anymore. What this module keeps
 is exactly what the dtypes do not expose:
 
-- the integer view of the curves' constants — derived from the dtypes'
-  own metadata (`ecinfo`/`pfinfo`), not transcribed — because the schemes'
-  scalar work runs on Python integers (exact, host-only per
-  `docs/reference/security.md`);
+- the pairing that names which dtypes form one curve, with the integer
+  view of its constants derived from the dtypes' own metadata
+  (`ecinfo`/`pfinfo`) — the bounds checks, wire encodings, and readbacks
+  the standards define on integers still need them as integers (exact,
+  host-only per `docs/reference/security.md`);
 - the curve-equation membership check — the dtypes construct off-curve
   coordinates without complaint, and SEC 1's encoding rules reject them;
 - the square-root lift that names a point by x plus a parity bit, which
@@ -27,9 +28,10 @@ appears anywhere in this module.
 
 A point dtype's scalar branch turns a bare integer into `k·G`, so a
 coordinate pair must arrive as one tuple argument (`point((x, y))`), never
-as a row of ints. And constructing a scalar-field value from an integer in
-`[n, 2²⁵⁶)` aborts instead of reducing, so every scalar is reduced `% n` in
-Python before it becomes a dtype value — sound, since `k·P = (k mod n)·P`.
+as a row of ints. And a field value refuses an integer in `[n, 2²⁵⁶)` —
+construction and int *operands* in a scalar expression alike abort instead
+of reducing (fractalyze/zk_dtypes#179) — so every scalar is reduced `% n`
+in Python before it meets a dtype value; sound, since `k·P = (k mod n)·P`.
 """
 
 from __future__ import annotations
@@ -47,51 +49,56 @@ from sig_frx.classical import group
 
 @dataclass(frozen=True)
 class Curve:
-    """A short-Weierstrass curve: its integers, and its curated dtypes.
+    """A short-Weierstrass curve: four dtype handles, everything else derived.
+
+    The integers come off the dtypes' own metadata — `ecinfo` carries the
+    equation and the base point, `pfinfo` the two moduli — so the pinned
+    wheel is the single source of truth and a Curve whose integers disagree
+    with its dtypes cannot be built (`testing/secp_test.py` holds the
+    derivation against SEC 2's published parameters). The base field is
+    stated rather than derived: `ecinfo(...).base_field_dtype` returns the
+    scalar field (fractalyze/zk_dtypes#182), so deriving it would pair the
+    wrong modulus.
 
     Frozen with value equality so a scheme holding one rides pytree aux
     without re-tracing per instance (`signature.py`'s rule) — the dtype
     handles are classes, identical across instances of the same curve.
     """
 
-    p: int  # base field modulus
-    a: int  # curve coefficient a
-    b: int  # curve coefficient b
-    n: int  # order of the base point, prime
-    gx: int  # base point, affine x
-    gy: int  # base point, affine y
     point: Any  # the affine G1 dtype, standard domain
     accumulator: Any  # the jacobian G1 dtype — what sums and multiples ride
     scalar: Any  # the scalar-field dtype
     field: Any  # the base-field dtype — what the lift's arithmetic runs over
 
-    @classmethod
-    def from_dtypes(
-        cls, point: Any, accumulator: Any, scalar: Any, field: Any
-    ) -> Curve:
-        """A Curve whose integers come from the dtypes' own metadata.
+    @functools.cached_property
+    def p(self) -> int:
+        """Base field modulus."""
+        return zk_dtypes.pfinfo(self.field).modulus
 
-        The pinned wheel is the single source of truth for the constants:
-        `ecinfo` carries the equation and the base point, `pfinfo` the two
-        moduli (`testing/secp_test.py` holds them against SEC 2's published
-        parameters). The base field arrives as an argument rather than being
-        derived — `ecinfo(...).base_field_dtype` returns the scalar field
-        (fractalyze/zk_dtypes#182), so deriving it would pair the wrong
-        modulus.
-        """
-        ec = zk_dtypes.ecinfo(point)
-        return cls(
-            p=zk_dtypes.pfinfo(field).modulus,
-            a=int(ec.a),
-            b=int(ec.b),
-            n=zk_dtypes.pfinfo(scalar).modulus,
-            gx=int(ec.gx),
-            gy=int(ec.gy),
-            point=point,
-            accumulator=accumulator,
-            scalar=scalar,
-            field=field,
-        )
+    @functools.cached_property
+    def n(self) -> int:
+        """Order of the base point, prime."""
+        return zk_dtypes.pfinfo(self.scalar).modulus
+
+    @functools.cached_property
+    def a(self) -> int:
+        """Curve coefficient a."""
+        return int(zk_dtypes.ecinfo(self.point).a)
+
+    @functools.cached_property
+    def b(self) -> int:
+        """Curve coefficient b."""
+        return int(zk_dtypes.ecinfo(self.point).b)
+
+    @functools.cached_property
+    def gx(self) -> int:
+        """Base point, affine x."""
+        return int(zk_dtypes.ecinfo(self.point).gx)
+
+    @functools.cached_property
+    def gy(self) -> int:
+        """Base point, affine y."""
+        return int(zk_dtypes.ecinfo(self.point).gy)
 
     @functools.cached_property
     def one(self) -> np.ndarray:
@@ -112,7 +119,7 @@ class Curve:
 
 
 # SEC 2 §2.4.1, "Recommended Parameters secp256k1". The Koblitz curve.
-SECP256K1 = Curve.from_dtypes(
+SECP256K1 = Curve(
     point=zk_dtypes.secp256k1_g1_affine,
     accumulator=zk_dtypes.secp256k1_g1_jacobian,
     scalar=zk_dtypes.secp256k1_sf,
@@ -121,7 +128,7 @@ SECP256K1 = Curve.from_dtypes(
 
 # SEC 2 §2.4.2, "Recommended Parameters secp256r1" — NIST's P-256
 # (FIPS 186-5 §6.1.1 points at SP 800-186 §3.2.1.3 for the same values).
-SECP256R1 = Curve.from_dtypes(
+SECP256R1 = Curve(
     point=zk_dtypes.secp256r1_g1_affine,
     accumulator=zk_dtypes.secp256r1_g1_jacobian,
     scalar=zk_dtypes.secp256r1_sf,
@@ -137,6 +144,37 @@ def multiple(curve: Curve, scalars: list[int], points: ArrayLike) -> np.ndarray:
     """
     reduced = np.array([k % curve.n for k in scalars], dtype=curve.scalar)
     return points * reduced
+
+
+def double_multiple(
+    curve: Curve, g_scalars: list[int], point_scalars: list[int], points: ArrayLike
+) -> np.ndarray:
+    """`g_scalars[i]·G + point_scalars[i]·points[i]`, two batched kernels.
+
+    The two-term combination every verification equation reduces to, and
+    the one seam a fused MSM kernel would replace (fractalyze/sig-frx#139)
+    — a subtraction folds into the scalar as `n - e`.
+    """
+    points = np.asarray(points)
+    return multiple(
+        curve, g_scalars, np.broadcast_to(curve.generator, points.shape)
+    ) + multiple(curve, point_scalars, points)
+
+
+def uncompressed_rows(curve: Curve, points: ArrayLike, ok: ArrayLike) -> np.ndarray:
+    """Each point as SEC 1 `04 ‖ X ‖ Y`, masked rows zeroed: `uint8[B, 65]`.
+
+    The zeroing is the codec rule shared by every rejecting consumer: a
+    zeroed row cannot be mistaken for a key.
+    """
+    ok = np.asarray(ok)
+    rows = np.zeros((ok.shape[0], 65), dtype=np.uint8)
+    for i, ((x, y), valid) in enumerate(zip(affine_ints(curve, points), ok)):
+        if valid:
+            rows[i, 0] = 4
+            rows[i, 1:33] = np.frombuffer(x.to_bytes(32, "big"), dtype=np.uint8)
+            rows[i, 33:] = np.frombuffer(y.to_bytes(32, "big"), dtype=np.uint8)
+    return rows
 
 
 def host_multiple_of_g(curve: Curve, scalar: int) -> tuple[int, int]:
@@ -163,9 +201,24 @@ def is_identity(curve: Curve, points: ArrayLike) -> np.ndarray:
     return points == np.zeros(points.shape, dtype=points.dtype)
 
 
+def _weierstrass_rhs(curve: Curve, x_field: np.ndarray) -> np.ndarray:
+    """The curve equation's right side, `x³ + ax + b`, over the base field."""
+    return (x_field * x_field + curve.coeff_a) * x_field + curve.coeff_b
+
+
 def on_curve(curve: Curve, x: int, y: int) -> bool:
-    """Whether integer coordinates satisfy `y² = x³ + ax + b (mod p)`."""
-    return (y * y - (x * x * x + curve.a * x + curve.b)) % curve.p == 0
+    """Whether integer coordinates satisfy `y² = x³ + ax + b`, in the field.
+
+    Coordinates outside `[0, p)` are not a point encoding at all (SEC 1
+    §2.3.4 checks the range before the equation), so they answer `False`
+    here — which also keeps them away from the field constructor (the
+    second dtype gotcha above).
+    """
+    if not (0 <= x < curve.p and 0 <= y < curve.p):
+        return False
+    x_field = np.array(x, dtype=curve.field)
+    y_field = np.array(y, dtype=curve.field)
+    return bool(y_field * y_field == _weierstrass_rhs(curve, x_field))
 
 
 def sqrt(curve: Curve, value: ArrayLike) -> Any:
@@ -193,7 +246,7 @@ def lift_x_to_parity(
     check that bound where the byte order still exists).
     """
     x_field = np.array(xs, dtype=curve.field)
-    rhs = (x_field * x_field + curve.coeff_a) * x_field + curve.coeff_b
+    rhs = _weierstrass_rhs(curve, x_field)
     root = sqrt(curve, rhs)
     ok = np.asarray(root * root == rhs)
     roots = [int(v) for v in np.asarray(root).astype(object)]

@@ -8,9 +8,16 @@ encodings — rides above this module as variants.
 
 ## One host path, on the curated point types
 
-Scalar arithmetic is Python integers — the domain SEC 1 and RFC 6979 speak,
-exact, with order and bounds intact — and point arithmetic is the curve's
-zk_dtypes kernels through `secp.py`, batched across each call. Verification
+The mod-n formula cores ride the curve's scalar-field dtype — `s⁻¹` is field
+division, `u₁ = e·s⁻¹` and `u₂ = r·s⁻¹` are field products — while the
+representative facts the standards define on integers stay Python integers:
+RFC 6979's HMAC chain, the `x(R) mod n` readback, parities and low-`S`, the
+`[1, n-1]` bounds (rejected, never reduced), and the wire encodings. The
+bounds run first for a second reason: a field constructor or int operand
+outside `[0, n)` aborts instead of reducing (fractalyze/zk_dtypes#179), so
+every integer reaching a field expression is already reduced. Point
+arithmetic is the curve's zk_dtypes kernels through `secp.py`, batched
+across each call. Verification
 is the standard's own §4.1.4: `u₁ = e·s⁻¹`, `u₂ = r·s⁻¹ (mod n)`, accept iff
 `x(u₁G + u₂Q) mod n = r` — which takes the `x(R) = r + n` wrap along for
 free. An earlier reshaped, inversion-free form existed to keep mod-n
@@ -57,6 +64,28 @@ class MessageHash:
 
 # The FIPS 186-5 pairing both curves are deployed with.
 SHA256 = MessageHash(byte_hash=hashes.sha256, host_constructor=hashlib.sha256)
+
+
+def _signature_bytes(r: int, s: int) -> np.ndarray:
+    """`r ‖ s` as the 64-byte wire row both signing surfaces emit."""
+    packed = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+    return np.frombuffer(packed, dtype=np.uint8).copy()
+
+
+def _masked_quotient_pair(
+    scalar: Any, valid: bool, u1_numerator: int, u2_numerator: int, denominator: int
+) -> tuple[int, int]:
+    """The two field quotients `(a/d, b/d)` a batch row rides, as ints.
+
+    A rejected row's wire values may exceed `n`, and a field op on such an
+    operand aborts rather than reducing (fractalyze/zk_dtypes#179) — so a
+    masked row rides zero scalars on its placeholder point instead; its
+    verdict is already sealed.
+    """
+    if not valid:
+        return 0, 0
+    w = scalar(denominator) ** -1
+    return int(scalar(u1_numerator) * w), int(scalar(u2_numerator) * w)
 
 
 def is_low_s(curve: secp.Curve, signature: ArrayLike) -> np.ndarray:
@@ -154,8 +183,7 @@ class Ecdsa:
         context_rules.require_empty(context, "ECDSA")
         _, x = secp.secret_scalar(self.curve, secret_key, "secret key")
         r, s, recovery_id = self._signature_scalars(x, message)
-        signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
-        return np.frombuffer(signature, dtype=np.uint8).copy(), recovery_id
+        return _signature_bytes(r, s), recovery_id
 
     def sign_digest_recoverable(
         self,
@@ -178,8 +206,7 @@ class Ecdsa:
         _, x = secp.secret_scalar(self.curve, secret_key, "secret key")
         h1 = np.asarray(digest, dtype=np.uint8).tobytes()
         r, s, recovery_id = self._digest_signature_scalars(x, h1, nonce_hash)
-        signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
-        return np.frombuffer(signature, dtype=np.uint8).copy(), recovery_id
+        return _signature_bytes(r, s), recovery_id
 
     def _signature_scalars(self, x: int, message: ArrayLike) -> tuple[int, int, int]:
         """One RFC 6979 signature as integers, from the record's own pairing."""
@@ -200,13 +227,14 @@ class Ecdsa:
         bit flips with it — the round-trip tests hold the two together.
         """
         n = self.curve.n
+        scalar = self.curve.scalar
         e = rfc6979.bits2int(h1, n.bit_length()) % n
         for k in rfc6979.nonces(n, x, h1, nonce_hash):
             rx, ry = secp.host_multiple_of_g(self.curve, k)
             r = rx % n
             if r == 0:  # SEC 1 §4.1.3 discards the draw and takes the next
                 continue
-            s = pow(k, -1, n) * (e + r * x) % n
+            s = int((scalar(e) + scalar(r) * x) / scalar(k))
             if s == 0:
                 continue
             recovery_id = 2 * (rx >= n) + (ry & 1)
@@ -239,46 +267,44 @@ class Ecdsa:
 
         The per-entry rejections are the standard's: a key must be the
         `04 ‖ X ‖ Y` encoding of a point on the curve with in-field
-        coordinates (§2.3.4 — the dtypes construct off-curve coordinates
-        without complaint, so the check is this module's to make), and
+        coordinates (§2.3.4 — range and equation both live in
+        `secp.on_curve`, since the dtypes construct off-curve coordinates
+        without complaint), and
         `r, s` must sit in `[1, n-1]`. Rejected rows carry the generator as
         a placeholder so the batch stays rectangular; their verdict is
         already sealed.
         """
         curve = self.curve
-        p, n = curve.p, curve.n
+        n = curve.n
+        scalar = curve.scalar
         keys = np.asarray(public_key, dtype=np.uint8)
         digest = np.asarray(digest, dtype=np.uint8)
         signature = np.asarray(signature, dtype=np.uint8)
 
+        qlen = n.bit_length()
+        placeholder = curve.point((curve.gx, curve.gy))
         checks, points, u1_scalars, u2_scalars, r_scalars = [], [], [], [], []
         for key, entry, sig in zip(keys, digest, signature):
             qx = int.from_bytes(key[1:33].tobytes(), "big")
             qy = int.from_bytes(key[33:65].tobytes(), "big")
             r = int.from_bytes(sig[:32].tobytes(), "big")
             s = int.from_bytes(sig[32:64].tobytes(), "big")
-            e = rfc6979.bits2int(entry.tobytes(), n.bit_length()) % n
+            e = rfc6979.bits2int(entry.tobytes(), qlen) % n
             ok = (
                 int(key[0]) == 4
-                and qx < p
-                and qy < p
                 and secp.on_curve(curve, qx, qy)
                 and 1 <= r < n
                 and 1 <= s < n
             )
-            w = pow(s, -1, n) if ok else 1
-            u1_scalars.append(e * w % n)
-            u2_scalars.append(r * w % n)
+            u1, u2 = _masked_quotient_pair(scalar, ok, e, r, s)
+            u1_scalars.append(u1)
+            u2_scalars.append(u2)
             r_scalars.append(r)
             checks.append(ok)
-            points.append(
-                curve.point((qx, qy)) if ok else curve.point((curve.gx, curve.gy))
-            )
+            points.append(curve.point((qx, qy)) if ok else placeholder)
 
         q_points = np.array(points, dtype=curve.point)
-        big_r = secp.multiple(
-            curve, u1_scalars, np.broadcast_to(curve.generator, q_points.shape)
-        ) + secp.multiple(curve, u2_scalars, q_points)
+        big_r = secp.double_multiple(curve, u1_scalars, u2_scalars, q_points)
         gone = secp.is_identity(curve, big_r)
         verdicts = [
             ok and not bool(dead) and x % n == r
@@ -335,8 +361,9 @@ class Ecdsa:
         if not digest.shape[0] == signature.shape[0] == recovery_id.shape[0]:
             raise ValueError("the batch axes disagree")
         n = self.curve.n
+        qlen = n.bit_length()
         digest_scalars = [
-            rfc6979.bits2int(entry.tobytes(), n.bit_length()) % n for entry in digest
+            rfc6979.bits2int(entry.tobytes(), qlen) % n for entry in digest
         ]
         return self._recover(digest_scalars, signature, recovery_id)
 
@@ -374,28 +401,23 @@ class Ecdsa:
         ok &= lifted
 
         # Q = r⁻¹(sR - eG), taken as u₁G + u₂R with u₁ = -e/r, u₂ = s/r
-        # (mod n): exact host arithmetic for the scalars, the curve's kernels
-        # for the points. Invalid entries carry a dummy the mask drops.
+        # (mod n): the scalar field for the algebra, the curve's kernels for
+        # the points.
+        scalar = curve.scalar
         u1_scalars, u2_scalars = [], []
         for e, r, s, valid in zip(digest_scalars, r_scalars, s_scalars, ok):
-            r_inverse = pow(r, -1, n) if valid else 1
-            u1_scalars.append(-e * r_inverse % n)
-            u2_scalars.append(s * r_inverse % n)
+            # -e % n: the field constructor rejects a negative int outright
+            # (OverflowError), so the negation arrives already canonical.
+            u1, u2 = _masked_quotient_pair(scalar, bool(valid), -e % n, s, r)
+            u1_scalars.append(u1)
+            u2_scalars.append(u2)
 
-        public = secp.multiple(
-            curve, u1_scalars, np.broadcast_to(curve.generator, point_r.shape)
-        ) + secp.multiple(curve, u2_scalars, point_r)
+        public = secp.double_multiple(curve, u1_scalars, u2_scalars, point_r)
 
         # The identity has no encoding, so it is a rejection, not a key
         # (§4.1.6 rejects it by name).
         ok &= ~secp.is_identity(curve, public)
-        keys = np.zeros((len(ids), 65), dtype=np.uint8)
-        for i, ((qx, qy), valid) in enumerate(zip(secp.affine_ints(curve, public), ok)):
-            if valid:
-                keys[i, 0] = 4
-                keys[i, 1:33] = np.frombuffer(qx.to_bytes(32, "big"), dtype=np.uint8)
-                keys[i, 33:] = np.frombuffer(qy.to_bytes(32, "big"), dtype=np.uint8)
-        return keys, ok
+        return secp.uncompressed_rows(curve, public, ok), ok
 
 
 if TYPE_CHECKING:

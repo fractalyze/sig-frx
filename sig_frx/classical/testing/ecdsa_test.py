@@ -284,13 +284,9 @@ def _non_residue_r(curve: secp.Curve) -> int:
         r += 1
 
 
-def _recover_rows(*signatures: bytes) -> tuple[np.ndarray, np.ndarray]:
+def _recover_rows(*signatures: bytes) -> tuple:
     """A recovery batch around b"sample": `[B, L]` messages, `[B, 64]` sigs."""
-    batch = len(signatures)
-    messages = np.broadcast_to(
-        np.frombuffer(b"sample", dtype=np.uint8), (batch, 6)
-    ).copy()
-    return messages, np.stack([np.frombuffer(s, dtype=np.uint8) for s in signatures])
+    return _rows(b"sample", *signatures)[1:]
 
 
 class SignRecoverableTest(absltest.TestCase):

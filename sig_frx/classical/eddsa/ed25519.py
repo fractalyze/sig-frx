@@ -58,7 +58,7 @@ def _clamp(data: bytes) -> int:
     return int.from_bytes(scalar, "little")
 
 
-def _sha512_rows(xnp: Any, data: Any) -> Any:
+def _sha512_rows(data: Any) -> Any:
     """SHA-512 over the last axis, per batch row — no device row exists yet.
 
     A concrete batch — host or device — reads its bytes back and hashes
@@ -68,7 +68,6 @@ def _sha512_rows(xnp: Any, data: Any) -> Any:
     SHA-512 row hash-frx does not ship (fractalyze/hash-frx#66), and refuses
     loudly rather than approximating.
     """
-    del xnp
     try:
         rows = np.asarray(data, dtype=np.uint8)
     except Exception as error:
@@ -153,11 +152,10 @@ class Ed25519:
         point_a, a_ok = edwards.decode(curve, public_key)
         point_r, r_ok = edwards.decode(curve, signature[..., :32])
         s_bytes = signature[..., 32:64]
-        s_ok = group.bytes_below(xnp, s_bytes, curve.order, byteorder="little")
+        s_ok = group.bytes_below(s_bytes, curve.order, byteorder="little")
 
         digest = _sha512_rows(
-            xnp,
-            xnp.concatenate([signature[..., :32], public_key, message], axis=-1),
+            xnp.concatenate([signature[..., :32], public_key, message], axis=-1)
         )
         # Both scalars are little-endian integers; the ladder reads bits most
         # significant first, so the byte axis reverses on the way in.

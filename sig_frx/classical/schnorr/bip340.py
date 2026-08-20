@@ -123,7 +123,8 @@ class Bip340:
             )
             % n
         )
-        signature = r_bytes + ((k + e * d) % n).to_bytes(32, "big")
+        scalar = _CURVE.scalar
+        signature = r_bytes + int(scalar(k) + scalar(e) * d).to_bytes(32, "big")
         result = np.frombuffer(signature, dtype=np.uint8).copy()
         verified = self.verify(
             np.frombuffer(p_bytes, dtype=np.uint8)[None],
@@ -152,21 +153,17 @@ class Bip340:
         s_scalars = [
             int.from_bytes(entry[32:].tobytes(), "big") for entry in signatures
         ]
-        e_scalars = [
-            int.from_bytes(digest, "big") % _CURVE.n
-            for digest in self._challenge_digests(keys, messages, signatures)
-        ]
+        e_scalars = self._challenge_scalars(keys, messages, signatures)
         r_scalars = [
             int.from_bytes(entry[:32].tobytes(), "big") for entry in signatures
         ]
 
-        # R = s·G - e·P; reject the identity, an odd y, and an x mismatch —
-        # the spec's three rejections, read off the affine coordinates.
-        big_r = secp.multiple(
-            curve=_CURVE,
-            scalars=s_scalars,
-            points=np.broadcast_to(_CURVE.generator, key_points.shape),
-        ) - secp.multiple(_CURVE, e_scalars, key_points)
+        # R = s·G - e·P, the subtraction folded into the scalar as n - e;
+        # reject the identity, an odd y, and an x mismatch — the spec's
+        # three rejections, read off the affine coordinates.
+        big_r = secp.double_multiple(
+            _CURVE, s_scalars, [-e % _CURVE.n for e in e_scalars], key_points
+        )
         gone = secp.is_identity(_CURVE, big_r)
         verdicts = [
             bool(valid) and not bool(dead) and y % 2 == 0 and x == r
@@ -224,19 +221,18 @@ class Bip340:
         s_scalars = [
             int.from_bytes(entry[32:].tobytes(), "big") for entry in signatures
         ]
-        e_scalars = [
-            int.from_bytes(digest, "big")
-            for digest in self._challenge_digests(keys, messages, signatures)
-        ]
+        e_scalars = self._challenge_scalars(keys, messages, signatures)
 
-        combined = sum(a * s for a, s in zip(coefficients, s_scalars)) % n
+        scalar = _CURVE.scalar
+        field_coefficients = [scalar(a) for a in coefficients]
+        combined = int(sum(c * s for c, s in zip(field_coefficients, s_scalars)))
         lhs = secp.multiple(_CURVE, [combined], _CURVE.generator)
         terms = np.concatenate(
             [
                 secp.multiple(_CURVE, coefficients, r_points),
                 secp.multiple(
                     _CURVE,
-                    [a * e % n for a, e in zip(coefficients, e_scalars)],
+                    [int(c * e) for c, e in zip(field_coefficients, e_scalars)],
                     key_points,
                 ),
             ]
@@ -279,15 +275,23 @@ class Bip340:
         ok = np.array(checks, dtype=bool) & on_curve
         return keys, messages, signatures, ok, key_points
 
-    def _challenge_digests(
+    def _challenge_scalars(
         self, keys: np.ndarray, messages: np.ndarray, signatures: np.ndarray
-    ) -> list[bytes]:
-        """`e_i` as 32-byte tagged digests, reduced mod n by the callers."""
+    ) -> list[int]:
+        """`e_i`: each tagged challenge digest, already reduced mod n.
+
+        Reduced here rather than by the callers so no unreduced challenge
+        can reach a field op (the module gotcha in `secp.py`).
+        """
         return [
-            _tagged(
-                _CHALLENGE,
-                entry[:32].tobytes() + key.tobytes() + row.tobytes(),
+            int.from_bytes(
+                _tagged(
+                    _CHALLENGE,
+                    entry[:32].tobytes() + key.tobytes() + row.tobytes(),
+                ),
+                "big",
             )
+            % _CURVE.n
             for key, row, entry in zip(keys, messages, signatures)
         ]
 

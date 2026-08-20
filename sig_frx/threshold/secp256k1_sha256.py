@@ -35,6 +35,7 @@ class Secp256k1Sha256:
 
     order = secp.SECP256K1.n
     element_size = 33
+    scalar_field = secp.SECP256K1.scalar
 
     curve = secp.SECP256K1
 
