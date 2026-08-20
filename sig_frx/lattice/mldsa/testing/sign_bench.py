@@ -121,7 +121,7 @@ class _Timed:
 
         class _Hash:
             digest_size = hash_.digest_size
-            has_dedicated_fusion = hash_.has_dedicated_fusion
+            fusion_path = hash_.fusion_path
 
             def digest(self, msg: Any) -> Any:
                 start = time.perf_counter()
