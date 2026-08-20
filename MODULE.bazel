@@ -174,3 +174,43 @@ http_file(
     sha256 = "99c5b82abf37bdf6f7bd11c6976e4d8007d70f9953dc13566232404647865bb8",
     urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ML-DSA-sigVer-FIPS204/expectedResults.json"],
 )
+
+# ECDSA's authority is Wycheproof: RFC 6979 covers P-256 with a handful of
+# signatures and secp256k1 with none, and ACVP does not test secp256k1 at all.
+# The `p1363` variants carry the fixed-width `r ‖ s` encoding the core speaks —
+# the DER sets gate a parser this repo does not have. About a third of each set
+# is published failures, which is the half of the gate self-made vectors cannot
+# supply.
+http_file(
+    name = "wycheproof_ecdsa_secp256k1_p1363",
+    downloaded_file_path = "ecdsa_secp256k1_sha256_p1363_test.json",
+    sha256 = "7a339efc7134fb2495cd32afdbd692e0f86427d3c24e9073f6a7d858bb8788d2",
+    urls = ["https://raw.githubusercontent.com/C2SP/wycheproof/dac1dd4729fd1f8dd9e1e9f3dce51d783da6c166/testvectors_v1/ecdsa_secp256k1_sha256_p1363_test.json"],
+)
+
+http_file(
+    name = "wycheproof_ecdsa_secp256r1_p1363",
+    downloaded_file_path = "ecdsa_secp256r1_sha256_p1363_test.json",
+    sha256 = "c60de693930e386c3a5472d08081623ef8504decc54b38ac01ec6b2a2575c986",
+    urls = ["https://raw.githubusercontent.com/C2SP/wycheproof/dac1dd4729fd1f8dd9e1e9f3dce51d783da6c166/testvectors_v1/ecdsa_secp256r1_sha256_p1363_test.json"],
+)
+
+# RFC 9591's test vectors, in the machine-readable form the RFC's appendix
+# was generated from — the CFRG working group's own repository, pinned at a
+# commit. The values are the RFC's (spot-pinned in the tests against the
+# document text), with the intermediates (nonces, binding factors, signature
+# shares) the appendix also prints, which is what lets a wrong round fail as
+# itself rather than as a wrong final signature.
+http_file(
+    name = "frost_ed25519_sha512_vectors",
+    downloaded_file_path = "frost-ed25519-sha512.json",
+    sha256 = "1aa27908efa7f9388c4145059021fe71db971613bfd1f27467b1bb2da5d95c9c",
+    urls = ["https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-frost/127452b93acb3094a6f659d059550df5618c2714/poc/frost-ed25519-sha512.json"],
+)
+
+http_file(
+    name = "frost_secp256k1_sha256_vectors",
+    downloaded_file_path = "frost-secp256k1-sha256.json",
+    sha256 = "5bda3e29f8e7a0883ceaa0e4bc2f71582bbb4f04058a4657dd5aa276f32372bd",
+    urls = ["https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-frost/127452b93acb3094a6f659d059550df5618c2714/poc/frost-secp256k1-sha256.json"],
+)

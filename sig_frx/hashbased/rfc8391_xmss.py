@@ -70,6 +70,7 @@ from frx import Array
 from frx.typing import ArrayLike
 from hash_frx.sha256 import Sha256
 
+from sig_frx import context as context_rules
 from sig_frx.hashbased import rfc8391_adrs, rfc8391_wots, tree, wots
 from sig_frx.hashbased.rfc8391_hashes import Rfc8391Hashes, sha2_hashes
 from sig_frx.hashbased.rfc8391_params import (
@@ -439,7 +440,7 @@ class Xmss:
         `toByte(idx, n)` — so a signature cannot be replayed as one made at another
         leaf.
         """
-        _reject_context(context)
+        context_rules.require_empty(context, "XMSS (RFC 8391)")
         key = self._parse_secret_key(secret_key)
         if key.index >= self.signatures_per_key:
             raise ValueError(
@@ -521,7 +522,7 @@ class Xmss:
         another index climbs to a different root and is rejected — the index is not
         a hint the verifier may take on trust.
         """
-        _reject_context(context)
+        context_rules.require_empty(context, "XMSS (RFC 8391)")
         params = self.params
         keys = fnp.asarray(public_key, dtype=fnp.uint8)
         if keys.ndim != 2 or keys.shape[1] != self.public_key_size:
@@ -619,22 +620,6 @@ class Xmss:
             body.reshape(
                 signatures.shape[0], params.layers, self._layer_values, params.n
             ),
-        )
-
-
-def _reject_context(context: ArrayLike | None) -> None:
-    """RFC 8391 has no application context, so one is refused rather than ignored.
-
-    A scheme that accepted a context and dropped it would verify something other
-    than what the caller asked about, with no signal.
-    """
-    if context is None:
-        return
-    values = np.asarray(context, dtype=np.uint8).reshape(-1)
-    if values.shape[0]:
-        raise ValueError(
-            "RFC 8391 defines no application context; XMSS takes an empty one, "
-            f"got {values.shape[0]} bytes"
         )
 
 

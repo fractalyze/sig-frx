@@ -229,6 +229,7 @@ py_library(
         ":rfc8391_wots",
         ":tree",
         ":wots",
+        "//sig_frx:context",
         "@hash_frx//hash_frx:sha256",
         requirement("frx"),
         requirement("numpy"),

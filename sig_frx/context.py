@@ -27,6 +27,20 @@ from frx.typing import ArrayLike
 MAX_SIZE = 255
 
 
+def require_empty(context: ArrayLike | None, scheme: str) -> None:
+    """Refuse a context for a scheme whose standard defines none.
+
+    The seam's rule: accepting a context only to ignore it would verify
+    something other than what the caller asked about, so empty is the only
+    honest value (`signature.py`). Shared because every classical scheme
+    enforces the same sentence.
+    """
+    if context is None:
+        return
+    if np.asarray(context).size != 0:
+        raise ValueError(f"{scheme} defines no application context; pass None or empty")
+
+
 def prefix(domain: int, context: ArrayLike | None) -> np.ndarray:
     """`toByte(domain, 1) ‖ toByte(|ctx|, 1) ‖ ctx`, `None` meaning empty.
 

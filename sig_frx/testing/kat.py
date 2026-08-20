@@ -294,6 +294,59 @@ def load_acvp(prompt_path: Path | str, expected_path: Path | str) -> list[KatVec
 # ---------------------------------------------------------------------------
 
 
+def load_wycheproof_p1363(path: Path | str, parameter_set: str) -> list[KatVector]:
+    """Normalize one Wycheproof fixed-width ECDSA verification set.
+
+    Verify-only by publication: each group carries one uncompressed public key
+    over many cases, and no case carries a seed or a secret key, so `check`'s
+    keygen and signing passes have nothing to run and the verdicts are the
+    gate. `parameter_set` is the caller's label — the file names its curve and
+    hash, but the string a failure message needs is the caller's instance.
+
+    Only the `valid` and `invalid` verdicts are accepted. Other Wycheproof
+    families publish `acceptable` for cases whose verdict is a policy choice;
+    picking a policy silently here would turn those cases into whatever the
+    implementation already does, so a third verdict is refused until someone
+    states one.
+    """
+    data = json.loads(Path(path).read_text())
+    schema = data.get("schema")
+    if schema != "ecdsa_p1363_verify_schema_v1.json":
+        raise KatError(
+            f"expected the fixed-width ECDSA verification schema, got {schema!r}; "
+            f"the DER sets gate a parser, not the seam's encoding"
+        )
+    vectors: list[KatVector] = []
+    for group in data["testGroups"]:
+        public_key = bytes.fromhex(group["publicKey"]["uncompressed"])
+        for test in group["tests"]:
+            result = test["result"]
+            if result not in ("valid", "invalid"):
+                raise KatError(
+                    f"{parameter_set} tcId {test['tcId']} publishes verdict "
+                    f"{result!r}, which is a policy choice this loader refuses "
+                    f"to make"
+                )
+            vectors.append(
+                KatVector(
+                    case_id=(
+                        f"{parameter_set} tcId {test['tcId']} ({test['comment']})"
+                    ),
+                    parameter_set=parameter_set,
+                    public_key=public_key,
+                    message=bytes.fromhex(test["msg"]),
+                    signature=bytes.fromhex(test["sig"]),
+                    valid=result == "valid",
+                )
+            )
+    if len(vectors) != data["numberOfTests"]:
+        raise KatError(
+            f"{parameter_set}: the file declares {data['numberOfTests']} cases "
+            f"and holds {len(vectors)}; the fetch or the schema drifted"
+        )
+    return vectors
+
+
 def to_bytes(value: Any) -> bytes:
     """The wire form of a key or signature, for comparison against a vector.
 
@@ -339,11 +392,13 @@ def _corrupt_public_key(vector: KatVector) -> KatVector:
     return replace(vector, public_key=_flip_first_bit(vector.public_key))
 
 
-# The three inputs a verifier is given, each of which must be able to break it.
+# The three inputs a verifier is given, each of which must be able to break
+# it. Keyed by the KatVector attribute; a failure message spells the label as
+# the attribute with its underscore read as a space.
 _TAMPERINGS: tuple[tuple[str, Callable[[KatVector], KatVector]], ...] = (
     ("signature", _corrupt_signature),
     ("message", _corrupt_message),
-    ("public key", _corrupt_public_key),
+    ("public_key", _corrupt_public_key),
 )
 
 # The batch `_check_batch_axis` builds, and which of its entries carry a moved
@@ -689,29 +744,38 @@ def _check_batch_axis(scheme: Signature, vectors: Sequence[KatVector]) -> None:
 def _check_tampering(scheme: Signature, group: Sequence[KatVector]) -> None:
     """Every accepted case must be rejected once one of its three inputs moves.
 
-    One bit, in one entry of the batch, with the other entries' verdicts pinned:
-    a `verify` that reduced over the batch instead of deciding per entry fails
-    here rather than passing everything forever.
+    One call per input kind, with a bit moved in *every* entry that has one:
+    each tampered entry must come back rejected. Whether a verdict belongs to
+    its own entry — the reduction failure this pass used to also probe, one
+    entry at a time and at a quadratic number of calls — is `_check_batch_axis`'s
+    job, which mixes pinned and tampered entries in one batch; splitting the
+    two keeps this pass linear in the group.
+
+    An entry whose input is empty has no bit to move — Wycheproof publishes an
+    accepted case over the empty message — so it rides along untampered, and
+    its verdict is pinned to stay accepted.
     """
     if not group:
         return
     for field, corrupt in _TAMPERINGS:
-        for index in range(len(group)):
-            tampered = list(group)
-            tampered[index] = corrupt(group[index])
-            verdicts = _verify_batch(scheme, tampered)
-            if verdicts[index]:
+        tampered_at = [bool(getattr(v, field)) for v in group]
+        if not any(tampered_at):
+            continue
+        batch = [corrupt(v) if moved else v for v, moved in zip(group, tampered_at)]
+        for vector, moved, verdict in zip(
+            group, tampered_at, _verify_batch(scheme, batch)
+        ):
+            if moved and verdict:
                 raise KatError(
-                    f"{group[index].case_id}: accepted after a bit flip in the "
-                    f"{field}"
+                    f"{vector.case_id}: accepted after a bit flip in the "
+                    f"{field.replace('_', ' ')}"
                 )
-            for other, verdict in enumerate(verdicts):
-                if other != index and not verdict:
-                    raise KatError(
-                        f"{group[other].case_id}: rejected because a different "
-                        f"entry of the batch was tampered with — verify is not "
-                        f"deciding per entry"
-                    )
+            if not moved and not verdict:
+                raise KatError(
+                    f"{vector.case_id}: rejected while carrying the published "
+                    f"inputs, because other entries of the batch were tampered "
+                    f"with — verify is not deciding per entry"
+                )
 
 
 def _verify_batch(scheme: Signature, group: Sequence[KatVector]) -> list[bool]:
