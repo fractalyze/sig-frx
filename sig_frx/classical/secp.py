@@ -7,9 +7,10 @@ and point × scalar as ufuncs over fused C++ kernels — so nothing in this repo
 implements curve arithmetic for these curves anymore. What this module keeps
 is exactly what the dtypes do not expose:
 
-- the curves' integer constants, because the schemes' scalar work runs on
-  Python integers (exact, host-only per `docs/reference/security.md`) and a
-  dtype has no `.n` to read;
+- the integer view of the curves' constants — derived from the dtypes'
+  own metadata (`ecinfo`/`pfinfo`), not transcribed — because the schemes'
+  scalar work runs on Python integers (exact, host-only per
+  `docs/reference/security.md`);
 - the curve-equation membership check — the dtypes construct off-curve
   coordinates without complaint, and SEC 1's encoding rules reject them;
 - the square-root lift that names a point by x plus a parity bit, which
@@ -64,6 +65,34 @@ class Curve:
     scalar: Any  # the scalar-field dtype
     field: Any  # the base-field dtype — what the lift's arithmetic runs over
 
+    @classmethod
+    def from_dtypes(
+        cls, point: Any, accumulator: Any, scalar: Any, field: Any
+    ) -> Curve:
+        """A Curve whose integers come from the dtypes' own metadata.
+
+        The pinned wheel is the single source of truth for the constants:
+        `ecinfo` carries the equation and the base point, `pfinfo` the two
+        moduli (`testing/secp_test.py` holds them against SEC 2's published
+        parameters). The base field arrives as an argument rather than being
+        derived — `ecinfo(...).base_field_dtype` returns the scalar field
+        (fractalyze/zk_dtypes#182), so deriving it would pair the wrong
+        modulus.
+        """
+        ec = zk_dtypes.ecinfo(point)
+        return cls(
+            p=zk_dtypes.pfinfo(field).modulus,
+            a=int(ec.a),
+            b=int(ec.b),
+            n=zk_dtypes.pfinfo(scalar).modulus,
+            gx=int(ec.gx),
+            gy=int(ec.gy),
+            point=point,
+            accumulator=accumulator,
+            scalar=scalar,
+            field=field,
+        )
+
     @functools.cached_property
     def one(self) -> np.ndarray:
         return np.array(1, dtype=self.field)
@@ -83,13 +112,7 @@ class Curve:
 
 
 # SEC 2 §2.4.1, "Recommended Parameters secp256k1". The Koblitz curve.
-SECP256K1 = Curve(
-    p=0xFFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_FFFFFC2F,
-    a=0,
-    b=7,
-    n=0xFFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_BAAEDCE6_AF48A03B_BFD25E8C_D0364141,
-    gx=0x79BE667E_F9DCBBAC_55A06295_CE870B07_029BFCDB_2DCE28D9_59F2815B_16F81798,
-    gy=0x483ADA77_26A3C465_5DA4FBFC_0E1108A8_FD17B448_A6855419_9C47D08F_FB10D4B8,
+SECP256K1 = Curve.from_dtypes(
     point=zk_dtypes.secp256k1_g1_affine,
     accumulator=zk_dtypes.secp256k1_g1_jacobian,
     scalar=zk_dtypes.secp256k1_sf,
@@ -98,13 +121,7 @@ SECP256K1 = Curve(
 
 # SEC 2 §2.4.2, "Recommended Parameters secp256r1" — NIST's P-256
 # (FIPS 186-5 §6.1.1 points at SP 800-186 §3.2.1.3 for the same values).
-SECP256R1 = Curve(
-    p=0xFFFFFFFF_00000001_00000000_00000000_00000000_FFFFFFFF_FFFFFFFF_FFFFFFFF,
-    a=0xFFFFFFFF_00000001_00000000_00000000_00000000_FFFFFFFF_FFFFFFFF_FFFFFFFC,
-    b=0x5AC635D8_AA3A93E7_B3EBBD55_769886BC_651D06B0_CC53B0F6_3BCE3C3E_27D2604B,
-    n=0xFFFFFFFF_00000000_FFFFFFFF_FFFFFFFF_BCE6FAAD_A7179E84_F3B9CAC2_FC632551,
-    gx=0x6B17D1F2_E12C4247_F8BCE6E5_63A440F2_77037D81_2DEB33A0_F4A13945_D898C296,
-    gy=0x4FE342E2_FE1A7F9B_8EE7EB4A_7C0F9E16_2BCE3357_6B315ECE_CBB64068_37BF51F5,
+SECP256R1 = Curve.from_dtypes(
     point=zk_dtypes.secp256r1_g1_affine,
     accumulator=zk_dtypes.secp256r1_g1_jacobian,
     scalar=zk_dtypes.secp256r1_sf,
