@@ -27,9 +27,10 @@ appears anywhere in this module.
 
 A point dtype's scalar branch turns a bare integer into `k·G`, so a
 coordinate pair must arrive as one tuple argument (`point((x, y))`), never
-as a row of ints. And constructing a scalar-field value from an integer in
-`[n, 2²⁵⁶)` aborts instead of reducing, so every scalar is reduced `% n` in
-Python before it becomes a dtype value — sound, since `k·P = (k mod n)·P`.
+as a row of ints. And a field value refuses an integer in `[n, 2²⁵⁶)` —
+construction and int *operands* in a scalar expression alike abort instead
+of reducing (fractalyze/zk_dtypes#179) — so every scalar is reduced `% n`
+in Python before it meets a dtype value; sound, since `k·P = (k mod n)·P`.
 """
 
 from __future__ import annotations
@@ -164,8 +165,18 @@ def is_identity(curve: Curve, points: ArrayLike) -> np.ndarray:
 
 
 def on_curve(curve: Curve, x: int, y: int) -> bool:
-    """Whether integer coordinates satisfy `y² = x³ + ax + b (mod p)`."""
-    return (y * y - (x * x * x + curve.a * x + curve.b)) % curve.p == 0
+    """Whether integer coordinates satisfy `y² = x³ + ax + b`, in the field.
+
+    Coordinates outside `[0, p)` are not a point encoding at all (SEC 1
+    §2.3.4 checks the range before the equation), so they answer `False`
+    here — which also keeps them away from the field constructor, which
+    aborts on out-of-range input rather than reducing
+    (fractalyze/zk_dtypes#179).
+    """
+    if not (0 <= x < curve.p and 0 <= y < curve.p):
+        return False
+    field = curve.field
+    return bool(field(y) * y == (field(x) * x + curve.a) * x + curve.b)
 
 
 def sqrt(curve: Curve, value: ArrayLike) -> Any:

@@ -27,6 +27,7 @@ py_library(
         "//sig_frx/classical:edwards",
         "//sig_frx/classical:group",
         requirement("numpy"),
+        requirement("zk_dtypes"),
     ],
 )
 

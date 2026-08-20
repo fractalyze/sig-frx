@@ -121,6 +121,25 @@ class FrostTest(parameterized.TestCase):
         self.assertFalse(frost.vss_verify(v.cs, 1, v.shares[1] + 1, commitment))
 
     @parameterized.named_parameters(*_PARAMS)
+    def test_interpolation_refuses_an_out_of_range_identifier(self, name: str) -> None:
+        # The Lagrange core runs on the scalar field, whose ops abort on an
+        # operand outside [0, order) (fractalyze/zk_dtypes#179) — the
+        # NonZeroScalar guard surfaces the module's ValueError instead.
+        v = _Vectors(name)
+        with self.assertRaises(ValueError):
+            frost.derive_interpolating_value(v.cs, [1, v.cs.order], v.cs.order)
+        with self.assertRaises(ValueError):
+            frost.derive_interpolating_value(v.cs, [0, 2], 0)
+
+    @parameterized.named_parameters(*_PARAMS)
+    def test_vss_verify_refuses_an_out_of_range_identifier(self, name: str) -> None:
+        v = _Vectors(name)
+        commitment = frost.vss_commit(v.cs, v.secret, v.coefficients)
+        for identifier in (0, v.cs.order):
+            with self.assertRaises(ValueError):
+                frost.vss_verify(v.cs, identifier, v.shares[1], commitment)
+
+    @parameterized.named_parameters(*_PARAMS)
     def test_round_one_reproduces_nonces_and_commitments(self, name: str) -> None:
         v = _Vectors(name)
         for identifier, entry in v.round_one.items():

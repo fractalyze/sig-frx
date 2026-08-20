@@ -123,7 +123,8 @@ class Bip340:
             )
             % n
         )
-        signature = r_bytes + ((k + e * d) % n).to_bytes(32, "big")
+        scalar = _CURVE.scalar
+        signature = r_bytes + int(scalar(k) + scalar(e) * d).to_bytes(32, "big")
         result = np.frombuffer(signature, dtype=np.uint8).copy()
         verified = self.verify(
             np.frombuffer(p_bytes, dtype=np.uint8)[None],
@@ -229,14 +230,15 @@ class Bip340:
             for digest in self._challenge_digests(keys, messages, signatures)
         ]
 
-        combined = sum(a * s for a, s in zip(coefficients, s_scalars)) % n
+        scalar = _CURVE.scalar
+        combined = int(sum(scalar(a) * s for a, s in zip(coefficients, s_scalars)))
         lhs = secp.multiple(_CURVE, [combined], _CURVE.generator)
         terms = np.concatenate(
             [
                 secp.multiple(_CURVE, coefficients, r_points),
                 secp.multiple(
                     _CURVE,
-                    [a * e % n for a, e in zip(coefficients, e_scalars)],
+                    [int(scalar(a) * e) for a, e in zip(coefficients, e_scalars)],
                     key_points,
                 ),
             ]

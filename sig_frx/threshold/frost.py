@@ -38,10 +38,17 @@ class Ciphersuite(Protocol):
     `[0, order)`. `deserialize_element` validates per the suite (on-curve,
     canonical, not the identity) and raises `ValueError` on anything else —
     the MUST-abort conditions of §5.2 and §5.3 surface as exceptions here.
+
+    `scalar_field` is the suite's zk_dtypes field for `order`: the round
+    functions run their mod-order formula cores on it, while scalars still
+    cross this seam as integers. Its constructor and int operands abort
+    outside `[0, order)` instead of reducing (fractalyze/zk_dtypes#179) —
+    guaranteed here by the seam's scalar contract and the identifier checks.
     """
 
     order: int
     element_size: int
+    scalar_field: Any
 
     def h1(self, message: bytes) -> int: ...
 
@@ -216,13 +223,16 @@ def derive_interpolating_value(
         raise ValueError("the identifier is not among the participants")
     if len(set(participants)) != len(participants):
         raise ValueError("a participant appears more than once")
-    numerator, denominator = 1, 1
+    if any(not 1 <= entry <= cs.order - 1 for entry in participants):
+        raise ValueError("a participant identifier is a NonZeroScalar")
+    field = cs.scalar_field
+    numerator, denominator = field(1), field(1)
     for other in participants:
         if other == identifier:
             continue
-        numerator = numerator * other % cs.order
-        denominator = denominator * (other - identifier) % cs.order
-    return numerator * pow(denominator, -1, cs.order) % cs.order
+        numerator = numerator * other
+        denominator = denominator * (other - identifier)
+    return int(numerator / denominator)
 
 
 def sign_share(
@@ -256,11 +266,12 @@ def sign_share(
     challenge = compute_challenge(
         cs, cs.serialize_element(group_commitment), group_public_key, message
     )
-    share = (
-        nonces.hiding
-        + nonces.binding * binding_factors[identifier]
-        + lambda_i * secret_share * challenge
-    ) % cs.order
+    field = cs.scalar_field
+    share = int(
+        field(nonces.hiding)
+        + field(nonces.binding) * binding_factors[identifier]
+        + field(lambda_i) * secret_share * challenge
+    )
     return cs.serialize_scalar(share)
 
 
@@ -282,7 +293,8 @@ def aggregate(
         cs, group_public_key, commitment_list, message
     )
     group_commitment = compute_group_commitment(cs, decoded, binding_factors)
-    z = sum(scalars) % cs.order
+    field = cs.scalar_field
+    z = int(sum(field(scalar) for scalar in scalars))
     return cs.serialize_element(group_commitment) + cs.serialize_scalar(z)
 
 
@@ -321,7 +333,7 @@ def verify_share(
         commitment_share,
         cs.element_scalar_mult(
             cs.deserialize_element(participant_public_key),
-            challenge * lambda_i % cs.order,
+            int(cs.scalar_field(challenge) * lambda_i),
         ),
     )
     return cs.scalar_base_mult(share) == cs.serialize_element(expected)
@@ -329,10 +341,11 @@ def verify_share(
 
 def polynomial_evaluate(cs: Ciphersuite, x: int, coefficients: list[int]) -> int:
     """RFC 9591 Appendix C.1.1: Horner evaluation over the scalar field."""
-    value = 0
+    field = cs.scalar_field
+    value = field(0)
     for coefficient in reversed(coefficients):
-        value = (value * x + coefficient) % cs.order
-    return value
+        value = value * x + coefficient
+    return int(value)
 
 
 def secret_share_split(
@@ -368,13 +381,16 @@ def vss_verify(
     cs: Ciphersuite, identifier: int, share: int, commitment: list[bytes]
 ) -> bool:
     """RFC 9591 Appendix C.2: `[f(i)]B = Σ i^j·φ_j` — a participant's check."""
+    if not 1 <= identifier <= cs.order - 1:
+        raise ValueError("a participant identifier is a NonZeroScalar")
+    field = cs.scalar_field
     expected = cs.identity_element()
     for j, coefficient_commitment in enumerate(commitment):
         expected = cs.element_add(
             expected,
             cs.element_scalar_mult(
                 cs.deserialize_element(coefficient_commitment),
-                pow(identifier, j, cs.order),
+                int(field(identifier) ** j),
             ),
         )
     return cs.scalar_base_mult(share) == cs.serialize_element(expected)
