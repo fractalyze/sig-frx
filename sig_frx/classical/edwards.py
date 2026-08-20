@@ -72,6 +72,16 @@ class EdwardsCurve:
         return zk_dtypes.prime_field(self.p, storage="std", curated=False)
 
     @functools.cached_property
+    def scalar_field(self) -> Any:
+        """The mod-`L` scalar field, as a constructible dtype class.
+
+        Unlike `field` above this one takes the factory's curated resolution:
+        it is host-only (FROST's round scalars), so the frx-under-trace
+        hazard behind `field`'s opt-out (zk_dtypes#178) cannot reach it.
+        """
+        return zk_dtypes.prime_field(self.order).type
+
+    @functools.cached_property
     def d_field(self) -> np.ndarray:
         """`d` as a field scalar — what §5.1.3's decoding evaluates with."""
         return np.array(self.d % self.p, dtype=self.field)

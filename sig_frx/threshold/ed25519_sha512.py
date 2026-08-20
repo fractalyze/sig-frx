@@ -18,10 +18,9 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import zk_dtypes
 
 from sig_frx.classical import edwards, group
 from sig_frx.threshold import frost
@@ -40,13 +39,14 @@ class Ed25519Sha512:
 
     order = edwards.ED25519.order
     element_size = 32
-    # Minted from the order rather than read off a curve handle — the Edwards
-    # substrate carries no scalar-field dtype. Host-only use, so the factory's
-    # curated resolution of curve25519 moduli is safe here; it is a hazard
-    # only under an frx trace (fractalyze/zk_dtypes#178).
-    scalar_field = np.dtype(zk_dtypes.prime_field(edwards.ED25519.order)).type
 
     curve = edwards.ED25519
+
+    @property
+    def scalar_field(self) -> Any:
+        # A property so the curve's lazy mint stays lazy — a class attribute
+        # would resolve it at import time.
+        return edwards.ED25519.scalar_field
 
     def h1(self, message: bytes) -> int:
         return _reduced(

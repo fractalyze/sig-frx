@@ -41,14 +41,17 @@ class Ciphersuite(Protocol):
 
     `scalar_field` is the suite's zk_dtypes field for `order`: the round
     functions run their mod-order formula cores on it, while scalars still
-    cross this seam as integers. Its constructor and int operands abort
-    outside `[0, order)` instead of reducing (fractalyze/zk_dtypes#179) —
-    guaranteed here by the seam's scalar contract and the identifier checks.
+    cross this seam as integers. Its constructor and int operands abort at
+    `order` and above instead of reducing, while negative ints reduce
+    (fractalyze/zk_dtypes#179) — the seam's scalar contract and the
+    identifier checks keep every operand in range.
     """
 
     order: int
     element_size: int
-    scalar_field: Any
+
+    @property
+    def scalar_field(self) -> Any: ...
 
     def h1(self, message: bytes) -> int: ...
 
@@ -134,6 +137,16 @@ def commit(
     )
 
 
+def _require_nonzero_scalar(cs: Ciphersuite, identifier: int) -> None:
+    """RFC 9591's identifier domain check: a NonZeroScalar, `[1, order-1]`.
+
+    Runs before an identifier meets a field op — an out-of-range int
+    operand aborts instead of reducing (see the Protocol docstring).
+    """
+    if not 1 <= identifier <= cs.order - 1:
+        raise ValueError("a participant identifier is a NonZeroScalar")
+
+
 def _validated_commitment_list(
     cs: Ciphersuite, commitment_list: list[Commitment]
 ) -> dict[int, tuple[Any, Any]]:
@@ -151,8 +164,7 @@ def _validated_commitment_list(
         )
     decoded = {}
     for entry in commitment_list:
-        if not 1 <= entry.identifier <= cs.order - 1:
-            raise ValueError("a participant identifier is a NonZeroScalar")
+        _require_nonzero_scalar(cs, entry.identifier)
         decoded[entry.identifier] = (
             cs.deserialize_element(entry.hiding),
             cs.deserialize_element(entry.binding),
@@ -223,8 +235,8 @@ def derive_interpolating_value(
         raise ValueError("the identifier is not among the participants")
     if len(set(participants)) != len(participants):
         raise ValueError("a participant appears more than once")
-    if any(not 1 <= entry <= cs.order - 1 for entry in participants):
-        raise ValueError("a participant identifier is a NonZeroScalar")
+    for entry in participants:
+        _require_nonzero_scalar(cs, entry)
     field = cs.scalar_field
     numerator, denominator = field(1), field(1)
     for other in participants:
@@ -342,9 +354,10 @@ def verify_share(
 def polynomial_evaluate(cs: Ciphersuite, x: int, coefficients: list[int]) -> int:
     """RFC 9591 Appendix C.1.1: Horner evaluation over the scalar field."""
     field = cs.scalar_field
+    x_field = field(x)
     value = field(0)
     for coefficient in reversed(coefficients):
-        value = value * x + coefficient
+        value = value * x_field + coefficient
     return int(value)
 
 
@@ -381,16 +394,16 @@ def vss_verify(
     cs: Ciphersuite, identifier: int, share: int, commitment: list[bytes]
 ) -> bool:
     """RFC 9591 Appendix C.2: `[f(i)]B = Σ i^j·φ_j` — a participant's check."""
-    if not 1 <= identifier <= cs.order - 1:
-        raise ValueError("a participant identifier is a NonZeroScalar")
+    _require_nonzero_scalar(cs, identifier)
     field = cs.scalar_field
+    power = field(1)
     expected = cs.identity_element()
-    for j, coefficient_commitment in enumerate(commitment):
+    for coefficient_commitment in commitment:
         expected = cs.element_add(
             expected,
             cs.element_scalar_mult(
-                cs.deserialize_element(coefficient_commitment),
-                int(field(identifier) ** j),
+                cs.deserialize_element(coefficient_commitment), int(power)
             ),
         )
+        power = power * identifier
     return cs.scalar_base_mult(share) == cs.serialize_element(expected)

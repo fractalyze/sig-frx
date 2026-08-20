@@ -66,6 +66,22 @@ class MessageHash:
 SHA256 = MessageHash(byte_hash=hashes.sha256, host_constructor=hashlib.sha256)
 
 
+def _masked_quotient_pair(
+    scalar: Any, valid: bool, u1_numerator: int, u2_numerator: int, denominator: int
+) -> tuple[int, int]:
+    """The two field quotients `(a/d, b/d)` a batch row rides, as ints.
+
+    A rejected row's wire values may exceed `n`, and a field op on such an
+    operand aborts rather than reducing (fractalyze/zk_dtypes#179) — so a
+    masked row rides zero scalars on its placeholder point instead; its
+    verdict is already sealed.
+    """
+    if not valid:
+        return 0, 0
+    w = scalar(denominator) ** -1
+    return int(scalar(u1_numerator) * w), int(scalar(u2_numerator) * w)
+
+
 def is_low_s(curve: secp.Curve, signature: ArrayLike) -> np.ndarray:
     """Whether each `r ‖ s` signature carries the low half of `s`: `bool[B]`.
 
@@ -247,14 +263,16 @@ class Ecdsa:
 
         The per-entry rejections are the standard's: a key must be the
         `04 ‖ X ‖ Y` encoding of a point on the curve with in-field
-        coordinates (§2.3.4 — the dtypes construct off-curve coordinates
-        without complaint, so the check is this module's to make), and
+        coordinates (§2.3.4 — range and equation both live in
+        `secp.on_curve`, since the dtypes construct off-curve coordinates
+        without complaint), and
         `r, s` must sit in `[1, n-1]`. Rejected rows carry the generator as
         a placeholder so the batch stays rectangular; their verdict is
         already sealed.
         """
         curve = self.curve
-        p, n = curve.p, curve.n
+        n = curve.n
+        scalar = curve.scalar
         keys = np.asarray(public_key, dtype=np.uint8)
         digest = np.asarray(digest, dtype=np.uint8)
         signature = np.asarray(signature, dtype=np.uint8)
@@ -268,22 +286,13 @@ class Ecdsa:
             e = rfc6979.bits2int(entry.tobytes(), n.bit_length()) % n
             ok = (
                 int(key[0]) == 4
-                and qx < p
-                and qy < p
                 and secp.on_curve(curve, qx, qy)
                 and 1 <= r < n
                 and 1 <= s < n
             )
-            if ok:
-                w = curve.scalar(s) ** -1
-                u1_scalars.append(int(curve.scalar(e) * w))
-                u2_scalars.append(int(curve.scalar(r) * w))
-            else:
-                # A rejected row's wire r/s may exceed n, and a field op on
-                # such an operand aborts (fractalyze/zk_dtypes#179) — so the
-                # row rides zero scalars; its verdict is already False.
-                u1_scalars.append(0)
-                u2_scalars.append(0)
+            u1, u2 = _masked_quotient_pair(scalar, ok, e, r, s)
+            u1_scalars.append(u1)
+            u2_scalars.append(u2)
             r_scalars.append(r)
             checks.append(ok)
             points.append(
@@ -390,16 +399,15 @@ class Ecdsa:
 
         # Q = r⁻¹(sR - eG), taken as u₁G + u₂R with u₁ = -e/r, u₂ = s/r
         # (mod n): the scalar field for the algebra, the curve's kernels for
-        # the points. Invalid entries carry zeros the mask drops.
+        # the points.
+        scalar = curve.scalar
         u1_scalars, u2_scalars = [], []
         for e, r, s, valid in zip(digest_scalars, r_scalars, s_scalars, ok):
-            if valid:
-                r_inverse = curve.scalar(r) ** -1
-                u1_scalars.append(int(-curve.scalar(e) * r_inverse))
-                u2_scalars.append(int(curve.scalar(s) * r_inverse))
-            else:
-                u1_scalars.append(0)
-                u2_scalars.append(0)
+            # -e % n: the field constructor rejects a negative int outright
+            # (OverflowError), so the negation arrives already canonical.
+            u1, u2 = _masked_quotient_pair(scalar, bool(valid), -e % n, s, r)
+            u1_scalars.append(u1)
+            u2_scalars.append(u2)
 
         public = secp.multiple(
             curve, u1_scalars, np.broadcast_to(curve.generator, point_r.shape)

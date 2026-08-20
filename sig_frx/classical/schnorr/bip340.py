@@ -231,14 +231,15 @@ class Bip340:
         ]
 
         scalar = _CURVE.scalar
-        combined = int(sum(scalar(a) * s for a, s in zip(coefficients, s_scalars)))
+        field_coefficients = [scalar(a) for a in coefficients]
+        combined = int(sum(c * s for c, s in zip(field_coefficients, s_scalars)))
         lhs = secp.multiple(_CURVE, [combined], _CURVE.generator)
         terms = np.concatenate(
             [
                 secp.multiple(_CURVE, coefficients, r_points),
                 secp.multiple(
                     _CURVE,
-                    [int(scalar(a) * e) for a, e in zip(coefficients, e_scalars)],
+                    [int(c * e) for c, e in zip(field_coefficients, e_scalars)],
                     key_points,
                 ),
             ]
