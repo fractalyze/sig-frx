@@ -38,6 +38,16 @@ py_test(
     ],
 )
 
+py_test(
+    name = "secp_test",
+    size = "small",
+    srcs = ["secp_test.py"],
+    deps = [
+        "//sig_frx/classical:secp",
+        requirement("absl_py"),
+    ],
+)
+
 # The Wycheproof loading and the encoding-boundary split, shared by the
 # per-PR slice and the scheduled sweep so the two cannot disagree about what
 # "runnable" means.
