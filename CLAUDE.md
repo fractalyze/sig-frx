@@ -19,6 +19,10 @@ this file is the map plus the rules every change must respect.
   never auto-imported, so the bare `bazel test //...` in the README additionally
   runs the `slow_kat` sweeps — which are the scheduled gate, not the merge one,
   and which starve a shared machine into TIMEOUTs that are not failures.
+- **Merge commits must be titled `Merge branch 'X' into Y`.**
+  fractal-commit-lint exempts only that form (and `Merge pull request #N`);
+  git's default `Merge remote-tracking branch 'origin/X'` wording fails the
+  commit-msg hook and leaves the merge stopped before committing.
 
 ## Four non-negotiables
 
