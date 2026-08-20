@@ -176,10 +176,10 @@ def encode_group_commitment_list(
     cs: Ciphersuite, commitment_list: list[Commitment]
 ) -> bytes:
     """RFC 9591 §4.3: the byte string the binding factors hash over."""
-    encoded = b""
-    for entry in commitment_list:
-        encoded += cs.serialize_scalar(entry.identifier) + entry.hiding + entry.binding
-    return encoded
+    return b"".join(
+        cs.serialize_scalar(entry.identifier) + entry.hiding + entry.binding
+        for entry in commitment_list
+    )
 
 
 def compute_binding_factors(
@@ -247,6 +247,28 @@ def derive_interpolating_value(
     return int(numerator / denominator)
 
 
+def _signing_context(
+    cs: Ciphersuite,
+    commitment_list: list[Commitment],
+    group_public_key: bytes,
+    message: bytes,
+) -> tuple[dict[int, tuple[Any, Any]], dict[int, int], Any, int]:
+    """The round-two prologue all three §5 surfaces share.
+
+    Validate the list, bind, commit, challenge — one home so the surfaces
+    cannot drift on the MUST-checks; `aggregate` ignores the challenge.
+    """
+    decoded = _validated_commitment_list(cs, commitment_list)
+    binding_factors = compute_binding_factors(
+        cs, group_public_key, commitment_list, message
+    )
+    group_commitment = compute_group_commitment(cs, decoded, binding_factors)
+    challenge = compute_challenge(
+        cs, cs.serialize_element(group_commitment), group_public_key, message
+    )
+    return decoded, binding_factors, group_commitment, challenge
+
+
 def sign_share(
     cs: Ciphersuite,
     identifier: int,
@@ -263,21 +285,16 @@ def sign_share(
     coordinator that swapped them would otherwise make this share sign a
     different group commitment.
     """
-    decoded = _validated_commitment_list(cs, commitment_list)
+    _, binding_factors, _, challenge = _signing_context(
+        cs, commitment_list, group_public_key, message
+    )
     own = [c for c in commitment_list if c.identifier == identifier]
     if not own or own[0] != Commitment(
         identifier, nonces.hiding_commitment, nonces.binding_commitment
     ):
         raise ValueError("this participant's round-one commitments are not in the list")
-    binding_factors = compute_binding_factors(
-        cs, group_public_key, commitment_list, message
-    )
-    group_commitment = compute_group_commitment(cs, decoded, binding_factors)
     participants = [c.identifier for c in commitment_list]
     lambda_i = derive_interpolating_value(cs, participants, identifier)
-    challenge = compute_challenge(
-        cs, cs.serialize_element(group_commitment), group_public_key, message
-    )
     field = cs.scalar_field
     share = int(
         field(nonces.hiding)
@@ -299,12 +316,10 @@ def aggregate(
     Every share deserializes first — §5.3's MUST — so a corrupt share aborts
     here; *which* share is corrupt is `verify_share`'s question.
     """
-    decoded = _validated_commitment_list(cs, commitment_list)
-    scalars = [cs.deserialize_scalar(share) for share in signature_shares]
-    binding_factors = compute_binding_factors(
-        cs, group_public_key, commitment_list, message
+    _, _, group_commitment, _ = _signing_context(
+        cs, commitment_list, group_public_key, message
     )
-    group_commitment = compute_group_commitment(cs, decoded, binding_factors)
+    scalars = [cs.deserialize_scalar(share) for share in signature_shares]
     field = cs.scalar_field
     z = int(sum(field(scalar) for scalar in scalars))
     return cs.serialize_element(group_commitment) + cs.serialize_scalar(z)
@@ -314,7 +329,6 @@ def verify_share(
     cs: Ciphersuite,
     identifier: int,
     participant_public_key: bytes,
-    commitment: Commitment,
     signature_share: bytes,
     commitment_list: list[Commitment],
     group_public_key: bytes,
@@ -323,20 +337,17 @@ def verify_share(
     """RFC 9591 §5.3's `verify_signature_share`: identify a bad share.
 
     `[z_i]B = (D_i + [ρ_i]E_i) + [c·λ_i]PK_i` — false names the misbehaving
-    participant, which the aggregate signature alone cannot.
+    participant, which the aggregate signature alone cannot. The RFC's
+    `comm_i` input is the list entry under `identifier` — taking it as a
+    separate argument would let the two silently disagree.
     """
-    decoded = _validated_commitment_list(cs, commitment_list)
+    decoded, binding_factors, _, challenge = _signing_context(
+        cs, commitment_list, group_public_key, message
+    )
     share = cs.deserialize_scalar(signature_share)
-    binding_factors = compute_binding_factors(
-        cs, group_public_key, commitment_list, message
-    )
-    group_commitment = compute_group_commitment(cs, decoded, binding_factors)
-    challenge = compute_challenge(
-        cs, cs.serialize_element(group_commitment), group_public_key, message
-    )
     participants = [c.identifier for c in commitment_list]
     lambda_i = derive_interpolating_value(cs, participants, identifier)
-    hiding, binding_commitment = decoded[commitment.identifier]
+    hiding, binding_commitment = decoded[identifier]
     commitment_share = cs.element_add(
         hiding,
         cs.element_scalar_mult(binding_commitment, binding_factors[identifier]),

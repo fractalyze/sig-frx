@@ -146,6 +146,37 @@ def multiple(curve: Curve, scalars: list[int], points: ArrayLike) -> np.ndarray:
     return points * reduced
 
 
+def double_multiple(
+    curve: Curve, g_scalars: list[int], point_scalars: list[int], points: ArrayLike
+) -> np.ndarray:
+    """`g_scalars[i]·G + point_scalars[i]·points[i]`, two batched kernels.
+
+    The two-term combination every verification equation reduces to, and
+    the one seam a fused MSM kernel would replace (fractalyze/sig-frx#139)
+    — a subtraction folds into the scalar as `n - e`.
+    """
+    points = np.asarray(points)
+    return multiple(
+        curve, g_scalars, np.broadcast_to(curve.generator, points.shape)
+    ) + multiple(curve, point_scalars, points)
+
+
+def uncompressed_rows(curve: Curve, points: ArrayLike, ok: ArrayLike) -> np.ndarray:
+    """Each point as SEC 1 `04 ‖ X ‖ Y`, masked rows zeroed: `uint8[B, 65]`.
+
+    The zeroing is the codec rule shared by every rejecting consumer: a
+    zeroed row cannot be mistaken for a key.
+    """
+    ok = np.asarray(ok)
+    rows = np.zeros((ok.shape[0], 65), dtype=np.uint8)
+    for i, ((x, y), valid) in enumerate(zip(affine_ints(curve, points), ok)):
+        if valid:
+            rows[i, 0] = 4
+            rows[i, 1:33] = np.frombuffer(x.to_bytes(32, "big"), dtype=np.uint8)
+            rows[i, 33:] = np.frombuffer(y.to_bytes(32, "big"), dtype=np.uint8)
+    return rows
+
+
 def host_multiple_of_g(curve: Curve, scalar: int) -> tuple[int, int]:
     """`scalar·G` as affine Python integers — the signing path's readback."""
     ((x, y),) = affine_ints(curve, multiple(curve, [scalar], curve.generator))

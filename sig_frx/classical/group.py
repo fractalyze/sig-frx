@@ -51,9 +51,7 @@ def int_bits(scalar: int, size: int = 32) -> np.ndarray:
     return bits_of(np.frombuffer(scalar.to_bytes(size, "big"), dtype=np.uint8))[None, :]
 
 
-def bytes_below(
-    xnp: Any, data: Any, bound: int, *, byteorder: Literal["little", "big"]
-) -> Any:
+def bytes_below(data: Any, bound: int, *, byteorder: Literal["little", "big"]) -> Any:
     """Whether `[..., 32]` bytes name an integer `< bound`, elementwise.
 
     Bytewise lexicographic compare — the first differing byte decides — so the
@@ -61,6 +59,7 @@ def bytes_below(
     already lost it. `byteorder` names which end the most significant byte
     lives at, matching `int.to_bytes`.
     """
+    xnp = namespace(data)
     bound_bytes = bound.to_bytes(32, byteorder)
     indices = range(32) if byteorder == "big" else reversed(range(32))
     verdict = xnp.zeros(data.shape[:-1], dtype=np.int32)

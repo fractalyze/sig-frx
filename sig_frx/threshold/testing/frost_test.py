@@ -194,16 +194,12 @@ class FrostTest(parameterized.TestCase):
         for entry, share in zip(v.round_two, v.signature_shares()):
             identifier = entry["identifier"]
             public_share = v.cs.scalar_base_mult(v.shares[identifier])
-            commitment = next(
-                c for c in v.commitment_list if c.identifier == identifier
-            )
 
             def verdict(candidate: bytes) -> bool:
                 return frost.verify_share(
                     v.cs,
                     identifier,
                     public_share,
-                    commitment,
                     candidate,
                     v.commitment_list,
                     v.group_public_key,

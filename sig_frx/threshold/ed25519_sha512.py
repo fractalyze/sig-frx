@@ -90,8 +90,11 @@ class Ed25519Sha512:
         )
         if not bool(np.asarray(ok)[0]):
             raise ValueError("not a canonical encoding of a curve point")
-        ((x, y),) = group.to_affine_ints(point)
-        if (x, y) == (0, 1):
+        # The identity in extended coordinates is (0 : Z : Z : 0) — read off
+        # the projective components, sparing the affine division a readback
+        # would pay.
+        zero = np.array(0, dtype=self.curve.field)
+        if bool(np.asarray((point.x == zero) & (point.y == point.z))[0]):
             raise ValueError("the identity element has no place on the wire")
         return point
 

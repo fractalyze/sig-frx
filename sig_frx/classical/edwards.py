@@ -212,8 +212,9 @@ def decompress_x(curve: EdwardsCurve, y: Any, sign: Any) -> tuple[Any, Any]:
     with the sign bit set. All of it stays arithmetic: failed entries carry a
     junk `x` and a false flag, never a branch.
     """
-    u = y * y - curve.one
-    v = curve.d_field * (y * y) + curve.one
+    y2 = y * y
+    u = y2 - curve.one
+    v = curve.d_field * y2 + curve.one
     v3 = v * v * v
     v7 = v3 * v3 * v
     candidate = u * v3 * group.pow_const(curve, u * v7, (curve.p - 5) // 8)
@@ -226,8 +227,9 @@ def decompress_x(curve: EdwardsCurve, y: Any, sign: Any) -> tuple[Any, Any]:
     x = flag * candidate + (curve.one - flag) * corrected
     x_is_zero = x == np.array(0, dtype=curve.field)
     xnp = namespace(y)
-    ok = ok & ~(x_is_zero & (xnp.asarray(sign) == np.uint8(1)))
-    wrong_sign = parity(curve, x) != xnp.asarray(sign).astype(np.uint32)
+    sign_arr = xnp.asarray(sign)
+    ok = ok & ~(x_is_zero & (sign_arr == np.uint8(1)))
+    wrong_sign = parity(curve, x) != sign_arr.astype(np.uint32)
     sign_flag = _as_field_flag(curve, wrong_sign)
     x = sign_flag * (-x) + (curve.one - sign_flag) * x
     return x, ok
@@ -254,7 +256,7 @@ def decode(curve: EdwardsCurve, encoded: ArrayLike) -> tuple[ExtPoint, Any]:
     y_bytes = xnp.concatenate(
         [encoded[..., :31], encoded[..., 31:32] & np.uint8(0x7F)], axis=-1
     )
-    canonical = group.bytes_below(xnp, y_bytes, curve.p, byteorder="little")
+    canonical = group.bytes_below(y_bytes, curve.p, byteorder="little")
     y = field_from_le_bytes(curve, y_bytes)
     x, ok = decompress_x(curve, y, sign)
     return from_affine(curve, x, y), canonical & ok

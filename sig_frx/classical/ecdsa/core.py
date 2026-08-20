@@ -66,6 +66,12 @@ class MessageHash:
 SHA256 = MessageHash(byte_hash=hashes.sha256, host_constructor=hashlib.sha256)
 
 
+def _signature_bytes(r: int, s: int) -> np.ndarray:
+    """`r ‖ s` as the 64-byte wire row both signing surfaces emit."""
+    packed = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+    return np.frombuffer(packed, dtype=np.uint8).copy()
+
+
 def _masked_quotient_pair(
     scalar: Any, valid: bool, u1_numerator: int, u2_numerator: int, denominator: int
 ) -> tuple[int, int]:
@@ -177,8 +183,7 @@ class Ecdsa:
         context_rules.require_empty(context, "ECDSA")
         _, x = secp.secret_scalar(self.curve, secret_key, "secret key")
         r, s, recovery_id = self._signature_scalars(x, message)
-        signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
-        return np.frombuffer(signature, dtype=np.uint8).copy(), recovery_id
+        return _signature_bytes(r, s), recovery_id
 
     def sign_digest_recoverable(
         self,
@@ -201,8 +206,7 @@ class Ecdsa:
         _, x = secp.secret_scalar(self.curve, secret_key, "secret key")
         h1 = np.asarray(digest, dtype=np.uint8).tobytes()
         r, s, recovery_id = self._digest_signature_scalars(x, h1, nonce_hash)
-        signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
-        return np.frombuffer(signature, dtype=np.uint8).copy(), recovery_id
+        return _signature_bytes(r, s), recovery_id
 
     def _signature_scalars(self, x: int, message: ArrayLike) -> tuple[int, int, int]:
         """One RFC 6979 signature as integers, from the record's own pairing."""
@@ -277,13 +281,15 @@ class Ecdsa:
         digest = np.asarray(digest, dtype=np.uint8)
         signature = np.asarray(signature, dtype=np.uint8)
 
+        qlen = n.bit_length()
+        placeholder = curve.point((curve.gx, curve.gy))
         checks, points, u1_scalars, u2_scalars, r_scalars = [], [], [], [], []
         for key, entry, sig in zip(keys, digest, signature):
             qx = int.from_bytes(key[1:33].tobytes(), "big")
             qy = int.from_bytes(key[33:65].tobytes(), "big")
             r = int.from_bytes(sig[:32].tobytes(), "big")
             s = int.from_bytes(sig[32:64].tobytes(), "big")
-            e = rfc6979.bits2int(entry.tobytes(), n.bit_length()) % n
+            e = rfc6979.bits2int(entry.tobytes(), qlen) % n
             ok = (
                 int(key[0]) == 4
                 and secp.on_curve(curve, qx, qy)
@@ -295,14 +301,10 @@ class Ecdsa:
             u2_scalars.append(u2)
             r_scalars.append(r)
             checks.append(ok)
-            points.append(
-                curve.point((qx, qy)) if ok else curve.point((curve.gx, curve.gy))
-            )
+            points.append(curve.point((qx, qy)) if ok else placeholder)
 
         q_points = np.array(points, dtype=curve.point)
-        big_r = secp.multiple(
-            curve, u1_scalars, np.broadcast_to(curve.generator, q_points.shape)
-        ) + secp.multiple(curve, u2_scalars, q_points)
+        big_r = secp.double_multiple(curve, u1_scalars, u2_scalars, q_points)
         gone = secp.is_identity(curve, big_r)
         verdicts = [
             ok and not bool(dead) and x % n == r
@@ -359,8 +361,9 @@ class Ecdsa:
         if not digest.shape[0] == signature.shape[0] == recovery_id.shape[0]:
             raise ValueError("the batch axes disagree")
         n = self.curve.n
+        qlen = n.bit_length()
         digest_scalars = [
-            rfc6979.bits2int(entry.tobytes(), n.bit_length()) % n for entry in digest
+            rfc6979.bits2int(entry.tobytes(), qlen) % n for entry in digest
         ]
         return self._recover(digest_scalars, signature, recovery_id)
 
@@ -409,20 +412,12 @@ class Ecdsa:
             u1_scalars.append(u1)
             u2_scalars.append(u2)
 
-        public = secp.multiple(
-            curve, u1_scalars, np.broadcast_to(curve.generator, point_r.shape)
-        ) + secp.multiple(curve, u2_scalars, point_r)
+        public = secp.double_multiple(curve, u1_scalars, u2_scalars, point_r)
 
         # The identity has no encoding, so it is a rejection, not a key
         # (§4.1.6 rejects it by name).
         ok &= ~secp.is_identity(curve, public)
-        keys = np.zeros((len(ids), 65), dtype=np.uint8)
-        for i, ((qx, qy), valid) in enumerate(zip(secp.affine_ints(curve, public), ok)):
-            if valid:
-                keys[i, 0] = 4
-                keys[i, 1:33] = np.frombuffer(qx.to_bytes(32, "big"), dtype=np.uint8)
-                keys[i, 33:] = np.frombuffer(qy.to_bytes(32, "big"), dtype=np.uint8)
-        return keys, ok
+        return secp.uncompressed_rows(curve, public, ok), ok
 
 
 if TYPE_CHECKING:

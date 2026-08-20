@@ -114,11 +114,10 @@ class GroupLawTest(absltest.TestCase):
             (points[1], ref.IDENTITY),
         ]
         field = curve.field
-        lift = lambda pts: edwards.ExtPoint(  # noqa: E731
+        lift = lambda pts: edwards.from_affine(  # noqa: E731
+            curve,
             np.array([q[0] for q in pts], dtype=field),
             np.array([q[1] for q in pts], dtype=field),
-            np.array([1] * len(pts), dtype=field),
-            np.array([q[0] * q[1] % curve.p for q in pts], dtype=field),
         )
         got = edwards.add(
             curve, lift([a for a, _ in pairs]), lift([b for _, b in pairs])
