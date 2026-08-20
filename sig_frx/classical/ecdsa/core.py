@@ -251,12 +251,27 @@ class Ecdsa:
     ) -> Any:
         """The batched verdict, `bool[B]` — one traced computation, no scalar path."""
         context_rules.require_empty(context, "ECDSA")
+        digest = self.hash.byte_hash(public_key, message, signature).digest(message)
+        return self.verify_digest(public_key, digest, signature)
+
+    def verify_digest(
+        self,
+        public_key: ArrayLike,
+        digest: ArrayLike,
+        signature: ArrayLike,
+    ) -> Any:
+        """`verify` for a caller that arrives with the digests: `[B, L]`.
+
+        Off the seam under its own name, like the other digest-level entries —
+        and unlike them still namespace-generic: verification reads nothing
+        back, so skipping the hash keeps the traced form intact. No `context`
+        parameter, because context framing belongs to the seam's
+        message-level surface.
+        """
         curve = self.curve
-        xnp = namespace(public_key, message, signature)
+        xnp = namespace(public_key, digest, signature)
         public_key = xnp.asarray(public_key)
         signature = xnp.asarray(signature)
-
-        digest = self.hash.byte_hash(public_key, message, signature).digest(message)
         z_bits = group.bits_of(digest)[..., :256]
 
         # SEC 1 §2.3.4: an uncompressed point is `04 ‖ X ‖ Y` with both
