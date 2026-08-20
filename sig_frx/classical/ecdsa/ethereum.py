@@ -36,13 +36,13 @@ import numpy as np
 from frx.typing import ArrayLike
 
 from sig_frx import hashes
-from sig_frx.classical import weierstrass
+from sig_frx.classical import secp
 from sig_frx.classical.ecdsa import core
 
 # The engine: secp256k1, low-S at signing (EIP-2's signing half). The
 # MessageHash record serves construction only — every call below is on the
 # digest-level surface, which reads neither of its faces.
-_SCHEME = core.Ecdsa(weierstrass.SECP256K1, core.SHA256, low_s=True)
+_SCHEME = core.Ecdsa(secp.SECP256K1, core.SHA256, low_s=True)
 
 # EIP-155: v = chain_id·2 + 35 + parity; {27, 28} is the pre-fork form the
 # fork kept valid.

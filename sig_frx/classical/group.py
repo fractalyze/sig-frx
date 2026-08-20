@@ -1,7 +1,7 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """The curve-family-agnostic plumbing both classical substrates share.
 
-`weierstrass.py` and `edwards.py` each own their formulas, constants, and
+`edwards.py` owns its formulas, constants, and
 encodings — the parts their standards fix. Everything here is what neither
 standard fixes and both substrates need identically: byte and bit reshapes,
 the bytewise range compare an encoding's rejection rules hang on, the
@@ -13,7 +13,7 @@ thin named wrappers where a docstring owes the reader curve-specific context.
 Functions here are generic over the two point representations by reading only
 what both carry: a curve with `field` and `one`, and a point NamedTuple whose
 leading fields are coordinates (so an arithmetic select rebuilds it with
-`type(point)(*...)`). The batch-axis rule (`weierstrass.py`) applies
+`type(point)(*...)`). The batch-axis rule (`edwards.py`) applies
 throughout.
 """
 
@@ -49,22 +49,6 @@ def int_bits(scalar: int, size: int = 32) -> np.ndarray:
     place host callers keep re-deriving it.
     """
     return bits_of(np.frombuffer(scalar.to_bytes(size, "big"), dtype=np.uint8))[None, :]
-
-
-def ints_bits(scalars: list[int], size: int = 32) -> np.ndarray:
-    """A batch of Python integers as `[B, 8·size]` ladder bits.
-
-    `int_bits`'s batch sibling, for the host paths that assemble per-entry
-    scalars and drive one stacked ladder with them.
-    """
-    return bits_of(
-        np.stack(
-            [
-                np.frombuffer(value.to_bytes(size, "big"), dtype=np.uint8)
-                for value in scalars
-            ]
-        )
-    )
 
 
 def bytes_below(
