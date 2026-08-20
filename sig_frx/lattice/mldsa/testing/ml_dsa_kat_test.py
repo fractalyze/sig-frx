@@ -19,8 +19,11 @@ its cost: `pk = ρ ‖ t1` with `t = As1 + s2` rounded, so one published public 
 confirms `ExpandA`'s ordering, `ExpandS`'s coefficient range, the transform's root
 and `Power2Round` at once, without a rejection loop in the way. Signing and
 verifying are the merge gate's expensive half and run at ML-DSA-44, whose `A` is
-4x4 against ML-DSA-87's 8x7; the exhaustive run across all three is
-`ml_dsa_sweep_test`, tagged `slow_kat`.
+4x4 against ML-DSA-87's 8x7, and at a bounded number of vectors per operation,
+because what this target costs is the number of distinct message shapes it
+compiles rather than the number of vectors it checks; the exhaustive run across
+all three sets and every published length is `ml_dsa_sweep_test`, tagged
+`slow_kat`.
 
 **The pre-hash operations are gated on the same evidence as the pure one**, which
 takes sourcing an accepted case from `sigGen` for the ones ACVP's random draw
@@ -39,6 +42,8 @@ length verdict has no published exercise — `ml_dsa_test` is what covers it.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
@@ -53,6 +58,42 @@ from sig_frx.testing import kat
 # The cheapest set to sign and verify at: Table 1's smallest `A`, and the one
 # whose 78-byte `β` bound makes the rejection loop run fewest times on average.
 _MERGE_GATE_SET = "ML-DSA-44"
+
+# How many published vectors of each operation the merge gate runs.
+#
+# What this target costs is set by how many distinct *shapes* it reaches, not by
+# how many vectors: ACVP draws a fresh message length per case, and a traced
+# sponge compiles once per distinct one. The published set is nearly all
+# singletons, so the gate's 109 vectors are 99 compiles.
+#
+# That is free on a backend that declines the whole-hash Keccak marker and
+# ruinous on one that routes it, because the routed composite's decomposition is
+# the entire absorb and squeeze — traced per shape, and in proportion to the
+# message's block count. Measured: 4.6 s for a 6-block message against 103 s for
+# a 61-block one, and 0.056 s for a second message that lands in a bucket already
+# compiled. Bounding the *count* per operation is therefore what bounds the cost,
+# and padding lengths to a rate multiple does nothing at all — that is already
+# the bucket.
+#
+# The shortest few rather than a length cap: a flat cap empties ten of the
+# fourteen `sigGen` operations, because ACVP's pre-hash cases all carry long
+# messages, and an operation that runs nowhere is not a cheaper gate. Every
+# operation, both signing modes and all five pre-hash functions survive this,
+# which the cases below assert rather than assume. The exhaustive run over every
+# published length is `ml_dsa_sweep_test`.
+_MERGE_GATE_VECTORS_PER_OPERATION = 4
+
+
+def _bounded(group: Sequence[kat.KatVector]) -> list[kat.KatVector]:
+    """An operation's shortest published messages, which is its cheapest shapes.
+
+    Shortest because trace cost rises with the message's block count, so the
+    same bound over the long end of the set would buy a fraction as much.
+    """
+    return sorted(group, key=lambda vector: len(vector.message or b""))[
+        :_MERGE_GATE_VECTORS_PER_OPERATION
+    ]
+
 
 # The whole published file's gap, not the gate set's — a boundary is a property of
 # what this repo can compute, so it is stated once against everything NIST ships.
@@ -128,7 +169,15 @@ class KeyGenKatTest(absltest.TestCase):
 class SignatureKatTest(absltest.TestCase):
     """Signing and verifying, for every operation at the merge-gate set."""
 
-    def _groups(self, mode: str) -> dict[ml_dsa_vectors.Operation, list[kat.KatVector]]:
+    def _published(
+        self, mode: str
+    ) -> dict[ml_dsa_vectors.Operation, list[kat.KatVector]]:
+        """Every vector the merge-gate set publishes, before the count bound.
+
+        For the claims that are set and length arithmetic over already-parsed
+        vectors: those cost nothing next to a single signature, so they are made
+        about what NIST published rather than about the subset that runs.
+        """
         groups = {
             operation: group
             for operation, group in ml_dsa_vectors.runnable_groups(mode).items()
@@ -136,6 +185,13 @@ class SignatureKatTest(absltest.TestCase):
         }
         self.assertNotEmpty(groups)
         return groups
+
+    def _groups(self, mode: str) -> dict[ml_dsa_vectors.Operation, list[kat.KatVector]]:
+        """What runs: every operation, bounded to its cheapest shapes."""
+        return {
+            operation: _bounded(group)
+            for operation, group in self._published(mode).items()
+        }
 
     def test_the_published_signatures_are_reproduced(self) -> None:
         groups = self._groups("sigGen")
@@ -224,6 +280,36 @@ class SignatureKatTest(absltest.TestCase):
                         ),
                     )
 
+    def test_every_operation_survives_the_count_bound(self) -> None:
+        # What this target costs is the bound, so the bound is asserted rather
+        # than left to a constant nothing reads. A change that quietly widened it
+        # would otherwise surface only as a slow leg — which is how it got here —
+        # and one that narrowed it past an operation would report a smaller gate
+        # as a passing one.
+        for mode in ("sigGen", "sigVer"):
+            with self.subTest(mode):
+                published = self._published(mode)
+                running = self._groups(mode)
+                self.assertEqual(set(running), set(published))
+                self.assertLess(
+                    sum(len(group) for group in running.values()),
+                    sum(len(group) for group in published.values()),
+                )
+                for operation, group in running.items():
+                    with self.subTest(str(operation)):
+                        self.assertNotEmpty(group)
+                        self.assertLessEqual(
+                            len(group), _MERGE_GATE_VECTORS_PER_OPERATION
+                        )
+                        # The cheapest shapes and not any subset of that size:
+                        # trace cost rises with the message's block count, so
+                        # which ones are kept is the whole point.
+                        kept = sorted(len(v.message or b"") for v in group)
+                        shortest = sorted(
+                            len(v.message or b"") for v in published[operation]
+                        )[: len(group)]
+                        self.assertEqual(kept, shortest)
+
     def test_the_boundaries_of_what_ran_are_the_ones_stated(self) -> None:
         for mode, expected in _EXCLUDED.items():
             with self.subTest(mode):
@@ -268,7 +354,7 @@ class SignatureKatTest(absltest.TestCase):
         params = ml_dsa.PARAMETER_SETS[_MERGE_GATE_SET]
         wrong_length = [
             v
-            for group in self._groups("sigVer").values()
+            for group in self._published("sigVer").values()
             for v in group
             if v.signature is not None and len(v.signature) != params.signature_size
         ]
@@ -281,7 +367,7 @@ class SignatureKatTest(absltest.TestCase):
         # groups and its per-entry check has no second entry to pin. Asserted
         # rather than assumed — a regenerated set that published two cases of one
         # shape would be a published batch, and this is what says so.
-        for operation, group in self._groups("sigVer").items():
+        for operation, group in self._published("sigVer").items():
             with self.subTest(str(operation)):
                 shapes = {
                     (
