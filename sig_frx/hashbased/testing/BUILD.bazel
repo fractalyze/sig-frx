@@ -301,9 +301,17 @@ py_test(
 # carries has to cover the slowest backend it runs on — a compile-bound test that
 # fits its budget on one backend and not the other is a timeout waiting for a
 # matrix leg to be added.
+#
+# `eternal` since hash-frx 7e3e7b5f: routing sha256's digest through the
+# raw-bytes marker composite (hash-frx#183) roughly doubled this compile
+# (measured 215s -> 421s on one box), and the CPU leg shares its runner with
+# the KAT suite — `large`'s 900s stopped covering the slowest leg. The compile
+# cost itself is an upstream property (fractalyze/hash-frx#197), not this
+# test's workload.
 py_test(
     name = "slh_dsa_traced_test",
     size = "large",
+    timeout = "eternal",
     srcs = ["slh_dsa_traced_test.py"],
     deps = [
         "//sig_frx/hashbased:slh_dsa",
