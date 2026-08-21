@@ -1,4 +1,4 @@
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
@@ -144,6 +144,29 @@ py_test(
         "//sig_frx/classical/ecdsa:ethereum",
         requirement("absl_py"),
         requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# Where classical verification spends its time, per lane, split at the substrate
+# seams. A dev tool rather than a test — it asserts nothing beyond its own
+# fixtures, and the numbers belong on the issue that acts on them — but it is
+# committed so a re-measurement after a substrate change compares against the
+# same harness rather than a fresh one.
+py_binary(
+    name = "verify_bench",
+    testonly = True,
+    srcs = ["verify_bench.py"],
+    deps = [
+        "//sig_frx:hashes",
+        "//sig_frx/classical:edwards",
+        "//sig_frx/classical:secp",
+        "//sig_frx/classical/ecdsa:core",
+        "//sig_frx/classical/eddsa:ed25519",
+        "//sig_frx/classical/schnorr:bip340",
+        "//sig_frx/threshold:frost",
+        "//sig_frx/threshold:secp256k1_sha256",
+        requirement("absl_py"),
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
