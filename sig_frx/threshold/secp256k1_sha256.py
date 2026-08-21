@@ -9,7 +9,8 @@ scalars, and the hash-to-field scalar derivations (RFC 9380's
 One caveat stated where it can be read rather than discovered: this suite's
 output is **not** a BIP-340 signature — x-only keys and tagged hashes differ —
 so it has no Taproot verifier. It is RFC 9591's own Schnorr encoding, verified
-per the RFC's Appendix B, which the tests transcribe.
+per the RFC's Appendix B by `verify` below; the tests keep the RFC's naive
+transcription beside it as the reference pair.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
+from frx.typing import ArrayLike
 
 from sig_frx.classical import secp
 from sig_frx.threshold import frost, xmd
@@ -99,6 +101,77 @@ class Secp256k1Sha256:
             raise ValueError("the identity element has no encoding here")
         ((x, y),) = secp.affine_ints(self.curve, element)
         return (2 + (y & 1)).to_bytes(1, "big") + x.to_bytes(32, "big")
+
+    def verify(
+        self, public_key: ArrayLike, message: ArrayLike, signature: ArrayLike
+    ) -> np.ndarray:
+        """RFC 9591 Appendix B's prime-order verification: `bool[B]` verdicts.
+
+        The challenge is the round skeleton's own §4.6 derivation
+        (`frost.compute_challenge`), and accept-iff-`[z]B = R + [c]PK` is
+        the substrate's shared Schnorr readback (`secp.schnorr_verdicts`)
+        against `R`'s x and parity — a point equal to `R` is on the curve
+        by construction, so the wire checks that remain per row are SEC 1
+        §2.3.4's — a `02`/`03` prefix and a coordinate below `p` — plus the
+        RFC's scalar bound `z < n`. A failing row carries masked junk to a
+        cleared verdict instead of raising out of the batch, and no
+        unvalidated integer meets a field op on the way (the scalar-field
+        dtype aborts on an out-of-range operand, fractalyze/zk_dtypes#179 —
+        the substrate reduces every scalar first).
+        """
+        curve = self.curve
+        keys = np.asarray(public_key, dtype=np.uint8)
+        messages = np.asarray(message, dtype=np.uint8)
+        signatures = np.asarray(signature, dtype=np.uint8)
+        if keys.shape[-1] != self.element_size:
+            raise ValueError("a group public key is a 33-byte compressed point")
+        if signatures.shape[-1] != self.element_size + 32:
+            raise ValueError("a signature is a 33-byte element and a 32-byte scalar")
+
+        key_bytes = [row.tobytes() for row in keys]
+        r_bytes = [row.tobytes() for row in signatures[:, : self.element_size]]
+        z_scalars = [
+            int.from_bytes(row.tobytes(), "big")
+            for row in signatures[:, self.element_size :]
+        ]
+
+        def wire(encodings: list[bytes]) -> list[tuple[int, int]]:
+            return [
+                (encoding[0], int.from_bytes(encoding[1:], "big"))
+                for encoding in encodings
+            ]
+
+        pk_wire = wire(key_bytes)
+        r_wire = wire(r_bytes)
+        p = curve.p
+        checks = [
+            pk_prefix in (2, 3)
+            and pk_x < p
+            and r_prefix in (2, 3)
+            and r_x < p
+            and z < self.order
+            for (pk_prefix, pk_x), (r_prefix, r_x), z in zip(pk_wire, r_wire, z_scalars)
+        ]
+        key_points, on_curve = secp.lift_x_to_parity(
+            curve,
+            [x % p for _, x in pk_wire],
+            [prefix & 1 for prefix, _ in pk_wire],
+        )
+        ok = np.array(checks, dtype=bool) & on_curve
+
+        challenges = [
+            frost.compute_challenge(self, commitment, key, msg.tobytes())
+            for commitment, key, msg in zip(r_bytes, key_bytes, messages)
+        ]
+        return secp.schnorr_verdicts(
+            curve,
+            z_scalars,
+            challenges,
+            key_points,
+            [x for _, x in r_wire],
+            [prefix & 1 for prefix, _ in r_wire],
+            ok,
+        )
 
 
 if TYPE_CHECKING:
