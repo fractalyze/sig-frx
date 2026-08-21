@@ -158,20 +158,18 @@ class Bip340:
             int.from_bytes(entry[:32].tobytes(), "big") for entry in signatures
         ]
 
-        # R = s·G - e·P, the subtraction folded into the scalar as n - e;
-        # reject the identity, an odd y, and an x mismatch — the spec's
-        # three rejections, read off the affine coordinates.
-        big_r = secp.double_multiple(
-            _CURVE, s_scalars, [-e % _CURVE.n for e in e_scalars], key_points
+        # R = s·G - e·P with even y and x = r: the spec's three rejections
+        # (identity, odd y, x mismatch) ride the shared Schnorr readback,
+        # the parity claim pinned even per the x-only convention.
+        return secp.schnorr_verdicts(
+            _CURVE,
+            s_scalars,
+            e_scalars,
+            key_points,
+            r_scalars,
+            [0] * len(r_scalars),
+            ok,
         )
-        gone = secp.is_identity(_CURVE, big_r)
-        verdicts = [
-            bool(valid) and not bool(dead) and y % 2 == 0 and x == r
-            for (x, y), valid, dead, r in zip(
-                secp.affine_ints(_CURVE, big_r), ok, gone, r_scalars
-            )
-        ]
-        return np.array(verdicts, dtype=bool)
 
     def aggregate_verify(
         self,

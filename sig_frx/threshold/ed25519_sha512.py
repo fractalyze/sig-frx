@@ -29,6 +29,10 @@ from sig_frx.threshold import frost
 
 _CONTEXT = b"FROST-ED25519-SHA512-v1"
 
+# The delegate `verify` forwards to, built once — the scheme is a frozen
+# constant, so per-call construction would buy nothing.
+_VERIFIER = ed25519.Ed25519()
+
 
 def _reduced(digest: bytes, order: int) -> int:
     """A 64-byte digest as a little-endian integer modulo the group order."""
@@ -130,7 +134,7 @@ class Ed25519Sha512:
         malformed row answering `False` rather than raising. RFC 8032's
         Ed25519 takes no context, so none is exposed here.
         """
-        return ed25519.Ed25519().verify(public_key, message, signature, context=None)
+        return _VERIFIER.verify(public_key, message, signature, context=None)
 
 
 if TYPE_CHECKING:

@@ -107,13 +107,13 @@ class Secp256k1Sha256:
     ) -> np.ndarray:
         """RFC 9591 Appendix B's prime-order verification: `bool[B]` verdicts.
 
-        `c = H2(R ‖ PK ‖ msg)`; accept iff `[z]B = R + [c]PK`, computed as
-        `[z]B - [c]PK` and compared against `R`'s x and parity — the same
-        two-term combination and coordinate readback the BIP-340 verifier
-        rides on this substrate. A point equal to `R` is on the curve by
-        construction, so the wire checks that remain per row are SEC 1
+        The challenge is the round skeleton's own §4.6 derivation
+        (`frost.compute_challenge`), and accept-iff-`[z]B = R + [c]PK` is
+        the substrate's shared Schnorr readback (`secp.schnorr_verdicts`)
+        against `R`'s x and parity — a point equal to `R` is on the curve
+        by construction, so the wire checks that remain per row are SEC 1
         §2.3.4's — a `02`/`03` prefix and a coordinate below `p` — plus the
-        RFC's scalar bound `z < n`; a failing row carries masked junk to a
+        RFC's scalar bound `z < n`. A failing row carries masked junk to a
         cleared verdict instead of raising out of the batch, and no
         unvalidated integer meets a field op on the way (the scalar-field
         dtype aborts on an out-of-range operand, fractalyze/zk_dtypes#179 —
@@ -128,17 +128,21 @@ class Secp256k1Sha256:
         if signatures.shape[-1] != self.element_size + 32:
             raise ValueError("a signature is a 33-byte element and a 32-byte scalar")
 
-        def wire(rows: np.ndarray) -> list[tuple[int, int]]:
-            return [
-                (int(row[0]), int.from_bytes(row[1:].tobytes(), "big")) for row in rows
-            ]
-
-        pk_wire = wire(keys)
-        r_wire = wire(signatures[..., : self.element_size])
+        key_bytes = [row.tobytes() for row in keys]
+        r_bytes = [row.tobytes() for row in signatures[:, : self.element_size]]
         z_scalars = [
             int.from_bytes(row.tobytes(), "big")
-            for row in signatures[..., self.element_size :]
+            for row in signatures[:, self.element_size :]
         ]
+
+        def wire(encodings: list[bytes]) -> list[tuple[int, int]]:
+            return [
+                (encoding[0], int.from_bytes(encoding[1:], "big"))
+                for encoding in encodings
+            ]
+
+        pk_wire = wire(key_bytes)
+        r_wire = wire(r_bytes)
         p = curve.p
         checks = [
             pk_prefix in (2, 3)
@@ -156,22 +160,18 @@ class Secp256k1Sha256:
         ok = np.array(checks, dtype=bool) & on_curve
 
         challenges = [
-            self.h2(sig[: self.element_size].tobytes() + key.tobytes() + msg.tobytes())
-            for key, msg, sig in zip(keys, messages, signatures)
+            frost.compute_challenge(self, commitment, key, msg.tobytes())
+            for commitment, key, msg in zip(r_bytes, key_bytes, messages)
         ]
-        big_r = secp.double_multiple(
-            curve, z_scalars, [-c % self.order for c in challenges], key_points
+        return secp.schnorr_verdicts(
+            curve,
+            z_scalars,
+            challenges,
+            key_points,
+            [x for _, x in r_wire],
+            [prefix & 1 for prefix, _ in r_wire],
+            ok,
         )
-        # Reject the identity before its `(0, 0)` readback can match an
-        # `R` claiming `x = 0` — the same guard the BIP-340 verifier holds.
-        gone = secp.is_identity(curve, big_r)
-        verdicts = [
-            bool(valid) and not bool(dead) and x == r_x and y % 2 == (r_prefix & 1)
-            for (x, y), valid, dead, (r_prefix, r_x) in zip(
-                secp.affine_ints(curve, big_r), ok, gone, r_wire
-            )
-        ]
-        return np.array(verdicts, dtype=bool)
 
 
 if TYPE_CHECKING:

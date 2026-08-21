@@ -161,6 +161,47 @@ def double_multiple(
     ) + multiple(curve, point_scalars, points)
 
 
+def schnorr_verdicts(
+    curve: Curve,
+    base_scalars: list[int],
+    challenge_scalars: list[int],
+    key_points: ArrayLike,
+    claimed_xs: list[int],
+    claimed_parities: list[int],
+    ok: ArrayLike,
+) -> np.ndarray:
+    """Per-row Schnorr acceptance: does `base·G - challenge·P` equal the
+    claimed `R`, named by its x and y-parity bit? `bool[B]`.
+
+    The readback every Schnorr verifier on this substrate shares — BIP-340
+    pins the claimed parity even, RFC 9591 reads it off `R`'s compressed
+    prefix — with the subtraction folded into the challenge as `n - c`.
+    The identity is rejected before the coordinate compare: it reads back
+    as `(0, 0)` (see `affine_ints`), which a claim of `x = 0` must not
+    match. ECDSA does not ride this — its verdict compares `x mod n` and
+    carries no parity. Rows already failed in `ok` carry junk their
+    cleared verdict drops.
+    """
+    big_r = double_multiple(
+        curve,
+        base_scalars,
+        [-challenge % curve.n for challenge in challenge_scalars],
+        key_points,
+    )
+    gone = is_identity(curve, big_r)
+    verdicts = [
+        bool(valid) and not bool(dead) and x == want_x and y % 2 == want_parity
+        for (x, y), valid, dead, want_x, want_parity in zip(
+            affine_ints(curve, big_r),
+            np.asarray(ok),
+            gone,
+            claimed_xs,
+            claimed_parities,
+        )
+    ]
+    return np.array(verdicts, dtype=bool)
+
+
 def uncompressed_rows(curve: Curve, points: ArrayLike, ok: ArrayLike) -> np.ndarray:
     """Each point as SEC 1 `04 ‖ X ‖ Y`, masked rows zeroed: `uint8[B, 65]`.
 
