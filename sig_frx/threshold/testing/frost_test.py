@@ -11,12 +11,13 @@ encoding, and scalar derivation (raw-digest reduction versus hash-to-field),
 and none of that may leak into the round logic.
 
 The last gate is per-suite, because it is what each suite's output *is*:
-FROST(Ed25519, SHA-512)'s aggregate is a plain RFC 8032 signature, accepted
-by the existing batched Ed25519 verifier; FROST(secp256k1, SHA-256)'s is
-RFC 9591's own Schnorr encoding, verified through the suite's own batched
-surface and held row for row against Appendix B's naive transcription kept
-below as the reference pair (it is not a BIP-340 signature, and the test
-would be lying if it pretended a chain verifier existed for it).
+FROST(Ed25519, SHA-512)'s aggregate is a plain RFC 8032 signature, its suite
+`verify` delegating to the existing batched Ed25519 verifier; FROST(secp256k1,
+SHA-256)'s is RFC 9591's own Schnorr encoding, verified through the suite's
+own batched surface and held row for row against Appendix B's naive
+transcription kept below as the reference pair (it is not a BIP-340
+signature, and the test would be lying if it pretended a chain verifier
+existed for it).
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ import numpy as np
 from absl.testing import absltest, parameterized
 from python.runfiles import Runfiles
 
-from sig_frx.classical.eddsa import ed25519
 from sig_frx.threshold import frost
 from sig_frx.threshold.ed25519_sha512 import Ed25519Sha512
 from sig_frx.threshold.secp256k1_sha256 import Secp256k1Sha256
@@ -243,21 +243,45 @@ class FrostTest(parameterized.TestCase):
 
 
 class Ed25519CrossingTest(absltest.TestCase):
+    """The suite surface as the RFC 8032 crossing it delegates to."""
+
     def test_the_aggregate_verifies_as_plain_ed25519(self) -> None:
         v = _Vectors("ed25519")
+        cs = v.cs
+        assert isinstance(cs, Ed25519Sha512)
         signature = v.aggregate()
         corrupted = bytearray(signature)
         corrupted[0] ^= 1
-        stack = lambda *rows: np.stack(  # noqa: E731
-            [np.frombuffer(r, dtype=np.uint8) for r in rows]
-        )
-        verdicts = ed25519.Ed25519().verify(
-            stack(v.group_public_key, v.group_public_key),
-            stack(v.message, v.message),
-            stack(signature, bytes(corrupted)),
-            context=None,
+        verdicts = cs.verify(
+            _stack(v.group_public_key, v.group_public_key),
+            _stack(v.message, v.message),
+            _stack(signature, bytes(corrupted)),
         )
         self.assertEqual(list(np.asarray(verdicts)), [True, False])
+
+    def test_malformed_wire_rows_ride_to_false_without_raising(self) -> None:
+        v = _Vectors("ed25519")
+        cs = v.cs
+        assert isinstance(cs, Ed25519Sha512)
+        signature = v.aggregate()
+        cases = [
+            # The accepted row the malformed ones sit beside.
+            (v.group_public_key, signature),
+            # s = L: RFC 8032 §5.1.7's scalar bound, one past [0, L-1].
+            (v.group_public_key, signature[:32] + cs.order.to_bytes(32, "little")),
+            # R non-canonical: y = 2²⁵⁵ - 1 ≥ p, refused by strict decoding.
+            (v.group_public_key, b"\xff" * 32 + signature[32:]),
+            # A key with the same non-canonical encoding.
+            (b"\xff" * 32, signature),
+        ]
+        verdicts = cs.verify(
+            _stack(*(pk for pk, _ in cases)),
+            _stack(*([v.message] * len(cases))),
+            _stack(*(sig for _, sig in cases)),
+        )
+        self.assertEqual(
+            list(np.asarray(verdicts)), [True] + [False] * (len(cases) - 1)
+        )
 
 
 class Secp256k1SchnorrTest(absltest.TestCase):
@@ -344,7 +368,7 @@ class Secp256k1SchnorrTest(absltest.TestCase):
             _stack(*(msg for _, msg, _ in cases)),
             _stack(*(sig for _, _, sig in cases)),
         )
-        expected = [self._naive(v.cs, *case) for case in cases]
+        expected = [self._naive(cs, *case) for case in cases]
         self.assertEqual(list(map(bool, np.asarray(verdicts))), expected)
         # The agreement must not be vacuous: the published case accepts,
         # every corruption rejects.
@@ -361,7 +385,7 @@ class Secp256k1SchnorrTest(absltest.TestCase):
             # that rejects everything does not pass this gate.
             (v.group_public_key, signature),
             # z = n: the scalar bound, one past the RFC's [0, n-1].
-            (v.group_public_key, signature[:33] + v.cs.order.to_bytes(32, "big")),
+            (v.group_public_key, signature[:33] + cs.order.to_bytes(32, "big")),
             # An element prefix SEC 1 §2.3.4 does not define.
             (v.group_public_key, b"\x05" + signature[1:]),
             # R's x-coordinate at p: out of the field's range.

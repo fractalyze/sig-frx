@@ -5,8 +5,8 @@ The ciphersuite is constants and hash instantiations over the group the
 Ed25519 scheme already uses: same curve module, same encode/decode, same
 ladder, at `B = 1` on the host. Its aggregate output is a plain RFC 8032
 signature — `H2` deliberately omits the domain separator for exactly that
-compatibility — so the existing batched Ed25519 verifier is this suite's
-verifier, and the tests gate on that crossing.
+compatibility — so this suite's `verify` delegates to the existing batched
+Ed25519 verifier, and the tests gate on that crossing.
 
 SHA-512 comes from `hashlib` for the same recorded reason as the Ed25519
 scheme's concrete paths: hash-frx ships none, and everything here is host
@@ -21,8 +21,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from frx.typing import ArrayLike
 
 from sig_frx.classical import edwards, group
+from sig_frx.classical.eddsa import ed25519
 from sig_frx.threshold import frost
 
 _CONTEXT = b"FROST-ED25519-SHA512-v1"
@@ -116,6 +118,19 @@ class Ed25519Sha512:
         if (x, y) == (0, 1):
             raise ValueError("the identity element has no encoding here")
         return edwards.encode_affine(x, y)
+
+    def verify(
+        self, public_key: ArrayLike, message: ArrayLike, signature: ArrayLike
+    ) -> Any:
+        """The aggregate's verdicts, `bool[B]`: plain RFC 8032 verification.
+
+        A delegation, not a second Edwards path — the aggregate is a plain
+        RFC 8032 signature (`H2` above), so the scheme's own batched
+        verifier is this suite's: strict decoding, cofactorless, a
+        malformed row answering `False` rather than raising. RFC 8032's
+        Ed25519 takes no context, so none is exposed here.
+        """
+        return ed25519.Ed25519().verify(public_key, message, signature, context=None)
 
 
 if TYPE_CHECKING:
