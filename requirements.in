@@ -17,4 +17,4 @@ frx==0.10.2.dev20260820091735
 frxlib==0.10.2.dev20260820091735
 frx-cuda12-pjrt==0.10.2.dev20260820091735
 frx-cuda12-plugin==0.10.2.dev20260820091735
-zk-dtypes==0.0.16
+zk-dtypes==0.0.17

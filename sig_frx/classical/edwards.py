@@ -1,13 +1,27 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""Twisted Edwards curve arithmetic for Ed25519 (RFC 8032).
+"""Ed25519's curve as curated zk_dtypes point types, plus what those omit.
 
-The hand-rolled substrate for the curve family EdDSA
-lives on: fields minted from the modulus, complete formulas because
-verification is traced, one implementation for both namespaces, and
-coordinates that keep a batch axis even at `B = 1`. What is different is the
-group law's source — RFC 8032 §5.1.4 publishes the extended-homogeneous
-formulas itself, complete for `a = -1` and non-square `d`, so the
-transcription and the standard are one document here.
+The group law, the scalar multiplication, and the point representations live
+in zk_dtypes — the `ed25519_g1_*` dtypes carry `+`, `-`, and point × scalar
+as ufuncs over fused C++ kernels, in the extended homogeneous
+`(X : Y : Z : T)` representation RFC 8032 §5.1.4 defines its formulas over —
+so nothing in this repo implements Edwards curve arithmetic anymore. What
+this module keeps is exactly what the dtypes do not expose:
+
+- the pairing that names which dtypes form one curve, with the integer view
+  of its constants derived from the dtypes' own metadata (`ecinfo`/`pfinfo`);
+- RFC 8032 §5.1.3's decoding — the square-root x-recovery stays field
+  algebra over `prime_field` here, per the recorded contract that zk_dtypes
+  exposes no lift/decompression — and §5.1.2's encoding;
+- the canonical-parity read those encodings hang on;
+- the host-integer scalar handling, including the widening to the full
+  group order that keeps unreduced verification scalars exact
+  (`wide_multiple` below).
+
+Everything here is host-path, like `secp.py`: `.raw` readback and per-entry
+construction are host operations, and the GPU story for this curve is EC
+kernels over these same dtypes (fractalyze/sig-frx#36), not a traced
+re-derivation of the group law.
 
 ## Canonical storage is load-bearing
 
@@ -15,81 +29,87 @@ The one thing an Edwards *encoding* needs that field algebra cannot give is
 the sign of `x` — the parity of the canonical residue (RFC 8032 §5.1.2). With
 canonical (`std`) storage the parity is a bitcast of the lowest lane; with
 Montgomery storage that read is exactly the mistake `lattice/mldsa/arith.py`
-warns about. So the field is minted canonical *on purpose*, and `parity` is
-the only place in the classical substrate allowed to read storage as bits.
+warns about. So the decoding field is minted canonical *on purpose*, and
+`parity` is the only place in the classical substrate allowed to read
+storage as bits.
 
-Points ride as extended homogeneous `(X : Y : Z : T)` with `x = X/Z`,
-`y = Y/Z`, `xy = T/Z` — the representation §5.1.4 defines its formulas over.
-The identity is `(0 : Z : Z : 0)`.
+## Reduction is modulo 8L, not L
+
+The curve's cofactor is 8, so the full group has order `8·L` and
+`k·P = (k mod 8L)·P` for *every* point, torsion components included —
+while reducing modulo `L` alone is a fact about the prime-order subgroup
+only. `multiple` reduces `% L` and therefore serves scalars already below
+`L` and multiples of the base point; `wide_multiple` is exact for
+everything else, which is what lets the verifier keep driving the group
+with its unreduced digest scalar (`eddsa/ed25519.py`).
 """
 
 from __future__ import annotations
 
 import functools
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import Any
 
 import numpy as np
 import zk_dtypes
-from frx import lax
 from frx.typing import ArrayLike
 
-from sig_frx.arrays import namespace
 from sig_frx.classical import group
-
-
-class ExtPoint(NamedTuple):
-    """An extended-homogeneous twisted-Edwards point `(X : Y : Z : T)`."""
-
-    x: Any
-    y: Any
-    z: Any
-    t: Any
 
 
 @dataclass(frozen=True)
 class EdwardsCurve:
-    """A twisted Edwards curve `-x² + y² = 1 + d·x²y²` over `F_p`, order-`L`
-    prime subgroup.
+    """A twisted Edwards curve `-x² + y² = 1 + d·x²y²`: four dtype handles,
+    everything else derived.
 
-    `a = -1` is fixed rather than a field: RFC 8032 §5.1.4's complete formulas
-    are for exactly that case, and edwards25519 is the one instance this repo
-    ships. Frozen with value equality for the seam's pytree-aux rule.
+    The integers come off the dtypes' own metadata — `ecinfo` carries the
+    equation and the base point, `pfinfo` the two moduli — so the pinned
+    wheel is the single source of truth (`testing/eddsa_test.py` holds the
+    derivation against RFC 8032 §5.1's published values). `a = -1` is a
+    property of the family the dtypes implement, not a field here.
+
+    Frozen with value equality for the seam's pytree-aux rule — the dtype
+    handles are classes, identical across instances of the same curve.
     """
 
-    p: int  # base field modulus
-    d: int  # the curve's d coefficient
-    order: int  # order of the base point (RFC 8032's L), prime
-    gx: int  # base point, affine x
-    gy: int  # base point, affine y
+    point: Any  # the affine G1 dtype, standard domain
+    accumulator: Any  # the extended G1 dtype — what sums and multiples ride
+    scalar: Any  # the scalar-field dtype, modulo L
+    field: Any  # the base-field dtype — what decoding's arithmetic runs over
+
+    # RFC 8032 §5.1: the group has order 8·L. The cofactor is what
+    # `wide_multiple`'s exactness stands on.
+    cofactor = 8
 
     @functools.cached_property
-    def field(self) -> Any:
-        """The base field, canonical storage — see the module docstring."""
-        # curated=False: frx supports runtime-modulus fields generically but
-        # curated dtypes only per name, and this field verifies through frx —
-        # the curated curve25519_bf outran the frx pin (zk_dtypes#178).
-        return zk_dtypes.prime_field(self.p, storage="std", curated=False)
+    def p(self) -> int:
+        """Base field modulus."""
+        return zk_dtypes.pfinfo(self.field).modulus
 
     @functools.cached_property
-    def scalar_field(self) -> Any:
-        """The mod-`L` scalar field, as a constructible dtype class.
+    def order(self) -> int:
+        """Order of the base point (RFC 8032's L), prime."""
+        return zk_dtypes.pfinfo(self.scalar).modulus
 
-        Unlike `field` above this one takes the factory's curated resolution:
-        it is host-only (FROST's round scalars), so the frx-under-trace
-        hazard behind `field`'s opt-out (zk_dtypes#178) cannot reach it.
-        """
-        return zk_dtypes.prime_field(self.order).type
+    @functools.cached_property
+    def d(self) -> int:
+        """The curve's d coefficient."""
+        return int(zk_dtypes.ecinfo(self.point).d)
+
+    @functools.cached_property
+    def gx(self) -> int:
+        """Base point, affine x."""
+        return int(zk_dtypes.ecinfo(self.point).gx)
+
+    @functools.cached_property
+    def gy(self) -> int:
+        """Base point, affine y."""
+        return int(zk_dtypes.ecinfo(self.point).gy)
 
     @functools.cached_property
     def d_field(self) -> np.ndarray:
         """`d` as a field scalar — what §5.1.3's decoding evaluates with."""
         return np.array(self.d % self.p, dtype=self.field)
-
-    @functools.cached_property
-    def coeff_2d(self) -> np.ndarray:
-        """`2d` as a field scalar — the constant §5.1.4's addition takes."""
-        return np.array(2 * self.d % self.p, dtype=self.field)
 
     @functools.cached_property
     def one(self) -> np.ndarray:
@@ -101,14 +121,20 @@ class EdwardsCurve:
         return np.array(pow(2, (self.p - 1) // 4, self.p), dtype=self.field)
 
     @functools.cached_property
-    def generator(self) -> ExtPoint:
-        """The base point `B`, extended coordinates, shaped `[1]`."""
-        return ExtPoint(
-            np.array([self.gx], dtype=self.field),
-            np.array([self.gy], dtype=self.field),
-            np.array([1], dtype=self.field),
-            np.array([self.gx * self.gy % self.p], dtype=self.field),
-        )
+    def generator(self) -> np.ndarray:
+        """The base point `B` as a `[1]`-shaped affine array."""
+        return np.array([self.point((self.gx, self.gy))], dtype=self.point)
+
+    @functools.cached_property
+    def identity(self) -> np.ndarray:
+        """The neutral element as a `[1]`-shaped affine array.
+
+        `(0, 1)` is a point on this curve like any other — the Weierstrass
+        sentinel's trick of reading the all-zero buffer as infinity has no
+        Edwards analogue, and an all-zero extended point is worse than
+        wrong: its projective compare answers `True` against *every* point.
+        """
+        return np.array([self.point((0, 1))], dtype=self.point)
 
     @functools.cached_property
     def le_byte_weights(self) -> np.ndarray:
@@ -116,66 +142,69 @@ class EdwardsCurve:
         return np.array([pow(256, i, self.p) for i in range(32)], dtype=self.field)
 
 
-# RFC 8032 §5.1: edwards25519. `d` is the table's -121665/121666, computed
-# from the fraction the standard defines it by; the test pins the quotient to
-# the decimal the same table prints, so a slip in either fails against the
-# other. The base point is RFC 7748's, transcribed from the §5.1 table.
+# RFC 8032 §5.1: edwards25519. The integers derive from the dtype metadata;
+# the test pins d to the decimal the §5.1 table prints and the base point to
+# RFC 7748's, so a slip in the wheel fails against the standard.
 ED25519 = EdwardsCurve(
-    p=2**255 - 19,
-    d=-121665 * pow(121666, -1, 2**255 - 19) % (2**255 - 19),
-    order=2**252 + 27742317777372353535851937790883648493,
-    gx=15112221349535400772501151409588531511454012693041857206046113283949847762202,
-    gy=46316835694926478169428394003475163141307993866256225615783033603165251855960,
+    point=zk_dtypes.ed25519_g1_affine,
+    accumulator=zk_dtypes.ed25519_g1_extended,
+    scalar=zk_dtypes.curve25519_sf,
+    field=zk_dtypes.curve25519_bf,
 )
 
 
-def identity(curve: EdwardsCurve, like: ArrayLike) -> ExtPoint:
-    """The neutral point `(0 : 1 : 1 : 0)`, broadcast to `like`'s shape."""
-    zero = like * np.array(0, dtype=curve.field)
-    return ExtPoint(zero, zero + curve.one, zero + curve.one, zero)
+def multiple(curve: EdwardsCurve, scalars: list[int], points: ArrayLike) -> np.ndarray:
+    """`scalars[i] · points[i]`, one batched kernel call — `[B]` extended.
 
-
-def from_affine(curve: EdwardsCurve, x: ArrayLike, y: ArrayLike) -> ExtPoint:
-    """Affine `(x, y)` as an extended point: `Z = 1`, `T = xy`."""
-    one = x * np.array(0, dtype=curve.field) + curve.one
-    return ExtPoint(x, y, one, x * y)
-
-
-def add(curve: EdwardsCurve, p: ExtPoint, q: ExtPoint) -> ExtPoint:
-    """`P + Q` — RFC 8032 §5.1.4's complete addition, transcribed."""
-    a = (p.y - p.x) * (q.y - q.x)
-    b = (p.y + p.x) * (q.y + q.x)
-    c = p.t * curve.coeff_2d * q.t
-    d = (p.z + p.z) * q.z
-    e = b - a
-    f = d - c
-    g = d + c
-    h = b + a
-    return ExtPoint(e * f, g * h, f * g, e * h)
-
-
-def double(curve: EdwardsCurve, p: ExtPoint) -> ExtPoint:
-    """`2P` — RFC 8032 §5.1.4's doubling, transcribed."""
-    a = p.x * p.x
-    b = p.y * p.y
-    c = p.z * p.z
-    c = c + c
-    h = a + b
-    e = h - (p.x + p.y) * (p.x + p.y)
-    g = a - b
-    f = c + g
-    return ExtPoint(e * f, g * h, f * g, e * h)
-
-
-def scalar_mul(curve: EdwardsCurve, bits: ArrayLike, point: ExtPoint) -> ExtPoint:
-    """`k·P` over `k`'s bits, most significant first — the shared ladder.
-
-    `group.ladder` bound to this family's complete formulas. A scalar wider
-    than `L` reduces through the group itself, which is what lets a 512-bit
-    SHA-512 digest drive the ladder straight off its bytes with no arithmetic
-    modulo `L` on the device.
+    Scalars reduce `% L` in Python first (the dtype refuses larger ints,
+    fractalyze/zk_dtypes#179) — sound when the scalar is already below `L`
+    or the point lies in the base point's prime-order subgroup. A wide
+    scalar on an arbitrary decoded point needs `wide_multiple`: with
+    cofactor 8, `% L` is not the group's own reduction.
     """
-    return group.ladder(curve, bits, point, double=double, add=add, identity=identity)
+    reduced = np.array([k % curve.order for k in scalars], dtype=curve.scalar)
+    return points * reduced
+
+
+def wide_multiple(
+    curve: EdwardsCurve, scalars: list[int], points: ArrayLike
+) -> np.ndarray:
+    """`scalars[i] · points[i]` exact for any width and any curve point.
+
+    Reduces modulo the full group order `8L` — the group's own fact for
+    every point, torsion included — then splits on the cofactor rather than
+    on `L`: `k = 8q + s` gives `q ≤ (8L-1)/8 < L` and `s < 8` by
+    construction, so both scalars are ones `multiple` takes unchanged, and
+    `k·P = q·(8P) + s·P`. Doubling three times to reach `8P` also clears
+    the torsion component, which is what makes the `q` term immune to the
+    reduction `multiple` applies. Two batched multiplications, against the
+    three that splitting on `L` costs (that form has to synthesize `L·P`,
+    a full-width multiply whose only job is to be discarded).
+    """
+    points = np.asarray(points)
+    reduced = [k % (curve.cofactor * curve.order) for k in scalars]
+    torsion_free = points
+    for _ in range(curve.cofactor.bit_length() - 1):  # the cofactor is 2³
+        torsion_free = torsion_free + torsion_free
+    return multiple(
+        curve, [k // curve.cofactor for k in reduced], torsion_free
+    ) + multiple(curve, [k % curve.cofactor for k in reduced], points)
+
+
+def affine_ints(curve: EdwardsCurve, points: ArrayLike) -> list[tuple[int, int]]:
+    """Any point batch back to affine `(x, y)` Python integers."""
+    converted = np.asarray(points).astype(curve.point).astype(object)
+    return [entry.raw for entry in converted]
+
+
+def is_identity(curve: EdwardsCurve, points: ArrayLike) -> np.ndarray:
+    """Whether each entry is the group identity, elementwise.
+
+    A dtype compare, so it costs no readback and reads either point
+    representation — the affine identity and its extended form compare
+    equal, the projective compare being what decides.
+    """
+    return np.asarray(points) == curve.identity
 
 
 def field_from_le_bytes(curve: EdwardsCurve, data: ArrayLike) -> Any:
@@ -196,11 +225,8 @@ def parity(curve: EdwardsCurve, value: ArrayLike) -> Any:
     the parity is a bitcast and a mask. Montgomery storage would make this
     read a different number, which is why the curve mints canonical fields.
     """
-    xnp = namespace(value)
-    if xnp is np:
-        lanes = np.asarray(value).view(np.uint32).reshape(np.shape(value) + (8,))
-        return lanes[..., 0] & np.uint32(1)
-    return lax.bitcast_convert_type(value, np.uint32)[..., 0] & np.uint32(1)
+    lanes = np.asarray(value).view(np.uint32).reshape(np.shape(value) + (8,))
+    return lanes[..., 0] & np.uint32(1)
 
 
 def decompress_x(curve: EdwardsCurve, y: Any, sign: Any) -> tuple[Any, Any]:
@@ -209,8 +235,9 @@ def decompress_x(curve: EdwardsCurve, y: Any, sign: Any) -> tuple[Any, Any]:
     `x² = (y² - 1)/(d·y² + 1)`; the candidate root is
     `u·v³·(u·v⁷)^((p-5)/8)`, corrected by `√-1` when it squares to `-u/v`,
     and decoding fails when neither squares back — or when `x = 0` arrives
-    with the sign bit set. All of it stays arithmetic: failed entries carry a
-    junk `x` and a false flag, never a branch.
+    with the sign bit set. A failed entry carries a junk `x` and a false
+    flag rather than raising, which is what lets one decoding serve a whole
+    batch: the caller's mask drops the row.
     """
     y2 = y * y
     u = y2 - curve.one
@@ -223,43 +250,38 @@ def decompress_x(curve: EdwardsCurve, y: Any, sign: Any) -> tuple[Any, Any]:
     corrected = candidate * curve.sqrt_minus_one
     needs_correction = squared == -u
     ok = is_root | needs_correction
-    flag = _as_field_flag(curve, is_root)
-    x = flag * candidate + (curve.one - flag) * corrected
+    x = np.where(is_root, candidate, corrected)
     x_is_zero = x == np.array(0, dtype=curve.field)
-    xnp = namespace(y)
-    sign_arr = xnp.asarray(sign)
+    sign_arr = np.asarray(sign)
     ok = ok & ~(x_is_zero & (sign_arr == np.uint8(1)))
     wrong_sign = parity(curve, x) != sign_arr.astype(np.uint32)
-    sign_flag = _as_field_flag(curve, wrong_sign)
-    x = sign_flag * (-x) + (curve.one - sign_flag) * x
-    return x, ok
+    return np.where(wrong_sign, -x, x), ok
 
 
-def _as_field_flag(curve: EdwardsCurve, mask: Any) -> Any:
-    """A boolean mask as a {0, 1} field element, for arithmetic selection."""
-    xnp = namespace(mask)
-    return xnp.asarray(mask).astype(np.int32).astype(curve.field)
-
-
-def decode(curve: EdwardsCurve, encoded: ArrayLike) -> tuple[ExtPoint, Any]:
-    """RFC 8032 §5.1.3: `[..., 32]` bytes to points, with a verdict each.
+def decode(curve: EdwardsCurve, encoded: ArrayLike) -> tuple[np.ndarray, Any]:
+    """RFC 8032 §5.1.3: `[B, 32]` bytes to affine points, a verdict each.
 
     The sign bit is the top bit of the last byte; the remaining 255 bits are
-    `y`, refused when not canonical (`y ≥ p`). A failed entry carries junk
-    coordinates and a false verdict — arithmetic, never a branch — which is
-    what lets one decoding serve a traced batch and a concrete host caller
-    alike.
+    `y`, refused when not canonical (`y ≥ p`). The recovered coordinates read
+    back to integers and construct the affine dtype per row — host codec, per
+    the module's host-path rule — so a failed entry carries junk coordinates
+    (the dtype constructs off-curve pairs without complaint) and a false
+    verdict its caller's mask drops.
     """
-    xnp = namespace(encoded)
-    encoded = xnp.asarray(encoded)
+    encoded = np.asarray(encoded)
     sign = encoded[..., 31] >> np.uint8(7)
-    y_bytes = xnp.concatenate(
+    y_bytes = np.concatenate(
         [encoded[..., :31], encoded[..., 31:32] & np.uint8(0x7F)], axis=-1
     )
     canonical = group.bytes_below(y_bytes, curve.p, byteorder="little")
     y = field_from_le_bytes(curve, y_bytes)
     x, ok = decompress_x(curve, y, sign)
-    return from_affine(curve, x, y), canonical & ok
+    xs = np.asarray(x).astype(object)
+    ys = np.asarray(y).astype(object)
+    points = np.array(
+        [curve.point((int(a), int(b))) for a, b in zip(xs, ys)], dtype=curve.point
+    )
+    return points, canonical & ok
 
 
 def encode_affine(x: int, y: int) -> bytes:

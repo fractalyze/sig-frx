@@ -25,10 +25,21 @@ lands in hash-frx (where every symmetric primitive lives), not here.
 two a consensus system demands — and what it accepts as a canonical encoding
 — is exactly the variant surface tracked separately (strict RFC 8032 versus
 ZIP-215). The core takes the strict readings the document states outright:
-`y ≥ p` fails decoding for both `A` and `R`, and `S ≥ L` is rejected. No
-scalar arithmetic happens modulo `L` on the device: `S` and `k` drive the
-ladders straight off their wire and digest bytes, and the group performs the
-reduction (`edwards.scalar_mul`).
+`y ≥ p` fails decoding for both `A` and `R`, and `S ≥ L` is rejected. The
+digest scalar `k` stays unreduced in meaning: it reaches the group through
+`edwards.wide_multiple`, whose modulo-`8L` reduction is the group's own fact
+for every decoded point, torsion components included. `S` rides
+`edwards.multiple`'s `% L` against the prime-order base point, with `S ≥ L`
+rows already refused by the range check.
+
+Leaving `k` unreduced is a third axis of the same variant surface, and one
+worth naming because the reference implementations take the other side: ref10,
+libsodium and Go all reduce the digest modulo `L` before the multiply. The two
+readings agree on every honest signature and diverge only when `A` carries a
+torsion component — so this is a consensus-divergence class, not an interop
+bug, and §7.1's vectors cannot gate it in either direction. What decides it
+here is that §5.1.7 states the equation over the unreduced scalar, the same
+literal-reading rule the rest of this module follows.
 
 Nothing re-encodes a point in verification: the `k` hash absorbs `R`'s and
 `A`'s *wire* bytes, which is what the standard hashes too.
@@ -149,28 +160,40 @@ class Ed25519:
         message = xnp.asarray(message)
         signature = xnp.asarray(signature)
 
+        # The digest comes first: it is where a tracer is refused (no device
+        # SHA-512 yet), and everything after it is host codec and kernels
+        # that need concrete bytes.
+        digest = _sha512_rows(
+            xnp.concatenate([signature[..., :32], public_key, message], axis=-1)
+        )
+        public_key = np.asarray(public_key, dtype=np.uint8)
+        signature = np.asarray(signature, dtype=np.uint8)
+
         point_a, a_ok = edwards.decode(curve, public_key)
         point_r, r_ok = edwards.decode(curve, signature[..., :32])
         s_bytes = signature[..., 32:64]
         s_ok = group.bytes_below(s_bytes, curve.order, byteorder="little")
 
-        digest = _sha512_rows(
-            xnp.concatenate([signature[..., :32], public_key, message], axis=-1)
-        )
-        # Both scalars are little-endian integers; the ladder reads bits most
-        # significant first, so the byte axis reverses on the way in.
-        k_bits = group.bits_of(digest[..., ::-1])
-        s_bits = group.bits_of(s_bytes[..., ::-1])
+        # Both scalars are little-endian integers off the wire and digest
+        # bytes. An S at or above L is gated by s_ok, so multiple's % L only
+        # ever rewrites a row the verdict already refuses.
+        s_ints = [int.from_bytes(row.tobytes(), "little") for row in s_bytes]
+        k_ints = [int.from_bytes(row.tobytes(), "little") for row in digest]
 
-        lhs = edwards.scalar_mul(curve, s_bits, curve.generator)
-        rhs = edwards.add(curve, point_r, edwards.scalar_mul(curve, k_bits, point_a))
-        return a_ok & r_ok & s_ok & group.equal(lhs, rhs)
+        lhs = edwards.multiple(curve, s_ints, curve.generator)
+        rhs = point_r + edwards.wide_multiple(curve, k_ints, point_a)
+        return a_ok & r_ok & s_ok & (lhs == rhs)
 
     def _encode_multiple_of_b(self, scalar: int) -> bytes:
-        """`scalar·B` encoded per §5.1.2, on the host path."""
+        """`scalar·B` encoded per §5.1.2, on the host path.
+
+        `B` generates the prime-order subgroup, so `multiple`'s `% L` is the
+        group's own reduction here (the clamped scalar does exceed `L`).
+        """
         curve = self.curve
-        point = edwards.scalar_mul(curve, group.int_bits(scalar), curve.generator)
-        ((x, y),) = group.to_affine_ints(point)
+        ((x, y),) = edwards.affine_ints(
+            curve, edwards.multiple(curve, [scalar], curve.generator)
+        )
         return edwards.encode_affine(x, y)
 
 

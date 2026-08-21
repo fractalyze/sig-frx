@@ -3,10 +3,10 @@
 
 The ciphersuite is constants and hash instantiations over the group the
 Ed25519 scheme already uses: same curve module, same encode/decode, same
-ladder, at `B = 1` on the host. Its aggregate output is a plain RFC 8032
-signature — `H2` deliberately omits the domain separator for exactly that
-compatibility — so this suite's `verify` delegates to the existing batched
-Ed25519 verifier, and the tests gate on that crossing.
+curated point dtypes, at `B = 1` on the host. Its aggregate output is a
+plain RFC 8032 signature — `H2` deliberately omits the domain separator for
+exactly that compatibility — so this suite's `verify` delegates to the
+existing batched Ed25519 verifier, and the tests gate on that crossing.
 
 SHA-512 comes from `hashlib` for the same recorded reason as the Ed25519
 scheme's concrete paths: hash-frx ships none, and everything here is host
@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from frx.typing import ArrayLike
 
-from sig_frx.classical import edwards, group
+from sig_frx.classical import edwards
 from sig_frx.classical.eddsa import ed25519
 from sig_frx.threshold import frost
 
@@ -47,12 +47,7 @@ class Ed25519Sha512:
     element_size = 32
 
     curve = edwards.ED25519
-
-    @property
-    def scalar_field(self) -> Any:
-        # A property so the curve's lazy mint stays lazy — a class attribute
-        # would resolve it at import time.
-        return edwards.ED25519.scalar_field
+    scalar_field = edwards.ED25519.scalar
 
     def h1(self, message: bytes) -> int:
         return _reduced(
@@ -90,37 +85,31 @@ class Ed25519Sha512:
             self.element_scalar_mult(self.curve.generator, scalar)
         )
 
-    def deserialize_element(self, data: bytes) -> edwards.ExtPoint:
+    def deserialize_element(self, data: bytes) -> np.ndarray:
         point, ok = edwards.decode(
             self.curve, np.frombuffer(data, dtype=np.uint8)[None, :]
         )
         if not bool(np.asarray(ok)[0]):
             raise ValueError("not a canonical encoding of a curve point")
-        # The identity in extended coordinates is (0 : Z : Z : 0) — read off
-        # the projective components, sparing the affine division a readback
-        # would pay.
-        zero = np.array(0, dtype=self.curve.field)
-        if bool(np.asarray((point.x == zero) & (point.y == point.z))[0]):
+        if bool(np.asarray(edwards.is_identity(self.curve, point))[0]):
             raise ValueError("the identity element has no place on the wire")
-        return point
+        return point.astype(self.curve.accumulator)
 
-    def element_add(
-        self, left: edwards.ExtPoint, right: edwards.ExtPoint
-    ) -> edwards.ExtPoint:
-        return edwards.add(self.curve, left, right)
+    def element_add(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+        return left + right
 
-    def element_scalar_mult(
-        self, element: edwards.ExtPoint, scalar: int
-    ) -> edwards.ExtPoint:
-        return edwards.scalar_mul(self.curve, group.int_bits(scalar), element)
+    def element_scalar_mult(self, element: np.ndarray, scalar: int) -> np.ndarray:
+        # Every scalar crossing this seam is already in [0, L-1] (the seam's
+        # scalar contract), so multiple's % L is a no-op, not a reduction.
+        return edwards.multiple(self.curve, [scalar], element)
 
-    def identity_element(self) -> edwards.ExtPoint:
-        return edwards.identity(self.curve, self.curve.generator.x)
+    def identity_element(self) -> np.ndarray:
+        return self.curve.identity.astype(self.curve.accumulator)
 
-    def serialize_element(self, element: edwards.ExtPoint) -> bytes:
-        ((x, y),) = group.to_affine_ints(element)
-        if (x, y) == (0, 1):
+    def serialize_element(self, element: np.ndarray) -> bytes:
+        if bool(np.asarray(edwards.is_identity(self.curve, element))[0]):
             raise ValueError("the identity element has no encoding here")
+        ((x, y),) = edwards.affine_ints(self.curve, element)
         return edwards.encode_affine(x, y)
 
     def verify(

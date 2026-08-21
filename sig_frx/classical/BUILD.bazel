@@ -1,10 +1,10 @@
 load("@rules_python//python:defs.bzl", "py_library")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 
-# The Edwards substrate's plumbing: byte/bit reshapes, the bytewise range
-# compare, the fixed-shape ladder, and the host readback. Once shared with a
-# hand-rolled Weierstrass substrate; the SEC curves now ride curated zk_dtypes
-# point types (:secp), which keep only `pow_const` from here.
+# The encoding-side plumbing left after both substrates moved onto curated
+# zk_dtypes point types: the constant-exponent field power both square-root
+# recoveries run on, plus the bytewise range compare and weighted byte sum
+# that only the Edwards encodings call today.
 py_library(
     name = "group",
     srcs = [
@@ -13,7 +13,6 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//sig_frx:arrays",
         requirement("frx"),
         requirement("numpy"),
     ],
@@ -38,9 +37,10 @@ py_library(
     ],
 )
 
-# The twisted-Edwards sibling: the same substrate contract, RFC 8032's own
-# formulas, and the one deliberate storage read (the sign bit) that makes
-# canonical-storage fields a requirement rather than a preference.
+# The twisted-Edwards sibling: the same substrate contract over the curated
+# ed25519 point dtypes, RFC 8032's decoding and encodings, and the one
+# deliberate storage read (the sign bit) that makes canonical-storage fields
+# a requirement rather than a preference.
 py_library(
     name = "edwards",
     srcs = [
@@ -50,7 +50,6 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":group",
-        "//sig_frx:arrays",
         requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),

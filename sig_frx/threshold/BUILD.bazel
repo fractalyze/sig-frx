@@ -25,7 +25,6 @@ py_library(
     deps = [
         ":frost",
         "//sig_frx/classical:edwards",
-        "//sig_frx/classical:group",
         "//sig_frx/classical/eddsa:ed25519",
         requirement("frx"),
         requirement("numpy"),
