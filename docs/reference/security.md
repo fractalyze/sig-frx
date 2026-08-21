@@ -39,6 +39,10 @@ a claim nobody can test is worse than no claim: it gets read as a guarantee.
   attacks.**
 - **Memory hygiene.** Secret material is not zeroized; a device buffer's lifetime
   belongs to the runtime.
+- **Distributed key generation.** FROST's group secret is established by a
+  trusted dealer (RFC 9591 Appendix C) who computes the whole key; the
+  threshold property protects signing, not dealing. The decision and its
+  consequences are recorded on [the FROST page](../schemes/frost.md).
 
 Do not sign with a long-lived secret key on a machine an adversary can measure.
 
