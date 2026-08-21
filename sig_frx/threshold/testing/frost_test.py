@@ -13,9 +13,10 @@ and none of that may leak into the round logic.
 The last gate is per-suite, because it is what each suite's output *is*:
 FROST(Ed25519, SHA-512)'s aggregate is a plain RFC 8032 signature, accepted
 by the existing batched Ed25519 verifier; FROST(secp256k1, SHA-256)'s is
-RFC 9591's own Schnorr encoding, checked against Appendix B's verification
-transcribed below (it is not a BIP-340 signature, and the test would be
-lying if it pretended a chain verifier existed for it).
+RFC 9591's own Schnorr encoding, verified through the suite's own batched
+surface and held row for row against Appendix B's naive transcription kept
+below as the reference pair (it is not a BIP-340 signature, and the test
+would be lying if it pretended a chain verifier existed for it).
 """
 
 from __future__ import annotations
@@ -45,6 +46,11 @@ _SUITES: dict[str, tuple[frost.Ciphersuite, str]] = {
 }
 
 _PARAMS = tuple(("_" + name, name) for name in _SUITES)
+
+
+def _stack(*rows: bytes) -> np.ndarray:
+    """Byte strings as one `uint8[B, L]` batch, a row each."""
+    return np.stack([np.frombuffer(row, dtype=np.uint8) for row in rows])
 
 
 class _Vectors:
@@ -255,14 +261,22 @@ class Ed25519CrossingTest(absltest.TestCase):
 
 
 class Secp256k1SchnorrTest(absltest.TestCase):
+    """The production surface against Appendix B's own form.
+
+    The batched `verify` reshapes the RFC's per-signature check — masked
+    wire validation, one two-term combination, a coordinate compare — so
+    the RFC's algorithm is kept transcribed beside it and the two are held
+    to agree row for row (`docs/reference/conventions.md`: test the
+    reshaped form against the standard's own form).
+    """
+
     def _accepts(
         self, cs: frost.Ciphersuite, public_key: bytes, message: bytes, signature: bytes
     ) -> bool:
         """RFC 9591 Appendix B's prime-order verification, transcribed.
 
-        `c = H2(R ‖ PK ‖ msg)`; accept iff `[z]B = R + [c]PK`. Transcribed
-        here because this suite's output is RFC 9591's own encoding with no
-        chain verifier to cross into.
+        `c = H2(R ‖ PK ‖ msg)`; accept iff `[z]B = R + [c]PK` — naively,
+        one signature at a time, raising where deserialization MUST fail.
         """
         commitment_bytes = signature[: cs.element_size]
         z = cs.deserialize_scalar(signature[cs.element_size :])
@@ -273,14 +287,100 @@ class Secp256k1SchnorrTest(absltest.TestCase):
         )
         return cs.scalar_base_mult(z) == cs.serialize_element(expected)
 
-    def test_the_aggregate_verifies_per_appendix_b(self) -> None:
+    def _naive(
+        self, cs: frost.Ciphersuite, public_key: bytes, message: bytes, signature: bytes
+    ) -> bool:
+        """The transcription as a verdict: a MUST-abort is a rejection.
+
+        The batch surface answers `False` where the RFC's deserialization
+        aborts, so agreement is checked on the verdict both express.
+        """
+        try:
+            return self._accepts(cs, public_key, message, signature)
+        except ValueError:
+            return False
+
+    def test_the_aggregate_verifies_through_the_production_surface(self) -> None:
         v = _Vectors("secp256k1")
+        # `verify` is the concrete suite's surface, not the round Protocol's
+        # — the rounds never verify (`frost.py`), so the narrowing is the
+        # test saying which suite it gates.
+        cs = v.cs
+        assert isinstance(cs, Secp256k1Sha256)
         signature = v.aggregate()
-        self.assertTrue(self._accepts(v.cs, v.group_public_key, v.message, signature))
         corrupted = bytearray(signature)
         corrupted[-1] ^= 1
-        self.assertFalse(
-            self._accepts(v.cs, v.group_public_key, v.message, bytes(corrupted))
+        verdicts = cs.verify(
+            _stack(v.group_public_key, v.group_public_key),
+            _stack(v.message, v.message),
+            _stack(signature, bytes(corrupted)),
+        )
+        self.assertEqual(list(np.asarray(verdicts)), [True, False])
+
+    def test_the_production_surface_agrees_with_appendix_b(self) -> None:
+        v = _Vectors("secp256k1")
+        cs = v.cs
+        assert isinstance(cs, Secp256k1Sha256)
+        signature = v.aggregate()
+
+        def flipped(data: bytes, index: int) -> bytes:
+            corrupted = bytearray(data)
+            corrupted[index] ^= 1
+            return bytes(corrupted)
+
+        cases = [
+            (v.group_public_key, v.message, signature),
+            # One flip per wire field: R's prefix, R's x, z, the key, and
+            # the message — rejections the transcription reaches as a
+            # failed equation or a MUST-abort, and the batch as `False`.
+            (v.group_public_key, v.message, flipped(signature, 0)),
+            (v.group_public_key, v.message, flipped(signature, 1)),
+            (v.group_public_key, v.message, flipped(signature, 64)),
+            (flipped(v.group_public_key, 32), v.message, signature),
+            (v.group_public_key, flipped(v.message, 0), signature),
+        ]
+        verdicts = cs.verify(
+            _stack(*(pk for pk, _, _ in cases)),
+            _stack(*(msg for _, msg, _ in cases)),
+            _stack(*(sig for _, _, sig in cases)),
+        )
+        expected = [self._naive(v.cs, *case) for case in cases]
+        self.assertEqual(list(map(bool, np.asarray(verdicts))), expected)
+        # The agreement must not be vacuous: the published case accepts,
+        # every corruption rejects.
+        self.assertEqual(expected, [True] + [False] * (len(cases) - 1))
+
+    def test_malformed_wire_rows_ride_to_false_without_raising(self) -> None:
+        v = _Vectors("secp256k1")
+        cs = v.cs
+        assert isinstance(cs, Secp256k1Sha256)
+        signature = v.aggregate()
+        p = cs.curve.p
+        cases = [
+            # The accepted row the malformed ones sit beside — a surface
+            # that rejects everything does not pass this gate.
+            (v.group_public_key, signature),
+            # z = n: the scalar bound, one past the RFC's [0, n-1].
+            (v.group_public_key, signature[:33] + v.cs.order.to_bytes(32, "big")),
+            # An element prefix SEC 1 §2.3.4 does not define.
+            (v.group_public_key, b"\x05" + signature[1:]),
+            # R's x-coordinate at p: out of the field's range.
+            (
+                v.group_public_key,
+                signature[:1] + p.to_bytes(32, "big") + signature[33:],
+            ),
+            # R's x on no point: x = 0 lies on neither SEC curve here.
+            (v.group_public_key, signature[:1] + bytes(32) + signature[33:]),
+            # A key that is wrong twice over: bad prefix, x out of range.
+            (b"\xff" * 33, signature),
+        ]
+        verdicts = cs.verify(
+            _stack(*(pk for pk, _ in cases)),
+            _stack(*([v.message] * len(cases))),
+            _stack(*(sig for _, sig in cases)),
+        )
+        self.assertEqual(
+            list(np.asarray(verdicts)), [True] + [False] * (len(cases) - 1)
         )
 
 

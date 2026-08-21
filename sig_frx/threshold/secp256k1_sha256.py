@@ -9,7 +9,8 @@ scalars, and the hash-to-field scalar derivations (RFC 9380's
 One caveat stated where it can be read rather than discovered: this suite's
 output is **not** a BIP-340 signature — x-only keys and tagged hashes differ —
 so it has no Taproot verifier. It is RFC 9591's own Schnorr encoding, verified
-per the RFC's Appendix B, which the tests transcribe.
+per the RFC's Appendix B by `verify` below; the tests keep the RFC's naive
+transcription beside it as the reference pair.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
+from frx.typing import ArrayLike
 
 from sig_frx.classical import secp
 from sig_frx.threshold import frost, xmd
@@ -99,6 +101,77 @@ class Secp256k1Sha256:
             raise ValueError("the identity element has no encoding here")
         ((x, y),) = secp.affine_ints(self.curve, element)
         return (2 + (y & 1)).to_bytes(1, "big") + x.to_bytes(32, "big")
+
+    def verify(
+        self, public_key: ArrayLike, message: ArrayLike, signature: ArrayLike
+    ) -> np.ndarray:
+        """RFC 9591 Appendix B's prime-order verification: `bool[B]` verdicts.
+
+        `c = H2(R ‖ PK ‖ msg)`; accept iff `[z]B = R + [c]PK`, computed as
+        `[z]B - [c]PK` and compared against `R`'s x and parity — the same
+        two-term combination and coordinate readback the BIP-340 verifier
+        rides on this substrate. A point equal to `R` is on the curve by
+        construction, so the wire checks that remain per row are SEC 1
+        §2.3.4's — a `02`/`03` prefix and a coordinate below `p` — plus the
+        RFC's scalar bound `z < n`; a failing row carries masked junk to a
+        cleared verdict instead of raising out of the batch, and no
+        unvalidated integer meets a field op on the way (the scalar-field
+        dtype aborts on an out-of-range operand, fractalyze/zk_dtypes#179 —
+        the substrate reduces every scalar first).
+        """
+        curve = self.curve
+        keys = np.asarray(public_key, dtype=np.uint8)
+        messages = np.asarray(message, dtype=np.uint8)
+        signatures = np.asarray(signature, dtype=np.uint8)
+        if keys.shape[-1] != self.element_size:
+            raise ValueError("a group public key is a 33-byte compressed point")
+        if signatures.shape[-1] != self.element_size + 32:
+            raise ValueError("a signature is a 33-byte element and a 32-byte scalar")
+
+        def wire(rows: np.ndarray) -> list[tuple[int, int]]:
+            return [
+                (int(row[0]), int.from_bytes(row[1:].tobytes(), "big")) for row in rows
+            ]
+
+        pk_wire = wire(keys)
+        r_wire = wire(signatures[..., : self.element_size])
+        z_scalars = [
+            int.from_bytes(row.tobytes(), "big")
+            for row in signatures[..., self.element_size :]
+        ]
+        p = curve.p
+        checks = [
+            pk_prefix in (2, 3)
+            and pk_x < p
+            and r_prefix in (2, 3)
+            and r_x < p
+            and z < self.order
+            for (pk_prefix, pk_x), (r_prefix, r_x), z in zip(pk_wire, r_wire, z_scalars)
+        ]
+        key_points, on_curve = secp.lift_x_to_parity(
+            curve,
+            [x % p for _, x in pk_wire],
+            [prefix & 1 for prefix, _ in pk_wire],
+        )
+        ok = np.array(checks, dtype=bool) & on_curve
+
+        challenges = [
+            self.h2(sig[: self.element_size].tobytes() + key.tobytes() + msg.tobytes())
+            for key, msg, sig in zip(keys, messages, signatures)
+        ]
+        big_r = secp.double_multiple(
+            curve, z_scalars, [-c % self.order for c in challenges], key_points
+        )
+        # Reject the identity before its `(0, 0)` readback can match an
+        # `R` claiming `x = 0` — the same guard the BIP-340 verifier holds.
+        gone = secp.is_identity(curve, big_r)
+        verdicts = [
+            bool(valid) and not bool(dead) and x == r_x and y % 2 == (r_prefix & 1)
+            for (x, y), valid, dead, (r_prefix, r_x) in zip(
+                secp.affine_ints(curve, big_r), ok, gone, r_wire
+            )
+        ]
+        return np.array(verdicts, dtype=bool)
 
 
 if TYPE_CHECKING:

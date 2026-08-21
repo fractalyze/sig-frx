@@ -53,6 +53,7 @@ py_library(
         ":frost",
         ":xmd",
         "//sig_frx/classical:secp",
+        requirement("frx"),
         requirement("numpy"),
     ],
 )
