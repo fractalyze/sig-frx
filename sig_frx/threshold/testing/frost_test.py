@@ -243,45 +243,28 @@ class FrostTest(parameterized.TestCase):
 
 
 class Ed25519CrossingTest(absltest.TestCase):
-    """The suite surface as the RFC 8032 crossing it delegates to."""
+    """The suite surface as the RFC 8032 crossing it delegates to.
+
+    The full malformed-wire gate lives with the delegate
+    (`classical/testing/eddsa_test.py`); one malformed row here pins the
+    surface's reject-without-raising contract against a future
+    non-delegating rewrite without re-owning that coverage.
+    """
 
     def test_the_aggregate_verifies_as_plain_ed25519(self) -> None:
         v = _Vectors("ed25519")
-        cs = v.cs
-        assert isinstance(cs, Ed25519Sha512)
+        cs = Ed25519Sha512()
         signature = v.aggregate()
         corrupted = bytearray(signature)
         corrupted[0] ^= 1
+        # s = L: RFC 8032 §5.1.7's scalar bound, one past [0, L-1].
+        out_of_range = signature[:32] + cs.order.to_bytes(32, "little")
         verdicts = cs.verify(
-            _stack(v.group_public_key, v.group_public_key),
-            _stack(v.message, v.message),
-            _stack(signature, bytes(corrupted)),
+            _stack(*[v.group_public_key] * 3),
+            _stack(*[v.message] * 3),
+            _stack(signature, bytes(corrupted), out_of_range),
         )
-        self.assertEqual(list(np.asarray(verdicts)), [True, False])
-
-    def test_malformed_wire_rows_ride_to_false_without_raising(self) -> None:
-        v = _Vectors("ed25519")
-        cs = v.cs
-        assert isinstance(cs, Ed25519Sha512)
-        signature = v.aggregate()
-        cases = [
-            # The accepted row the malformed ones sit beside.
-            (v.group_public_key, signature),
-            # s = L: RFC 8032 §5.1.7's scalar bound, one past [0, L-1].
-            (v.group_public_key, signature[:32] + cs.order.to_bytes(32, "little")),
-            # R non-canonical: y = 2²⁵⁵ - 1 ≥ p, refused by strict decoding.
-            (v.group_public_key, b"\xff" * 32 + signature[32:]),
-            # A key with the same non-canonical encoding.
-            (b"\xff" * 32, signature),
-        ]
-        verdicts = cs.verify(
-            _stack(*(pk for pk, _ in cases)),
-            _stack(*([v.message] * len(cases))),
-            _stack(*(sig for _, sig in cases)),
-        )
-        self.assertEqual(
-            list(np.asarray(verdicts)), [True] + [False] * (len(cases) - 1)
-        )
+        self.assertEqual(list(np.asarray(verdicts)), [True, False, False])
 
 
 class Secp256k1SchnorrTest(absltest.TestCase):
@@ -324,27 +307,9 @@ class Secp256k1SchnorrTest(absltest.TestCase):
         except ValueError:
             return False
 
-    def test_the_aggregate_verifies_through_the_production_surface(self) -> None:
-        v = _Vectors("secp256k1")
-        # `verify` is the concrete suite's surface, not the round Protocol's
-        # — the rounds never verify (`frost.py`), so the narrowing is the
-        # test saying which suite it gates.
-        cs = v.cs
-        assert isinstance(cs, Secp256k1Sha256)
-        signature = v.aggregate()
-        corrupted = bytearray(signature)
-        corrupted[-1] ^= 1
-        verdicts = cs.verify(
-            _stack(v.group_public_key, v.group_public_key),
-            _stack(v.message, v.message),
-            _stack(signature, bytes(corrupted)),
-        )
-        self.assertEqual(list(np.asarray(verdicts)), [True, False])
-
     def test_the_production_surface_agrees_with_appendix_b(self) -> None:
         v = _Vectors("secp256k1")
-        cs = v.cs
-        assert isinstance(cs, Secp256k1Sha256)
+        cs = Secp256k1Sha256()
         signature = v.aggregate()
 
         def flipped(data: bytes, index: int) -> bytes:
@@ -376,8 +341,7 @@ class Secp256k1SchnorrTest(absltest.TestCase):
 
     def test_malformed_wire_rows_ride_to_false_without_raising(self) -> None:
         v = _Vectors("secp256k1")
-        cs = v.cs
-        assert isinstance(cs, Secp256k1Sha256)
+        cs = Secp256k1Sha256()
         signature = v.aggregate()
         p = cs.curve.p
         cases = [
