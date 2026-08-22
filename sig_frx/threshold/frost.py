@@ -49,9 +49,7 @@ class Ciphersuite(Protocol):
 
     order: int
     element_size: int
-
-    @property
-    def scalar_field(self) -> Any: ...
+    scalar_field: Any
 
     def h1(self, message: bytes) -> int: ...
 

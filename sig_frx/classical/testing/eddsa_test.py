@@ -3,8 +3,8 @@
 
 The curve constants are held to what the standard asserts of them — `d` is
 the §5.1 table's decimal, the base point satisfies the equation and has order
-`L` — and the extended-coordinate formulas to the affine rule transcribed
-into `edwards_reference`. §7.1's TEST 1-3 then run as KatVectors through the
+`L` — and the curated dtype kernels to the affine rule transcribed into
+`edwards_reference`. §7.1's TEST 1-3 then run as KatVectors through the
 shared harness, which reproduces the key pairs, the signature bytes, and
 acceptance, and derives the tampering and batch-axis gates — TEST 1 signs
 the empty message, which is exactly the empty-input case the tampering pass
@@ -20,7 +20,7 @@ import random
 import numpy as np
 from absl.testing import absltest
 
-from sig_frx.classical import edwards, group
+from sig_frx.classical import edwards
 from sig_frx.classical.eddsa import ed25519
 from sig_frx.classical.testing import edwards_reference as ref
 from sig_frx.testing import kat
@@ -98,37 +98,52 @@ class CurveConstantsTest(absltest.TestCase):
         )
 
 
-class GroupLawTest(absltest.TestCase):
-    def test_extended_formulas_match_the_affine_rule(self) -> None:
+class SubstrateTest(absltest.TestCase):
+    """The curated dtype kernels against the affine rule's transcription.
+
+    The group law lives in zk_dtypes now, so what this holds is the pairing:
+    a wrong curve config in the wheel would compute a consistent-but-wrong
+    group, and only an independent transcription of the defining rule
+    catches that before a signature does.
+    """
+
+    def test_multiple_matches_the_affine_rule(self) -> None:
         curve = edwards.ED25519
         rng = random.Random("edwards")
         base = (curve.gx, curve.gy)
-        points = [
-            ref.scalar_mul(curve.p, curve.d, rng.randrange(1, curve.order), base)
-            for _ in range(3)
-        ]
-        pairs = [
-            (points[0], points[1]),
-            (points[2], points[2]),
-            (ref.IDENTITY, points[0]),
-            (points[1], ref.IDENTITY),
-        ]
-        field = curve.field
-        lift = lambda pts: edwards.from_affine(  # noqa: E731
+        scalars = [rng.randrange(1, curve.order) for _ in range(3)]
+        got = edwards.affine_ints(
             curve,
-            np.array([q[0] for q in pts], dtype=field),
-            np.array([q[1] for q in pts], dtype=field),
+            edwards.multiple(curve, scalars, curve.generator),
         )
-        got = edwards.add(
-            curve, lift([a for a, _ in pairs]), lift([b for _, b in pairs])
+        want = [ref.scalar_mul(curve.p, curve.d, k, base) for k in scalars]
+        self.assertEqual(got, want)
+
+    def test_wide_multiple_is_exact_on_a_mixed_order_point(self) -> None:
+        # The case % L would get wrong: a point with a torsion component.
+        # (x, 0) with x = √-1 is on the curve and has order 4, so base + it
+        # is mixed-order, and a wide scalar's verdict depends on reducing
+        # modulo the full 8L — which is what the unreduced digest scalar in
+        # verification rides on.
+        curve = edwards.ED25519
+        sqrt_minus_one = pow(2, (curve.p - 1) // 4, curve.p)
+        torsion = (sqrt_minus_one, 0)
+        self.assertTrue(ref.on_curve(curve.p, curve.d, torsion))
+        mixed = ref.add(curve.p, curve.d, (curve.gx, curve.gy), torsion)
+        rng = random.Random("wide")
+        wide = rng.randrange(2**511, 2**512)
+        if (wide // curve.order) % 4 == 0:
+            # The discarded multiple of L acts on the order-4 component as
+            # (wide // L) mod 4 (L ≡ 1 mod 4) — keep it nonzero so the
+            # reduced and unreduced answers genuinely differ below.
+            wide += curve.order
+        self.assertNotEqual(
+            ref.scalar_mul(curve.p, curve.d, wide, mixed),
+            ref.scalar_mul(curve.p, curve.d, wide % curve.order, mixed),
         )
-        want = [ref.add(curve.p, curve.d, a, b) for a, b in pairs]
-        self.assertEqual(group.to_affine_ints(got), want)
-        doubled = edwards.double(curve, lift([p for p, _ in pairs]))
-        self.assertEqual(
-            group.to_affine_ints(doubled),
-            [ref.add(curve.p, curve.d, p, p) for p, _ in pairs],
-        )
+        points = np.array([curve.point(mixed)], dtype=curve.point)
+        got = edwards.affine_ints(curve, edwards.wide_multiple(curve, [wide], points))
+        self.assertEqual(got, [ref.scalar_mul(curve.p, curve.d, wide, mixed)])
 
 
 class Ed25519Test(absltest.TestCase):
