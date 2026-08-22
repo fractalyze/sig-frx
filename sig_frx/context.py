@@ -13,6 +13,13 @@ Shared rather than copied because a second scheme arrived asking for the same
 shape ([`docs/reference/conventions.md`](../docs/reference/conventions.md)); the
 cost of two copies is not the lines but that a fix to one is never looked for in
 the other.
+
+A third arrived since, from a different decade and a different body: RFC 8032's
+`dom2(F, C)` is this exact framing — `octet(F) ‖ octet(OLEN(C)) ‖ C`, one length
+byte and the same 255-octet ceiling — behind a 32-octet ASCII constant that the
+EdDSA variants prepend and the FIPS schemes have no analogue of
+([`classical/eddsa/ed25519.py`](classical/eddsa/ed25519.py)). So `prefix` is
+what all three build, and only the constant ahead of it is any scheme's own.
 """
 
 from __future__ import annotations

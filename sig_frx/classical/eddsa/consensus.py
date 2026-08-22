@@ -143,7 +143,9 @@ class Ed25519Zip215(ed25519.Ed25519):
         that merely claim to match.
         """
         curve = self.curve
-        parsed = self._parsed(public_key, message, signature)
+        # ZIP-215 is a rule over plain Ed25519, whose dom2 is empty and
+        # whose context must be — hence no context parameter to pass on.
+        parsed = self._parsed(public_key, message, signature, None)
         if not bool(np.all(parsed.ok)):
             return False
 
