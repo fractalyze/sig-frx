@@ -39,7 +39,12 @@ this file is the map plus the rules every change must respect.
   second one: `zk_dtypes.prime_field(q)` mints a field from any modulus, curated
   or not, and reduces internally — so a scheme's modular arithmetic is never
   hand-written in limbs. Read a residue back with `astype`, never a bitcast: the
-  storage is a Montgomery representative.
+  storage is a Montgomery representative. Where zk_dtypes already names the
+  modulus, prefer that curated dtype over minting one: the mint is generic and
+  the curated handle is a fused kernel, worth ~4× on a field-heavy path
+  (fractalyze/sig-frx#154 measured it on Ed25519 decoding). `curated=False` is a
+  trace-compatibility hedge, not a neutral default — when a module stops
+  tracing, re-check every opt-out it carries.
   The same rule has a quieter form in any function that runs in **both**
   namespaces: numpy promotes a reduction's accumulator and frx does not, so a
   bare `.sum()` returns `uint64` on the host and `uint32` traced from one source
