@@ -308,6 +308,14 @@ py_test(
 # the KAT suite — `large`'s 900s stopped covering the slowest leg. The compile
 # cost itself is an upstream property (fractalyze/hash-frx#197), not this
 # test's workload.
+#
+# It stays `eternal` past the emitter fix for that regression
+# (fractalyze/xla#572, on this repo's pin since hash-frx 9d86ae73). The fix is
+# real — locally the compile fell 415.8s -> 263.4s — but this leg is what the
+# budget has to cover, and measured on CI at that pin it is **950.9s**, still
+# over `large`'s 900s. The GPU leg runs the same target in 177.7s; the CPU
+# runner's sharing is most of the gap, which is why the local figure does not
+# decide this. Re-check against a CI run, not a workstation, before shrinking.
 py_test(
     name = "slh_dsa_traced_test",
     size = "large",
