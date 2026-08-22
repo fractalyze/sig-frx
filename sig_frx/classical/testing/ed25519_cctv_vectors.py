@@ -162,6 +162,7 @@ def load() -> tuple[CctvVector, ...]:
     return tuple(vectors)
 
 
+@functools.cache
 def by_message_length() -> list[tuple[CctvVector, ...]]:
     """The set split into the batches `verify` can take, shortest first.
 

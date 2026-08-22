@@ -86,8 +86,13 @@ class Ed25519Sha512:
         )
 
     def deserialize_element(self, data: bytes) -> np.ndarray:
+        # RFC 9591 §6.1 deserializes group elements per RFC 8032 §5.1.3,
+        # canonicity refusals included — the ciphersuite names the strict
+        # reading, not one of the consensus relaxations.
         point, ok = edwards.decode(
-            self.curve, np.frombuffer(data, dtype=np.uint8)[None, :]
+            self.curve,
+            np.frombuffer(data, dtype=np.uint8)[None, :],
+            canonical_only=True,
         )
         if not bool(np.asarray(ok)[0]):
             raise ValueError("not a canonical encoding of a curve point")

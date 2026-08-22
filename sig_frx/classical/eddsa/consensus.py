@@ -73,12 +73,14 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 from frx.typing import ArrayLike
 
-from sig_frx.classical import edwards
+from sig_frx.classical import edwards, group
 from sig_frx.classical.eddsa import ed25519
+from sig_frx.signature import Signature
 
 # ZIP-215 §Specification: `A` and `R` must encode points on the curve — not
 # that they encode them canonically, the ZIP says so outright — `S < L`, and
@@ -111,7 +113,7 @@ class Ed25519Zip215(ed25519.Ed25519):
     method.
     """
 
-    rule = ZIP_215
+    rule: ClassVar[ed25519.ValidationRule] = ZIP_215
 
     def aggregate_verify(
         self,
@@ -136,10 +138,9 @@ class Ed25519Zip215(ed25519.Ed25519):
         ZIP-215 makes `[8]` mandatory rather than optional.
 
         `False` names no row; a caller that needs the culprit uses `verify`.
-        The coefficients are drawn from a hash of the entire batch rather
-        than a generator, which keeps the verdict reproducible and leaves
-        the seam's no-implicit-randomness rule intact — the same derivation
-        BIP-340's aggregate uses (`../schnorr/bip340.py`).
+        The coefficients come from `group.batch_coefficients`, which is also
+        what BIP-340's aggregate draws from — one derivation rather than two
+        that merely claim to match.
         """
         curve = self.curve
         parsed = self._parsed(public_key, message, signature)
@@ -153,47 +154,25 @@ class Ed25519Zip215(ed25519.Ed25519):
         eight_r = edwards.mul_by_cofactor(curve, parsed.point_r)
         eight_a = edwards.mul_by_cofactor(curve, parsed.point_a)
 
-        coefficients = _coefficients(
+        coefficients = group.batch_coefficients(
             curve.order,
             len(parsed.s_ints),
             np.asarray(public_key, dtype=np.uint8).tobytes()
             + np.asarray(message, dtype=np.uint8).tobytes()
             + np.asarray(signature, dtype=np.uint8).tobytes(),
+            digest=hashlib.sha512,
         )
         combined = sum(z * s for z, s in zip(coefficients, parsed.s_ints)) % curve.order
         lhs = edwards.mul_by_cofactor(
             curve, edwards.multiple(curve, [combined], curve.generator)
         )
-        terms = np.concatenate(
-            [
-                edwards.multiple(curve, coefficients, eight_r),
-                edwards.multiple(
-                    curve,
-                    [z * k for z, k in zip(coefficients, parsed.k_ints)],
-                    eight_a,
-                ),
-            ]
+        # The two term batches add elementwise before the fold rather than
+        # concatenating into it: `sum_points` splits at the midpoint on its
+        # first round, so concatenating would only ask it to undo the copy.
+        terms = edwards.multiple(curve, coefficients, eight_r) + edwards.multiple(
+            curve, [z * k for z, k in zip(coefficients, parsed.k_ints)], eight_a
         )
         return bool(np.asarray(lhs == edwards.sum_points(curve, terms))[0])
-
-
-def _coefficients(order: int, count: int, batch: bytes) -> list[int]:
-    """`count` scalars in `[1, L-1]`, fixed only after every byte of `batch`.
-
-    The first is 1: one coefficient may be fixed without weakening the
-    combination, since a single wrong row is caught by its own residual and
-    two or more still have to satisfy a relation in the remaining random
-    scalars.
-    """
-    seed = hashlib.sha512(batch).digest()
-    return [1] + [
-        1
-        + int.from_bytes(
-            hashlib.sha512(seed + index.to_bytes(8, "big")).digest(), "big"
-        )
-        % (order - 1)
-        for index in range(1, count)
-    ]
 
 
 @dataclass(frozen=True)
@@ -203,4 +182,11 @@ class Ed25519Strict(ed25519.Ed25519):
     Signing is RFC 8032's, unchanged — see `Ed25519Zip215`.
     """
 
-    rule = VERIFY_STRICT
+    rule: ClassVar[ed25519.ValidationRule] = VERIFY_STRICT
+
+
+if TYPE_CHECKING:
+    # Each construction is a `Signature` in its own right, not only by
+    # inheritance — a consumer names one of these and nothing else.
+    _zip215: type[Signature] = Ed25519Zip215
+    _strict: type[Signature] = Ed25519Strict

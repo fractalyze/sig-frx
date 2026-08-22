@@ -168,14 +168,19 @@ class AggregateAgreesWithVerifyTest(absltest.TestCase):
         # length: a residual that survives the combination is what the
         # aggregate has to catch, and burying it among valid rows is the
         # case that a sloppy combination would let through.
-        by_length = {len(batch[0].message): batch for batch in cctv.by_message_length()}
+        accepted_by_length = {
+            len(batch[0].message): tuple(v for v in batch if self.verdicts[v.number])[
+                :4
+            ]
+            for batch in cctv.by_message_length()
+        }
         rejected = [v for v in cctv.load() if not self.verdicts[v.number]]
         self.assertNotEmpty(rejected)
         for vector in rejected:
             company = tuple(
                 v
-                for v in by_length[len(vector.message)]
-                if self.verdicts[v.number] and v.number != vector.number
+                for v in accepted_by_length[len(vector.message)]
+                if v.number != vector.number
             )[:3]
             self.assertFalse(
                 self._aggregate((vector,) + company),

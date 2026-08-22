@@ -1,5 +1,5 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""The encoding-side plumbing the classical substrates hold in common.
+"""The plumbing the classical substrates hold in common.
 
 `secp.py` and `edwards.py` own their curves' constants, codecs, and dtype
 pairings — the parts their standards fix. What is left here is arithmetic
@@ -12,10 +12,20 @@ point types (fractalyze/sig-frx#139 for the Weierstrass family, #36 for the
 Edwards one), so nothing here walks scalar bits or selects points anymore —
 and with the traced path gone from both substrates, nothing here dispatches
 on a namespace either.
+
+The last two are the aggregate verifiers' shared parts. BIP-340 and ZIP-215
+specify unrelated schemes over unrelated curves, and both check a batch the
+same way: fold it into one point sum against coefficients nobody could
+predict before the batch existed. `sum_points` and `batch_coefficients` are
+that shape with the curve taken out of it — a fold needs `+` and an element
+to pad with, and a coefficient needs a modulus and a hash. Keeping them here
+rather than one per scheme is what stops two soundness arguments from
+drifting into two different constructions.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Literal
 
 import numpy as np
@@ -66,3 +76,53 @@ def field_from_bytes(weights: np.ndarray, data: ArrayLike) -> Any:
     """
     lanes = np.asarray(data).astype(np.int32).astype(weights.dtype)
     return (lanes * weights).sum(axis=-1)
+
+
+def sum_points(points: np.ndarray, identity: np.ndarray) -> np.ndarray:
+    """The sum of a `[K]` point batch, by vectorized halving to `[1]`.
+
+    `identity` pads an odd length, and it is a parameter because the two
+    substrates disagree about what the neutral element looks like in memory.
+    A Jacobian buffer of zeros *is* infinity, so `secp` can pad with
+    `np.zeros`; an all-zero extended Edwards point is not the identity but a
+    value whose projective compare answers `True` against every point, so
+    `edwards` must pad with a real `(0, 1)`. Padding wrongly does not raise
+    — it makes a later comparison agree — which is why the choice is the
+    caller's to state rather than this function's to guess.
+    """
+    total = np.asarray(points)
+    while total.shape[0] > 1:
+        if total.shape[0] % 2:
+            total = np.concatenate([total, identity.astype(total.dtype)])
+        half = total.shape[0] // 2
+        total = total[:half] + total[half:]
+    return total
+
+
+def batch_coefficients(
+    order: int, count: int, batch: bytes, *, digest: Callable[[bytes], Any]
+) -> list[int]:
+    """`count` scalars in `[1, order-1]`, fixed only after all of `batch`.
+
+    What an aggregate check needs of them is that a forger cannot choose a
+    batch knowing them: they are derived from a hash of every byte of it,
+    with no draw from a generator, so the verdict stays reproducible and no
+    implicit randomness enters a seam that forbids it.
+
+    `digest` has no default: it is the caller's scheme that names the hash,
+    and a wrong-but-plausible one here would still produce coefficients that
+    look fine and agree with nothing.
+
+    The first is 1. One coefficient may be fixed without weakening the
+    combination — a single wrong entry is caught by its own residual, and
+    two or more still have to satisfy a relation in the remaining scalars —
+    and it saves the batch's most common case, `count == 1`, a
+    multiplication.
+    """
+    seed = digest(batch).digest()
+    return [1] + [
+        1
+        + int.from_bytes(digest(seed + index.to_bytes(8, "big")).digest(), "big")
+        % (order - 1)
+        for index in range(1, count)
+    ]

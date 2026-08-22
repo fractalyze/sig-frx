@@ -187,22 +187,11 @@ def mul_by_cofactor(curve: EdwardsCurve, points: ArrayLike) -> np.ndarray:
 
 
 def sum_points(curve: EdwardsCurve, points: ArrayLike) -> np.ndarray:
-    """The sum of a `[K]` point batch, by vectorized halving to `[1]`.
-
-    An odd length pads with `curve.identity` and never with a zero-filled
-    buffer. The Weierstrass substrate can pad that way because its all-zero
-    Jacobian buffer *is* infinity; here it is the failure the `identity`
-    property warns about — an all-zero extended point compares equal to
-    every point, so padding with one would turn a sum into a term that
-    makes any later comparison agree.
+    """The sum of a `[K]` point batch — `group.sum_points` with this curve's
+    identity as the pad, which for an Edwards curve is a real `(0, 1)` and
+    never a zero-filled buffer (see `identity`, and the shared function).
     """
-    total = np.asarray(points)
-    while total.shape[0] > 1:
-        if total.shape[0] % 2:
-            total = np.concatenate([total, curve.identity.astype(total.dtype)])
-        half = total.shape[0] // 2
-        total = total[:half] + total[half:]
-    return total
+    return group.sum_points(np.asarray(points), curve.identity)
 
 
 def affine_ints(curve: EdwardsCurve, points: ArrayLike) -> list[tuple[int, int]]:
@@ -259,18 +248,14 @@ def parity(curve: EdwardsCurve, value: ArrayLike) -> Any:
     return lanes[..., 0] & np.uint32(1)
 
 
-def decompress_x(
-    curve: EdwardsCurve, y: Any, sign: Any, *, canonical_only: bool = True
-) -> tuple[Any, Any]:
-    """RFC 8032 §5.1.3's x-recovery: `(x, decoded_ok)`, elementwise.
+def decompress_x(curve: EdwardsCurve, y: Any, sign: Any) -> tuple[Any, Any]:
+    """RFC 8032 §5.1.3's x-recovery: `(x, on_curve)`, elementwise.
 
     `x² = (y² - 1)/(d·y² + 1)`; the candidate root is
     `u·v³·(u·v⁷)^((p-5)/8)`, corrected by `√-1` when it squares to `-u/v`,
-    and decoding fails when neither squares back. `canonical_only` adds
-    §5.1.3's other refusal: an `x = 0` that arrives with the sign bit set,
-    an encoding of `-0`. Dropping it yields `x = 0` instead, since negating
-    zero is zero — the reading of "an encoding of a point on the curve"
-    that ZIP-215 and the ref10 line both take.
+    and the flag is false when neither squares back — that `y` names no
+    point. §5.1.3's *canonicity* refusals are not applied here: which of
+    them a rule takes is `decode`'s question, and it asks it in one place.
 
     A failed entry carries a junk `x` and a false flag rather than raising,
     which is what lets one decoding serve a whole batch: the caller's mask
@@ -289,25 +274,27 @@ def decompress_x(
     ok = is_root | needs_correction
     x = np.where(is_root, candidate, corrected)
     sign_arr = np.asarray(sign)
-    if canonical_only:
-        x_is_zero = x == np.array(0, dtype=curve.field)
-        ok = ok & ~(x_is_zero & (sign_arr == np.uint8(1)))
     wrong_sign = parity(curve, x) != sign_arr.astype(np.uint32)
     return np.where(wrong_sign, -x, x), ok
 
 
 def decode(
-    curve: EdwardsCurve, encoded: ArrayLike, *, canonical_only: bool = True
+    curve: EdwardsCurve, encoded: ArrayLike, *, canonical_only: bool
 ) -> tuple[np.ndarray, Any]:
     """RFC 8032 §5.1.3: `[B, 32]` bytes to affine points, a verdict each.
 
     The sign bit is the top bit of the last byte and the remaining 255 bits
-    are `y`. `canonical_only` is §5.1.3's two refusals together — a `y ≥ p`,
-    and the `-0` case `decompress_x` names — and dropping it reads `y`
-    modulo `p` instead, which is what ZIP-215 means by requiring only that
-    the bytes encode *a point on the curve*. One parameter rather than two
-    because no rule here takes one refusal without the other, and a caller
-    that could split them would be choosing a rule nobody publishes.
+    are `y`. `canonical_only` carries §5.1.3's two canonicity refusals
+    together — a `y ≥ p`, and an `x = 0` that arrives with the sign bit set,
+    an encoding of `-0`. Dropping them reads `y` modulo `p` and lets `-0`
+    decode to `0`, which is what ZIP-215 means by requiring only that the
+    bytes encode *a point on the curve*.
+
+    One parameter rather than two because the rules this repo implements
+    take both refusals or neither. It has **no default**: which accept set a
+    caller wants is the consensus-relevant choice this whole module exists
+    to make explicit, so a call site states it and cites the rule it is
+    reading (`eddsa/consensus.py`).
 
     The recovered coordinates read back to integers and construct the affine
     dtype per row — host codec, per the module's host-path rule — so a failed
@@ -320,9 +307,16 @@ def decode(
         [encoded[..., :31], encoded[..., 31:32] & np.uint8(0x7F)], axis=-1
     )
     y = field_from_le_bytes(curve, y_bytes)
-    x, ok = decompress_x(curve, y, sign, canonical_only=canonical_only)
+    x, ok = decompress_x(curve, y, sign)
     if canonical_only:
-        ok = group.bytes_below(y_bytes, curve.p, byteorder="little") & ok
+        # `-0` negates to `0`, so the returned x answers this as well as the
+        # pre-correction candidate would.
+        x_is_zero = np.asarray(x) == np.array(0, dtype=curve.field)
+        ok = (
+            ok
+            & group.bytes_below(y_bytes, curve.p, byteorder="little")
+            & ~(x_is_zero & (np.asarray(sign) == np.uint8(1)))
+        )
     xs = np.asarray(x).astype(object)
     ys = np.asarray(y).astype(object)
     points = np.array(

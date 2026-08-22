@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 from frx.typing import ArrayLike
@@ -154,10 +154,12 @@ class Ed25519:
     deterministic = True
 
     curve = edwards.ED25519
-    # A class attribute, not a field: the rule a construction verifies under
-    # is what the construction *is*, so there is no constructor to pass a
-    # different one through.
-    rule = RFC_8032
+    # `ClassVar` and not a field: the rule a construction verifies under is
+    # what the construction *is*, so there is no constructor to pass a
+    # different one through. The annotation is load-bearing — a subclass
+    # that wrote `rule: ValidationRule = ...` instead would silently make it
+    # a dataclass field and grow exactly the knob this avoids.
+    rule: ClassVar[ValidationRule] = RFC_8032
 
     def keygen(self, seed: ArrayLike) -> tuple[Any, Any]:
         """RFC 8032 §5.1.5: the seed is the secret key; `A = s·B` encoded."""

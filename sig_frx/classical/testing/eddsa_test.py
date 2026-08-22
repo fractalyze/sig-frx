@@ -152,13 +152,10 @@ class SubstrateTest(absltest.TestCase):
         # decide it (`ed25519_cctv_test`).
         curve = edwards.ED25519
         mixed = _mixed_order_point()
-        rng = random.Random("wide")
-        wide = rng.randrange(2**511, 2**512)
-        if (wide // curve.order) % 4 == 0:
-            # The discarded multiple of L acts on the order-4 component as
-            # (wide // L) mod 4 (L ≡ 1 mod 4) — keep it nonzero so the two
-            # answers genuinely differ below.
-            wide += curve.order
+        # Any scalar above L exercises the reduction; the digest scalar this
+        # stands in for is 512 bits, so use one that wide. The assertion
+        # below is what confirms the two readings actually differ here.
+        wide = 2**511 + curve.order + 5
         self.assertNotEqual(
             ref.scalar_mul(curve.p, curve.d, wide, mixed),
             ref.scalar_mul(curve.p, curve.d, wide % curve.order, mixed),
@@ -184,8 +181,12 @@ class SubstrateTest(absltest.TestCase):
         curve = edwards.ED25519
         base = (curve.gx, curve.gy)
         torsion = _torsion_point()
-        cases = [curve.identity[0], curve.point(torsion), curve.point(base)]
-        cases.append(curve.point(_mixed_order_point()))
+        cases = [
+            curve.identity[0],
+            curve.point(torsion),
+            curve.point(base),
+            curve.point(_mixed_order_point()),
+        ]
         got = edwards.is_small_order(curve, np.array(cases, dtype=curve.point))
         self.assertEqual(list(np.asarray(got)), [True, True, False, False])
 

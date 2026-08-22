@@ -34,7 +34,9 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":ed25519",
+        "//sig_frx:signature",
         "//sig_frx/classical:edwards",
+        "//sig_frx/classical:group",
         requirement("frx"),
         requirement("numpy"),
     ],
