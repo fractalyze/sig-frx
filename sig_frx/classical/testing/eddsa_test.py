@@ -82,6 +82,23 @@ def _scheme() -> ed25519.Ed25519:
     return ed25519.Ed25519()
 
 
+def _torsion_point() -> tuple[int, int]:
+    """`(√-1, 0)`: on the curve, order 4 — the smallest torsion witness."""
+    curve = edwards.ED25519
+    return (pow(2, (curve.p - 1) // 4, curve.p), 0)
+
+
+def _mixed_order_point() -> tuple[int, int]:
+    """The base point plus that one: a prime-order *and* a torsion part.
+
+    The shape every cofactor question turns on — reducing a scalar modulo
+    `L` and multiplying by 8 do different things to it, and agree on
+    everything else.
+    """
+    curve = edwards.ED25519
+    return ref.add(curve.p, curve.d, (curve.gx, curve.gy), _torsion_point())
+
+
 class CurveConstantsTest(absltest.TestCase):
     def test_d_matches_the_published_decimal(self) -> None:
         self.assertEqual(edwards.ED25519.d, _D_DECIMAL)
@@ -119,31 +136,58 @@ class SubstrateTest(absltest.TestCase):
         want = [ref.scalar_mul(curve.p, curve.d, k, base) for k in scalars]
         self.assertEqual(got, want)
 
-    def test_wide_multiple_is_exact_on_a_mixed_order_point(self) -> None:
-        # The case % L would get wrong: a point with a torsion component.
-        # (x, 0) with x = √-1 is on the curve and has order 4, so base + it
-        # is mixed-order, and a wide scalar's verdict depends on reducing
-        # modulo the full 8L — which is what the unreduced digest scalar in
-        # verification rides on.
+    def test_the_torsion_fixture_is_a_curve_point_of_order_four(self) -> None:
         curve = edwards.ED25519
-        sqrt_minus_one = pow(2, (curve.p - 1) // 4, curve.p)
-        torsion = (sqrt_minus_one, 0)
+        torsion = _torsion_point()
         self.assertTrue(ref.on_curve(curve.p, curve.d, torsion))
-        mixed = ref.add(curve.p, curve.d, (curve.gx, curve.gy), torsion)
+        self.assertEqual(ref.scalar_mul(curve.p, curve.d, 4, torsion), ref.IDENTITY)
+        self.assertNotEqual(ref.scalar_mul(curve.p, curve.d, 2, torsion), ref.IDENTITY)
+
+    def test_multiple_reduces_modulo_l_on_a_mixed_order_point(self) -> None:
+        # The reduction is a reading of the standard, not an artifact, so it
+        # is pinned where a failure localizes: on a point with a torsion
+        # component, [k]P and [k mod L]P are different points, and `multiple`
+        # is the second one. Verification wants exactly that
+        # (`eddsa/ed25519.py`), and the interoperability vectors are what
+        # decide it (`ed25519_cctv_test`).
+        curve = edwards.ED25519
+        mixed = _mixed_order_point()
         rng = random.Random("wide")
         wide = rng.randrange(2**511, 2**512)
         if (wide // curve.order) % 4 == 0:
             # The discarded multiple of L acts on the order-4 component as
-            # (wide // L) mod 4 (L ≡ 1 mod 4) — keep it nonzero so the
-            # reduced and unreduced answers genuinely differ below.
+            # (wide // L) mod 4 (L ≡ 1 mod 4) — keep it nonzero so the two
+            # answers genuinely differ below.
             wide += curve.order
         self.assertNotEqual(
             ref.scalar_mul(curve.p, curve.d, wide, mixed),
             ref.scalar_mul(curve.p, curve.d, wide % curve.order, mixed),
         )
         points = np.array([curve.point(mixed)], dtype=curve.point)
-        got = edwards.affine_ints(curve, edwards.wide_multiple(curve, [wide], points))
-        self.assertEqual(got, [ref.scalar_mul(curve.p, curve.d, wide, mixed)])
+        got = edwards.affine_ints(curve, edwards.multiple(curve, [wide], points))
+        self.assertEqual(
+            got, [ref.scalar_mul(curve.p, curve.d, wide % curve.order, mixed)]
+        )
+
+    def test_mul_by_cofactor_clears_the_torsion_component(self) -> None:
+        curve = edwards.ED25519
+        mixed = _mixed_order_point()
+        points = np.array([curve.point(mixed)], dtype=curve.point)
+        got = edwards.affine_ints(curve, edwards.mul_by_cofactor(curve, points))
+        self.assertEqual(got, [ref.scalar_mul(curve.p, curve.d, 8, mixed)])
+        # Clearing it is what leaves a prime-order point behind: [8]P for a
+        # mixed-order P is 8 times its prime-order part and nothing else.
+        base = (curve.gx, curve.gy)
+        self.assertEqual(got, [ref.scalar_mul(curve.p, curve.d, 8, base)])
+
+    def test_is_small_order_names_the_torsion_points_and_nothing_else(self) -> None:
+        curve = edwards.ED25519
+        base = (curve.gx, curve.gy)
+        torsion = _torsion_point()
+        cases = [curve.identity[0], curve.point(torsion), curve.point(base)]
+        cases.append(curve.point(_mixed_order_point()))
+        got = edwards.is_small_order(curve, np.array(cases, dtype=curve.point))
+        self.assertEqual(list(np.asarray(got)), [True, True, False, False])
 
 
 class Ed25519Test(absltest.TestCase):

@@ -21,3 +21,21 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# The consensus-relevant verification rules as named constructions, plus the
+# aggregate check only the cofactored one can offer. Verify only: signing is
+# RFC 8032's and shared, so this rides on `:ed25519` rather than beside it.
+py_library(
+    name = "consensus",
+    srcs = [
+        "__init__.py",
+        "consensus.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ed25519",
+        "//sig_frx/classical:edwards",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

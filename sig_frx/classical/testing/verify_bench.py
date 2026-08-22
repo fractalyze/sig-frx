@@ -24,8 +24,7 @@ split across the substrate seams the lane actually crosses:
   decompression (its square root and per-row construction included) and the
   per-row host SHA-512 (no device row exists — fractalyze/hash-frx#66). Its
   scalar multiplications ride the shared `mult` bucket via
-  `edwards.multiple` — `wide_multiple`'s two widened kernel calls
-  included.
+  `edwards.multiple`.
 - `hash` — ECDSA's message digest through the `MessageHash` seam.
 
 Whatever remains is `host`: wire parsing, Python-integer scalar arithmetic,
@@ -113,9 +112,6 @@ class _Meter:
         setattr(secp, "is_identity", self.wrap("readback", secp.is_identity))
         setattr(secp, "lift_x_to_parity", self.wrap("lift", secp.lift_x_to_parity))
         setattr(bip340, "_sum", self.wrap("sum", bip340._sum))
-        # wide_multiple reaches its kernels through the module-global
-        # `multiple`, so wrapping `multiple` alone meters every kernel call
-        # exactly once — wrapping both would time the inner calls twice.
         setattr(edwards, "multiple", self.wrap("mult", edwards.multiple))
         setattr(edwards, "decode", self.wrap("decode", edwards.decode))
         setattr(ed25519, "_sha512_rows", self.wrap("sha512", ed25519._sha512_rows))

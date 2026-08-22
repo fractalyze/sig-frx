@@ -27,6 +27,40 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# The C2SP interoperability set and the accept set each construction claims.
+# A library rather than test-local data: the predicates are the statement of
+# what each rule is, and they are read by the test that runs them.
+py_library(
+    name = "ed25519_cctv_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "ed25519_cctv_vectors.py",
+    ],
+    data = ["@cctv_ed25519_vectors//file"],
+    deps = [
+        "//sig_frx:signature",
+        "//sig_frx/classical/eddsa:consensus",
+        "//sig_frx/classical/eddsa:ed25519",
+        "@rules_python//python/runfiles",
+        requirement("numpy"),
+    ],
+)
+
+py_test(
+    name = "ed25519_cctv_test",
+    size = "medium",
+    srcs = ["ed25519_cctv_test.py"],
+    deps = [
+        ":ed25519_cctv_vectors",
+        "//sig_frx:signature",
+        "//sig_frx/classical/eddsa:consensus",
+        "//sig_frx/classical/eddsa:ed25519",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 py_test(
     name = "rfc6979_test",
     size = "small",

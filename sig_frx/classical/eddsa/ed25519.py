@@ -20,29 +20,33 @@ lands in hash-frx (where every symmetric primitive lives), not here.
 
 ## The verification equation, and which profile this is
 
-`[S]B = R + [k]A`, cofactorless. RFC 8032 §5.1.7 names the cofactored
-`[8][S]B = [8]R + [8][k]A` check and calls this one sufficient; which of the
-two a consensus system demands — and what it accepts as a canonical encoding
-— is exactly the variant surface tracked separately (strict RFC 8032 versus
-ZIP-215). The core takes the strict readings the document states outright:
-`y ≥ p` fails decoding for both `A` and `R`, and `S ≥ L` is rejected. The
-digest scalar `k` stays unreduced in meaning: it reaches the group through
-`edwards.wide_multiple`, whose modulo-`8L` reduction is the group's own fact
-for every decoded point, torsion components included. `S` rides
-`edwards.multiple`'s `% L` against the prime-order base point, with `S ≥ L`
-rows already refused by the range check.
+`[S]B = R + [k]A`, cofactorless, over strictly decoded points: `y ≥ p` fails
+decoding for both `A` and `R`, an `x = 0` carrying the sign bit fails with
+it, and `S ≥ L` is rejected. That is RFC 8032 §5.1.3 and §5.1.7 read
+literally — §5.1.7 states the cofactored `[8][S]B = [8]R + [8][k]A` first
+and calls this one sufficient in its place.
 
-Leaving `k` unreduced is a third axis of the same variant surface, and one
-worth naming because the reference implementations take the other side: ref10,
-libsodium and Go all reduce the digest modulo `L` before the multiply. The two
-readings agree on every honest signature and diverge only when `A` carries a
-torsion component — so this is a consensus-divergence class, not an interop
-bug, and §7.1's vectors cannot gate it in either direction. What decides it
-here is that §5.1.7 states the equation over the unreduced scalar, the same
-literal-reading rule the rest of this module follows.
+Which of the two a consensus system demands, and what it accepts as an
+encoding, is not a robustness knob — so it is not a `strict=` flag but a
+`ValidationRule` fixed per construction, with the other two named in
+[`consensus.py`](consensus.py). A rule differs from its neighbours on
+several axes at once, which is why a caller names one rather than composing
+it.
+
+The digest scalar `k` reaches the group reduced modulo `L`, through
+`edwards.multiple`. RFC 8032 words its equation over the unreduced integer,
+but words it over the *cofactored* form — where the two readings provably
+agree, since multiplying by 8 clears the torsion component that is the only
+place they can differ. Reducing is therefore not a departure from the
+document, and it is what ref10, libsodium, Go and ed25519-dalek all do. The
+interoperability vectors settle it: a cofactorless verifier that kept `k`
+wide disagrees with all of them on 178 of the 914 cases, matching no
+published rule
+([`../testing/ed25519_cctv_vectors.py`](../testing/ed25519_cctv_vectors.py)).
 
 Nothing re-encodes a point in verification: the `k` hash absorbs `R`'s and
-`A`'s *wire* bytes, which is what the standard hashes too.
+`A`'s *wire* bytes, which is what the standard hashes too — and the vectors'
+`reencoded_k` cases are there to separate that reading from the other one.
 """
 
 from __future__ import annotations
@@ -93,6 +97,54 @@ def _sha512_rows(data: Any) -> Any:
 
 
 @dataclass(frozen=True)
+class ValidationRule:
+    """Which Ed25519 signatures a verifier accepts.
+
+    Three readings the standards leave open, pinned together because a
+    consensus system has to answer all three at once and because the
+    published rules each move more than one of them
+    ([`consensus.py`](consensus.py) tabulates who takes which).
+
+    - `canonical_encodings` — whether `A` and `R` must satisfy RFC 8032
+      §5.1.3's refusals, or whether any bytes that encode a curve point are
+      taken (`edwards.decode`).
+    - `reject_small_order` — whether an `A` or `R` whose order divides the
+      cofactor is refused before the equation runs. RFC 8032 asks for no
+      such check.
+    - `cofactored` — `[8][S]B = [8]R + [8][k]A` rather than §5.1.7's
+      sufficient `[S]B = R + [k]A`. The cofactored form is the one batch
+      verification can aggregate, which is why ZIP-215 mandates it.
+    """
+
+    canonical_encodings: bool
+    reject_small_order: bool
+    cofactored: bool
+
+
+# RFC 8032 read literally: §5.1.3's refusals, no small-order check the
+# document does not ask for, and §5.1.7's sufficient cofactorless equation.
+RFC_8032 = ValidationRule(
+    canonical_encodings=True, reject_small_order=False, cofactored=False
+)
+
+
+@dataclass(frozen=True)
+class ParsedBatch:
+    """A wire batch decoded under one rule, before any equation runs.
+
+    Plain data that never crosses a `jit` or `vmap` boundary — the whole
+    parse is host codec — so it is not a registered pytree, per the
+    conventions' rule for a record that stays inside one call.
+    """
+
+    point_a: np.ndarray
+    point_r: np.ndarray
+    s_ints: list[int]
+    k_ints: list[int]
+    ok: Any
+
+
+@dataclass(frozen=True)
 class Ed25519:
     """RFC 8032 Ed25519: 32-byte keys, 64-byte `R ‖ S` signatures."""
 
@@ -102,6 +154,10 @@ class Ed25519:
     deterministic = True
 
     curve = edwards.ED25519
+    # A class attribute, not a field: the rule a construction verifies under
+    # is what the construction *is*, so there is no constructor to pass a
+    # different one through.
+    rule = RFC_8032
 
     def keygen(self, seed: ArrayLike) -> tuple[Any, Any]:
         """RFC 8032 §5.1.5: the seed is the secret key; `A = s·B` encoded."""
@@ -152,9 +208,33 @@ class Ed25519:
         *,
         context: ArrayLike | None,
     ) -> Any:
-        """The batched verdict, `bool[B]` — strict decoding, cofactorless."""
+        """The batched verdict, `bool[B]`, under this construction's rule."""
         context_rules.require_empty(context, "Ed25519")
         curve = self.curve
+        parsed = self._parsed(public_key, message, signature)
+
+        lhs = edwards.multiple(curve, parsed.s_ints, curve.generator)
+        rhs = parsed.point_r + edwards.multiple(curve, parsed.k_ints, parsed.point_a)
+        if self.rule.cofactored:
+            lhs = edwards.mul_by_cofactor(curve, lhs)
+            rhs = edwards.mul_by_cofactor(curve, rhs)
+        return parsed.ok & (lhs == rhs)
+
+    def _parsed(
+        self,
+        public_key: ArrayLike,
+        message: ArrayLike,
+        signature: ArrayLike,
+    ) -> ParsedBatch:
+        """The wire batch under this rule: points, scalars, and the verdicts
+        that do not depend on which equation runs.
+
+        Everything both verification forms share, so the aggregate check
+        cannot drift from the per-signature one on a decoding or a refusal
+        (`consensus.py`).
+        """
+        curve = self.curve
+        rule = self.rule
         xnp = namespace(public_key, message, signature)
         public_key = xnp.asarray(public_key)
         message = xnp.asarray(message)
@@ -169,20 +249,30 @@ class Ed25519:
         public_key = np.asarray(public_key, dtype=np.uint8)
         signature = np.asarray(signature, dtype=np.uint8)
 
-        point_a, a_ok = edwards.decode(curve, public_key)
-        point_r, r_ok = edwards.decode(curve, signature[..., :32])
+        canonical_only = rule.canonical_encodings
+        point_a, a_ok = edwards.decode(curve, public_key, canonical_only=canonical_only)
+        point_r, r_ok = edwards.decode(
+            curve, signature[..., :32], canonical_only=canonical_only
+        )
         s_bytes = signature[..., 32:64]
-        s_ok = group.bytes_below(s_bytes, curve.order, byteorder="little")
+        ok = a_ok & r_ok & group.bytes_below(s_bytes, curve.order, byteorder="little")
+        if rule.reject_small_order:
+            ok = ok & ~(
+                edwards.is_small_order(curve, point_a)
+                | edwards.is_small_order(curve, point_r)
+            )
 
         # Both scalars are little-endian integers off the wire and digest
-        # bytes. An S at or above L is gated by s_ok, so multiple's % L only
-        # ever rewrites a row the verdict already refuses.
-        s_ints = [int.from_bytes(row.tobytes(), "little") for row in s_bytes]
-        k_ints = [int.from_bytes(row.tobytes(), "little") for row in digest]
-
-        lhs = edwards.multiple(curve, s_ints, curve.generator)
-        rhs = point_r + edwards.wide_multiple(curve, k_ints, point_a)
-        return a_ok & r_ok & s_ok & (lhs == rhs)
+        # bytes, and `multiple` reduces each modulo L. That is the reading
+        # of k the module docstring argues for; for S it rewrites nothing,
+        # since an S at or above L is already refused above.
+        return ParsedBatch(
+            point_a=point_a,
+            point_r=point_r,
+            s_ints=[int.from_bytes(row.tobytes(), "little") for row in s_bytes],
+            k_ints=[int.from_bytes(row.tobytes(), "little") for row in digest],
+            ok=ok,
+        )
 
     def _encode_multiple_of_b(self, scalar: int) -> bytes:
         """`scalar·B` encoded per §5.1.2, on the host path.
