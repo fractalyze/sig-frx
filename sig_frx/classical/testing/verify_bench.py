@@ -18,8 +18,9 @@ split across the substrate seams the lane actually crosses:
   compare.
 - `lift` — `secp.lift_x_to_parity`: the x-plus-parity square-root lift the
   x-only and compressed encodings pay on the way in.
-- `sum` — the aggregate check's halving-tree point sum, adds an MSM kernel
-  would also absorb.
+- `sum` — the aggregate checks' halving-tree point sum, adds an MSM kernel
+  would also absorb. One bucket for both aggregate lanes: they fold through
+  the same `group.sum_points`.
 - `decode` / `sha512` — the Edwards substrate's own seams: point
   decompression (its square root and per-row construction included) and the
   per-row host SHA-512 (no device row exists — fractalyze/hash-frx#66). Its
@@ -33,8 +34,10 @@ the final extended-coordinates add and compare.)
 
 There is no traced section and no compile column: nothing in these lanes
 traces — the substrate reads coordinates back per row on purpose — so eager
-is the only path there is. BIP-340's independent and aggregate forms sit in
-separate lanes so their per-signature costs read against each other directly.
+is the only path there is. Each scheme's independent and aggregate forms sit
+in separate lanes so their per-signature costs read against each other
+directly — and for both schemes the aggregate is not yet the cheaper call,
+because the scalar multiplications an MSM would collapse are most of both.
 
     bazel run //sig_frx/classical/testing:verify_bench -- --batches=1,16,256
 """
@@ -51,16 +54,16 @@ import numpy as np
 from absl import app, flags
 
 from sig_frx import hashes
-from sig_frx.classical import edwards, secp
+from sig_frx.classical import edwards, group, secp
 from sig_frx.classical.ecdsa import core
-from sig_frx.classical.eddsa import ed25519
+from sig_frx.classical.eddsa import consensus, ed25519
 from sig_frx.classical.schnorr import bip340
 from sig_frx.threshold import frost
 from sig_frx.threshold.secp256k1_sha256 import Secp256k1Sha256
 
 _LANES = flags.DEFINE_list(
     "lanes",
-    ["ecdsa", "eddsa", "bip340", "bip340_aggregate", "frost"],
+    ["ecdsa", "eddsa", "eddsa_aggregate", "bip340", "bip340_aggregate", "frost"],
     "Lanes to measure. `ecdsa_p256` swaps ECDSA onto secp256r1 and is off by"
     " default — same code path, different kernel instantiation.",
 )
@@ -111,8 +114,16 @@ class _Meter:
         setattr(secp, "affine_ints", self.wrap("readback", secp.affine_ints))
         setattr(secp, "is_identity", self.wrap("readback", secp.is_identity))
         setattr(secp, "lift_x_to_parity", self.wrap("lift", secp.lift_x_to_parity))
-        setattr(bip340, "_sum", self.wrap("sum", bip340._sum))
+        # Both aggregates fold through `group.sum_points`, so wrapping it
+        # once meters the secp and Edwards lanes alike — wrapping each
+        # scheme's thin caller instead would leave whichever one was added
+        # later silently unmetered, in `host`.
+        setattr(group, "sum_points", self.wrap("sum", group.sum_points))
         setattr(edwards, "multiple", self.wrap("mult", edwards.multiple))
+        # Multiplication by a constant 8 is still point multiplication, and
+        # it does not reach `multiple`, so it needs its own wrap to land in
+        # `mult` rather than the remainder.
+        setattr(edwards, "mul_by_cofactor", self.wrap("mult", edwards.mul_by_cofactor))
         setattr(edwards, "decode", self.wrap("decode", edwards.decode))
         setattr(ed25519, "_sha512_rows", self.wrap("sha512", ed25519._sha512_rows))
 
@@ -168,6 +179,24 @@ def _eddsa(meter: _Meter) -> tuple[Any, tuple[np.ndarray, ...]]:
         return scheme.verify(keys, messages, signatures, context=None)
 
     return verify, (np.asarray(public), _MESSAGE, np.asarray(signature))
+
+
+def _eddsa_aggregate(meter: _Meter) -> tuple[Any, tuple[np.ndarray, ...]]:
+    """ZIP-215's aggregate: one verdict for the batch, same fixture as above.
+
+    The signature is plain RFC 8032's — signing does not change with the
+    rule — so this lane and `eddsa` verify identical bytes and the two
+    columns read against each other directly.
+    """
+    del meter
+    scheme = consensus.Ed25519Zip215()
+    public, secret = scheme.keygen(_seed(13, 5))
+    signature = scheme.sign(secret, _MESSAGE, randomness=None, context=None)
+    return scheme.aggregate_verify, (
+        np.asarray(public),
+        _MESSAGE,
+        np.asarray(signature),
+    )
 
 
 def _bip340_rows() -> tuple[bip340.Bip340, tuple[np.ndarray, ...]]:
@@ -234,6 +263,11 @@ _ALL_LANES: dict[str, _Lane] = {
         "Ed25519 — cofactorless, independent verdicts",
         ("sha512", "decode", "mult"),
         _eddsa,
+    ),
+    "eddsa_aggregate": _Lane(
+        "Ed25519/ZIP-215 — aggregate (random linear combination), one verdict",
+        ("sha512", "decode", "mult", "sum"),
+        _eddsa_aggregate,
     ),
     "bip340": _Lane(
         "BIP-340 — independent verdicts",
