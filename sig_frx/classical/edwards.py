@@ -14,9 +14,8 @@ this module keeps is exactly what the dtypes do not expose:
   algebra over `prime_field` here, per the recorded contract that zk_dtypes
   exposes no lift/decompression — and §5.1.2's encoding;
 - the canonical-parity read those encodings hang on;
-- the host-integer scalar handling, including the widening to the full
-  group order that keeps unreduced verification scalars exact
-  (`wide_multiple` below).
+- the host-integer scalar handling, and the cofactor multiplication the
+  verification rules are told apart by (`mul_by_cofactor` below).
 
 Everything here is host-path, like `secp.py`: `.raw` readback and per-entry
 construction are host operations, and the GPU story for this curve is EC
@@ -33,15 +32,21 @@ warns about. So the decoding field is minted canonical *on purpose*, and
 `parity` is the only place in the classical substrate allowed to read
 storage as bits.
 
-## Reduction is modulo 8L, not L
+## `multiple` reduces modulo L, and that is the quantity asked for
 
 The curve's cofactor is 8, so the full group has order `8·L` and
-`k·P = (k mod 8L)·P` for *every* point, torsion components included —
-while reducing modulo `L` alone is a fact about the prime-order subgroup
-only. `multiple` reduces `% L` and therefore serves scalars already below
-`L` and multiples of the base point; `wide_multiple` is exact for
-everything else, which is what lets the verifier keep driving the group
-with its unreduced digest scalar (`eddsa/ed25519.py`).
+`k·P = (k mod 8L)·P` for *every* point, torsion components included, while
+reducing modulo `L` alone is a fact about the prime-order subgroup. So
+`multiple`'s `% L` is not a widening its callers have to work around: on a
+point carrying a torsion component it computes `[k mod L]P`, a different
+point than `[k]P`, and that is precisely what every published Ed25519
+verification rule drives the group with (`eddsa/ed25519.py` records why the
+standard's unreduced wording agrees).
+
+`mul_by_cofactor` is the other half of the cofactor's story. Multiplying by
+8 clears the torsion component instead of reducing around it, which is what
+ZIP-215's equation does to both sides and what makes `is_small_order` a
+compare rather than a blocklist.
 """
 
 from __future__ import annotations
@@ -78,7 +83,7 @@ class EdwardsCurve:
     field: Any  # the base-field dtype — what decoding's arithmetic runs over
 
     # RFC 8032 §5.1: the group has order 8·L. The cofactor is what
-    # `wide_multiple`'s exactness stands on.
+    # `mul_by_cofactor` clears the torsion with.
     cofactor = 8
 
     @functools.cached_property
@@ -154,41 +159,39 @@ ED25519 = EdwardsCurve(
 
 
 def multiple(curve: EdwardsCurve, scalars: list[int], points: ArrayLike) -> np.ndarray:
-    """`scalars[i] · points[i]`, one batched kernel call — `[B]` extended.
+    """`(scalars[i] mod L) · points[i]`, one batched kernel call — `[B]`
+    extended.
 
-    Scalars reduce `% L` in Python first (the dtype refuses larger ints,
-    fractalyze/zk_dtypes#179) — sound when the scalar is already below `L`
-    or the point lies in the base point's prime-order subgroup. A wide
-    scalar on an arbitrary decoded point needs `wide_multiple`: with
-    cofactor 8, `% L` is not the group's own reduction.
+    Scalars reduce `% L` in Python first, because the dtype refuses a wider
+    integer (fractalyze/zk_dtypes#179). The reduction is exact on the base
+    point's prime-order subgroup and a deliberate reading everywhere else —
+    see the module docstring, and `eddsa/ed25519.py` for the standard it is
+    read from.
     """
     reduced = np.array([k % curve.order for k in scalars], dtype=curve.scalar)
     return points * reduced
 
 
-def wide_multiple(
-    curve: EdwardsCurve, scalars: list[int], points: ArrayLike
-) -> np.ndarray:
-    """`scalars[i] · points[i]` exact for any width and any curve point.
+def mul_by_cofactor(curve: EdwardsCurve, points: ArrayLike) -> np.ndarray:
+    """`[8]P` elementwise, as three doublings rather than a scalar multiply.
 
-    Reduces modulo the full group order `8L` — the group's own fact for
-    every point, torsion included — then splits on the cofactor rather than
-    on `L`: `k = 8q + s` gives `q ≤ (8L-1)/8 < L` and `s < 8` by
-    construction, so both scalars are ones `multiple` takes unchanged, and
-    `k·P = q·(8P) + s·P`. Doubling three times to reach `8P` also clears
-    the torsion component, which is what makes the `q` term immune to the
-    reduction `multiple` applies. Two batched multiplications, against the
-    three that splitting on `L` costs (that form has to synthesize `L·P`,
-    a full-width multiply whose only job is to be discarded).
+    Clearing the torsion component is what ZIP-215's equation does to both
+    sides, and `[8]P == O` is what makes a small-order point a compare. The
+    cofactor is `2³`, so the whole of it is three batched adds — cheaper
+    than a scalar kernel whose scalar is a constant 8.
     """
-    points = np.asarray(points)
-    reduced = [k % (curve.cofactor * curve.order) for k in scalars]
-    torsion_free = points
+    doubled = np.asarray(points)
     for _ in range(curve.cofactor.bit_length() - 1):  # the cofactor is 2³
-        torsion_free = torsion_free + torsion_free
-    return multiple(
-        curve, [k // curve.cofactor for k in reduced], torsion_free
-    ) + multiple(curve, [k % curve.cofactor for k in reduced], points)
+        doubled = doubled + doubled
+    return doubled
+
+
+def sum_points(curve: EdwardsCurve, points: ArrayLike) -> np.ndarray:
+    """The sum of a `[K]` point batch — `group.sum_points` with this curve's
+    identity as the pad, which for an Edwards curve is a real `(0, 1)` and
+    never a zero-filled buffer (see `identity`, and the shared function).
+    """
+    return group.sum_points(np.asarray(points), curve.identity)
 
 
 def affine_ints(curve: EdwardsCurve, points: ArrayLike) -> list[tuple[int, int]]:
@@ -205,6 +208,22 @@ def is_identity(curve: EdwardsCurve, points: ArrayLike) -> np.ndarray:
     equal, the projective compare being what decides.
     """
     return np.asarray(points) == curve.identity
+
+
+def is_small_order(curve: EdwardsCurve, points: ArrayLike) -> np.ndarray:
+    """Whether each entry's order divides the cofactor, elementwise.
+
+    `[8]P == O` is the definition, so the identity counts as small-order —
+    which is what the rules that reject these points intend. RFC 8032 asks
+    for no such check; ed25519-dalek's `verify_strict` and libsodium do
+    ([`eddsa/consensus.py`](eddsa/consensus.py)).
+
+    A compare, where those implementations ship a blocklist of encodings.
+    The blocklist has to enumerate every encoding of every small-order
+    point, which is a list that can be — and in libsodium 1.0.15 was —
+    incomplete; `[8]P` cannot miss one.
+    """
+    return is_identity(curve, mul_by_cofactor(curve, points))
 
 
 def field_from_le_bytes(curve: EdwardsCurve, data: ArrayLike) -> Any:
@@ -230,14 +249,17 @@ def parity(curve: EdwardsCurve, value: ArrayLike) -> Any:
 
 
 def decompress_x(curve: EdwardsCurve, y: Any, sign: Any) -> tuple[Any, Any]:
-    """RFC 8032 §5.1.3's x-recovery: `(x, decoded_ok)`, elementwise.
+    """RFC 8032 §5.1.3's x-recovery: `(x, on_curve)`, elementwise.
 
     `x² = (y² - 1)/(d·y² + 1)`; the candidate root is
     `u·v³·(u·v⁷)^((p-5)/8)`, corrected by `√-1` when it squares to `-u/v`,
-    and decoding fails when neither squares back — or when `x = 0` arrives
-    with the sign bit set. A failed entry carries a junk `x` and a false
-    flag rather than raising, which is what lets one decoding serve a whole
-    batch: the caller's mask drops the row.
+    and the flag is false when neither squares back — that `y` names no
+    point. §5.1.3's *canonicity* refusals are not applied here: which of
+    them a rule takes is `decode`'s question, and it asks it in one place.
+
+    A failed entry carries a junk `x` and a false flag rather than raising,
+    which is what lets one decoding serve a whole batch: the caller's mask
+    drops the row.
     """
     y2 = y * y
     u = y2 - curve.one
@@ -251,37 +273,56 @@ def decompress_x(curve: EdwardsCurve, y: Any, sign: Any) -> tuple[Any, Any]:
     needs_correction = squared == -u
     ok = is_root | needs_correction
     x = np.where(is_root, candidate, corrected)
-    x_is_zero = x == np.array(0, dtype=curve.field)
     sign_arr = np.asarray(sign)
-    ok = ok & ~(x_is_zero & (sign_arr == np.uint8(1)))
     wrong_sign = parity(curve, x) != sign_arr.astype(np.uint32)
     return np.where(wrong_sign, -x, x), ok
 
 
-def decode(curve: EdwardsCurve, encoded: ArrayLike) -> tuple[np.ndarray, Any]:
+def decode(
+    curve: EdwardsCurve, encoded: ArrayLike, *, canonical_only: bool
+) -> tuple[np.ndarray, Any]:
     """RFC 8032 §5.1.3: `[B, 32]` bytes to affine points, a verdict each.
 
-    The sign bit is the top bit of the last byte; the remaining 255 bits are
-    `y`, refused when not canonical (`y ≥ p`). The recovered coordinates read
-    back to integers and construct the affine dtype per row — host codec, per
-    the module's host-path rule — so a failed entry carries junk coordinates
-    (the dtype constructs off-curve pairs without complaint) and a false
-    verdict its caller's mask drops.
+    The sign bit is the top bit of the last byte and the remaining 255 bits
+    are `y`. `canonical_only` carries §5.1.3's two canonicity refusals
+    together — a `y ≥ p`, and an `x = 0` that arrives with the sign bit set,
+    an encoding of `-0`. Dropping them reads `y` modulo `p` and lets `-0`
+    decode to `0`, which is what ZIP-215 means by requiring only that the
+    bytes encode *a point on the curve*.
+
+    One parameter rather than two because the rules this repo implements
+    take both refusals or neither. It has **no default**: which accept set a
+    caller wants is the consensus-relevant choice this whole module exists
+    to make explicit, so a call site states it and cites the rule it is
+    reading (`eddsa/consensus.py`).
+
+    The recovered coordinates read back to integers and construct the affine
+    dtype per row — host codec, per the module's host-path rule — so a failed
+    entry carries junk coordinates (the dtype constructs off-curve pairs
+    without complaint) and a false verdict its caller's mask drops.
     """
     encoded = np.asarray(encoded)
     sign = encoded[..., 31] >> np.uint8(7)
     y_bytes = np.concatenate(
         [encoded[..., :31], encoded[..., 31:32] & np.uint8(0x7F)], axis=-1
     )
-    canonical = group.bytes_below(y_bytes, curve.p, byteorder="little")
     y = field_from_le_bytes(curve, y_bytes)
     x, ok = decompress_x(curve, y, sign)
+    if canonical_only:
+        # `-0` negates to `0`, so the returned x answers this as well as the
+        # pre-correction candidate would.
+        x_is_zero = np.asarray(x) == np.array(0, dtype=curve.field)
+        ok = (
+            ok
+            & group.bytes_below(y_bytes, curve.p, byteorder="little")
+            & ~(x_is_zero & (np.asarray(sign) == np.uint8(1)))
+        )
     xs = np.asarray(x).astype(object)
     ys = np.asarray(y).astype(object)
     points = np.array(
         [curve.point((int(a), int(b))) for a, b in zip(xs, ys)], dtype=curve.point
     )
-    return points, canonical & ok
+    return points, ok
 
 
 def encode_affine(x: int, y: int) -> bytes:

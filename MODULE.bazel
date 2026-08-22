@@ -214,3 +214,17 @@ http_file(
     sha256 = "5bda3e29f8e7a0883ceaa0e4bc2f71582bbb4f04058a4657dd5aa276f32372bd",
     urls = ["https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-frost/127452b93acb3094a6f659d059550df5618c2714/poc/frost-secp256k1-sha256.json"],
 )
+
+# Ed25519's verification rules have no published vectors, because they are
+# not one rule — RFC 8032 §7.1 gates the scheme and cannot gate the choice,
+# every case in it being an honestly produced signature that every rule
+# accepts. C2SP's set is built the other way round: each case is an edge
+# case in `A` or `R` chosen to make implementations disagree, carrying the
+# flags that say which. That is what turns a rule into something testable
+# (`sig_frx/classical/testing/ed25519_cctv_vectors.py`).
+http_file(
+    name = "cctv_ed25519_vectors",
+    downloaded_file_path = "ed25519vectors.json",
+    sha256 = "b38e84caf3e7e89170ff520292dbeae421b0a794c27408ce5ce973018fe3d7f9",
+    urls = ["https://raw.githubusercontent.com/C2SP/CCTV/1e3d2860d46e94e777e1b17c7a6f2436387e3ecc/ed25519/ed25519vectors.json"],
+)

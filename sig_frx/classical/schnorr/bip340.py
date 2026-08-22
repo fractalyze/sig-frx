@@ -37,7 +37,7 @@ import numpy as np
 from frx.typing import ArrayLike
 
 from sig_frx import context as context_rules
-from sig_frx.classical import secp
+from sig_frx.classical import group, secp
 from sig_frx.signature import Signature
 
 _CURVE = secp.SECP256K1
@@ -204,18 +204,12 @@ class Bip340:
             return False
 
         n = _CURVE.n
-        batch = keys.shape[0]
-        seed = hashlib.sha256(
-            keys.tobytes() + messages.tobytes() + signatures.tobytes()
-        ).digest()
-        coefficients = [1] + [
-            1
-            + int.from_bytes(
-                hashlib.sha256(seed + index.to_bytes(8, "big")).digest(), "big"
-            )
-            % (n - 1)
-            for index in range(1, batch)
-        ]
+        coefficients = group.batch_coefficients(
+            n,
+            keys.shape[0],
+            keys.tobytes() + messages.tobytes() + signatures.tobytes(),
+            digest=hashlib.sha256,
+        )
         s_scalars = [
             int.from_bytes(entry[32:].tobytes(), "big") for entry in signatures
         ]
@@ -295,13 +289,9 @@ class Bip340:
 
 
 def _sum(points: np.ndarray) -> np.ndarray:
-    """The sum of a `[K]` point batch, by vectorized halving to `[1]`."""
-    while points.shape[0] > 1:
-        if points.shape[0] % 2:
-            points = np.concatenate([points, np.zeros([1], dtype=points.dtype)])
-        half = points.shape[0] // 2
-        points = points[:half] + points[half:]
-    return points
+    """The sum of a `[K]` point batch — `group.sum_points` padded with the
+    zero-filled Jacobian buffer, which on this curve *is* infinity."""
+    return group.sum_points(points, np.zeros([1], dtype=points.dtype))
 
 
 if TYPE_CHECKING:
