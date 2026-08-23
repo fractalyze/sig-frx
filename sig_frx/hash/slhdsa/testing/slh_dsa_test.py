@@ -30,7 +30,7 @@ import numpy as np
 from absl.testing import absltest
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx import Sha256
+from hash_frx import Sha256, Sha512
 
 from sig_frx.context import MAX_SIZE as MAX_CONTEXT_SIZE
 from sig_frx.hash import tree, wots
@@ -245,15 +245,23 @@ class Sha2FactoryTest(absltest.TestCase):
                 # §9.2: hedged is the standard's default variant.
                 self.assertFalse(scheme.deterministic)
 
-    def test_the_higher_categories_need_a_second_hash(self) -> None:
-        for name in slh_dsa.SHA2_PARAMETER_SETS:
-            if slh_dsa.SHA2_PARAMETER_SETS[name].security_category == 1:
-                continue
-            with (
-                self.subTest(name),
-                self.assertRaisesRegex(NotImplementedError, "SHA-512"),
-            ):
-                slh_dsa.sha2(name)
+    def test_every_sha2_set_builds_over_the_family_its_category_names(self) -> None:
+        # §11.2.1 is one hash for all six functions; §11.2.2 is two. Both branches
+        # name the family they expect and compare against it, rather than the
+        # category 3 and 5 branch asserting only that the two differ — "differs
+        # from §11.2.1's" also holds for a wrong second hash, a wrong block size,
+        # and the two hashes swapped. Which hash each *function* then runs is
+        # `tweakable_test.Sha512FamilyTest`, against hashlib.
+        for name, params in slh_dsa.SHA2_PARAMETER_SETS.items():
+            with self.subTest(name):
+                wide = None if params.security_category == 1 else Sha512()
+                self.assertEqual(
+                    slh_dsa.sha2(name),
+                    slh_dsa.SlhDsa(
+                        Sha2TweakableHash(Sha256(), n=params.n, m=params.m, wide=wide),
+                        params,
+                    ),
+                )
 
     def test_an_unnamed_set_is_an_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "not one of"):

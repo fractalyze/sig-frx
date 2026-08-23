@@ -16,9 +16,9 @@ encodings are Figures 15 to 17, the domain separators and the context framing ar
 negotiable: a signature is a byte string that either matches what NIST published
 or does not — and it does, for every operation the standard defines and every
 parameter set the two families here can build, against ACVP's `keyGen`, `sigGen`
-and `sigVer` sets. That is all six SHAKE sets and SHA-2's category 1 pair. The
-exhaustive run over every one of them is tagged `slow_kat`; the merge gate gets
-the same operations at one `f` set.
+and `sigVer` sets. That is all twelve of Table 2. The exhaustive run over every
+one of them is tagged `slow_kat`; the merge gate gets the same operations at one
+`f` set.
 
 Three interfaces, and the seam names one. §10's pure external operation is the
 seam; HashSLH-DSA and §9's internal interface prepend a different message, so they
@@ -32,15 +32,18 @@ What this implementation chooses:
   including `h'`, `m`, and the key and signature sizes, which Table 2 lists and its
   own footnote says are computed. Table 2 gives each row two names, one per hash
   family, so a SHAKE instantiation is these rows under a different tweakable hash.
-- **Security category 1 is what `sha2` builds.** §11.2.1's family reaches every
-  function with SHA-256 alone. Categories 3 and 5 keep SHA-256 for `PRF` and `F`
-  but hash `H`, `T_l` and `PRF_msg` with SHA-512 (§11.2.2), which makes them a
-  family over two hashes and needs a SHA-512 `ByteHash` rather than a constant
-  change here.
-- **`shake` builds all six sets where `sha2` builds two.** §11.1 reaches every
-  function with SHAKE256 at every security category, because an extendable output
-  already produces whatever length each one wants — there is no MGF1 to reach `m`
-  bytes, no HMAC, no compression-block padding, and no second hash to change to.
+- **The security category picks the SHA-2 family, and `sha2` builds all six.**
+  §11.2.1 reaches every function with SHA-256 alone, which is what category 1
+  needs. Categories 3 and 5 keep SHA-256 for `PRF` and `F` and move `H`, `T_l`,
+  `PRF_msg` and `H_msg` to SHA-512 (§11.2.2) — the collision-bound four, which a
+  256-bit digest is short of at `n` = 24 and 32. So `Sha2TweakableHash` takes the
+  second hash rather than a flag, and `security_category` is what supplies it:
+  there is no set for which the pair is a deployment's choice.
+- **`shake` builds all six over one hash, where `sha2` needs two.** §11.1 reaches
+  every function with SHAKE256 at every security category, because an extendable
+  output already produces whatever length each one wants — there is no MGF1 to
+  reach `m` bytes, no HMAC, no compression-block padding, and no second hash to
+  change to.
   An XOF at two lengths is two hashes rather than one asked twice, so the family
   holds one instance per length its parameter set names.
 - **The address encoding belongs to the family, and every component asks.** The

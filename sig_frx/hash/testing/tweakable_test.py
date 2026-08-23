@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import Callable
 
 import numpy as np
 from absl.testing import absltest
-from hash_frx import Sha256, Sha512_256
+from hash_frx import Sha256, Sha512, Sha512_256
 
 from sig_frx.hash import adrs as a
 from sig_frx.hash.tweakable import Sha2TweakableHash, TweakableHash
@@ -27,7 +28,11 @@ from sig_frx.hash.tweakable import Sha2TweakableHash, TweakableHash
 # SLH-DSA-SHA2-128s / 128f: n = 16, and the message digest is 30 bytes.
 _N = 16
 _M = 30
-_BLOCK = 64
+
+# SLH-DSA-SHA2-192s: n = 24 with a 39-byte digest, the smallest §11.2.2 row.
+_WIDE_N = 24
+_WIDE_M = 39
+_WIDE_PK_SEED = bytes(range(_WIDE_N))
 
 _PK_SEED = bytes(range(_N))
 _SK_SEED = bytes(range(100, 100 + _N))
@@ -44,29 +49,81 @@ def _family() -> Sha2TweakableHash:
     return Sha2TweakableHash(Sha256(), n=_N, m=_M)
 
 
-def _spec_tweak(adrs_c: bytes, payload: bytes) -> bytes:
-    """`Trunc_n(SHA-256(PK.seed ‖ toByte(0, 64 − n) ‖ ADRS^c ‖ payload))` — §11.2."""
-    return hashlib.sha256(_PK_SEED + bytes(_BLOCK - _N) + adrs_c + payload).digest()[
-        :_N
-    ]
+def _tweak_address() -> tuple[bytes, np.ndarray]:
+    """One WOTS+ hash address, in the two encodings the assertions need.
+
+    The oracle takes the host encoding and the family takes the batched one, so
+    every tweaked-function test wants both of the same address.
+    """
+    address = a.wots_hash(layer=2, tree=7, key_pair=3, chain=5, hash_index=1)
+    return a.encode(address, compressed=True), a.encode_batch(address, compressed=True)
 
 
-def _spec_mgf1(seed: bytes, length: int) -> bytes:
-    """MGF1-SHA-256 — RFC 8017 §B.2.1."""
+def _spec_tweak(
+    adrs_c: bytes,
+    payload: bytes,
+    *,
+    hash_fn: Callable[[bytes], "hashlib._Hash"] = hashlib.sha256,
+    n: int = _N,
+    seed: bytes = _PK_SEED,
+) -> bytes:
+    """`Trunc_n(H(PK.seed ‖ toByte(0, blocksize − n) ‖ ADRS^c ‖ payload))` — §11.2.
+
+    One formula for both subsections: §11.2.1 runs every function at the
+    defaults, and §11.2.2 keeps them for `PRF` and `F` while `H` and `T_l` pass
+    SHA-512. Written once so a reader checks the construction against the
+    standard once.
+
+    The block comes off `hash_fn` rather than from the caller, because §11.2 pads
+    to the block of the hash it is padding for — a pair that disagreed would be a
+    formula the standard does not have.
+    """
+    padding = hash_fn(b"").block_size - n
+    return hash_fn(seed + bytes(padding) + adrs_c + payload).digest()[:n]
+
+
+def _wide_family() -> Sha2TweakableHash:
+    """§11.2.2's two-hash family: SHA-256 for `PRF` and `F`, SHA-512 for the rest."""
+    return Sha2TweakableHash(Sha256(), n=_WIDE_N, m=_WIDE_M, wide=Sha512())
+
+
+def _spec_mgf1(
+    seed: bytes,
+    length: int,
+    *,
+    hash_fn: Callable[[bytes], "hashlib._Hash"] = hashlib.sha256,
+) -> bytes:
+    """MGF1 over `hash_fn` — RFC 8017 §B.2.1."""
+    size = hash_fn(b"").digest_size
     out = b"".join(
-        hashlib.sha256(seed + c.to_bytes(4, "big")).digest()
-        for c in range(-(-length // 32))
+        hash_fn(seed + c.to_bytes(4, "big")).digest() for c in range(-(-length // size))
     )
     return out[:length]
+
+
+def _spec_h_msg(
+    randomizer: bytes,
+    pk_root: bytes,
+    message: bytes,
+    *,
+    hash_fn: Callable[[bytes], "hashlib._Hash"] = hashlib.sha256,
+    seed: bytes = _PK_SEED,
+    m: int = _M,
+) -> bytes:
+    """`MGF1(R ‖ PK.seed ‖ H(R ‖ PK.seed ‖ PK.root ‖ M), m)` — §11.2's `H_msg`.
+
+    Both subsections again, and both hashes are the same one: §11.2.2 moves the
+    inner digest and the MGF1 to SHA-512 together.
+    """
+    inner = hash_fn(randomizer + seed + pk_root + message).digest()
+    return _spec_mgf1(randomizer + seed + inner, m, hash_fn=hash_fn)
 
 
 class TweakedHashTest(absltest.TestCase):
     def setUp(self) -> None:
         super().setUp()
         self.family = _family()
-        self.address = a.wots_hash(layer=2, tree=7, key_pair=3, chain=5, hash_index=1)
-        self.adrs_c = a.encode(self.address, compressed=True)
-        self.batch = a.encode_batch(self.address, compressed=True)
+        self.adrs_c, self.batch = _tweak_address()
 
     def test_f_is_the_standards_construction(self) -> None:
         m1 = bytes(range(30, 30 + _N))
@@ -175,10 +232,9 @@ class MessageHashTest(absltest.TestCase):
             _u8(_PK_ROOT),
             _u8(message),
         )
-        inner = hashlib.sha256(randomizer + _PK_SEED + _PK_ROOT + message).digest()
         self.assertEqual(
             bytes(np.asarray(got)[0]),
-            _spec_mgf1(randomizer + _PK_SEED + inner, _M),
+            _spec_h_msg(randomizer, _PK_ROOT, message),
         )
 
     def test_h_msg_digests_a_batch_under_one_call(self) -> None:
@@ -193,12 +249,9 @@ class MessageHashTest(absltest.TestCase):
         self.assertEqual(got.shape, (3, _M))
         for index in range(3):
             randomizer = bytes(randomizers[index])
-            inner = hashlib.sha256(
-                randomizer + _PK_SEED + _PK_ROOT + bytes(messages[index])
-            ).digest()
             self.assertEqual(
                 bytes(got[index]),
-                _spec_mgf1(randomizer + _PK_SEED + inner, _M),
+                _spec_h_msg(randomizer, _PK_ROOT, bytes(messages[index])),
                 f"entry {index}",
             )
 
@@ -235,6 +288,100 @@ class SeamTest(absltest.TestCase):
     def test_a_truncation_longer_than_the_digest_is_an_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "exceeds"):
             Sha2TweakableHash(Sha256(), n=64, m=_M)
+
+    def test_a_wide_hash_too_short_to_truncate_is_an_error(self) -> None:
+        # The second hash truncates to the same n, so it is checked too — and the
+        # message says which of the two is short, since either can be.
+        with self.assertRaisesRegex(ValueError, "wide truncates"):
+            Sha2TweakableHash(Sha512(), n=48, m=_M, wide=Sha256())
+
+
+class Sha512FamilyTest(absltest.TestCase):
+    """FIPS 205 §11.2.2 — the categories 3 and 5 family, over two hashes.
+
+    Checked against `hashlib` rather than against §11.2.1's family, because "the
+    bytes differ" would pass for a routing that moved the wrong four functions.
+    Each function is pinned to the hash the standard gives it, which is what makes
+    a mis-routed `F` or `H` fail here rather than only in the published vectors.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.family = _wide_family()
+        self.seed = _u8(_WIDE_PK_SEED)
+        self.adrs_c, self.batch = _tweak_address()
+
+    def _spec(
+        self,
+        payload: bytes,
+        *,
+        hash_fn: Callable[[bytes], "hashlib._Hash"] = hashlib.sha256,
+    ) -> bytes:
+        """§11.2.2's tweaked construction at this row, over whichever hash runs it.
+
+        SHA-256 for `PRF` and `F` and SHA-512 for `H` and `T_l` — one argument
+        apart, because the padding block follows the hash. Which function gets
+        which is the caller's claim, and the test names below are where it is
+        made.
+        """
+        return _spec_tweak(
+            self.adrs_c, payload, hash_fn=hash_fn, n=_WIDE_N, seed=_WIDE_PK_SEED
+        )
+
+    def test_prf_stays_on_sha256(self) -> None:
+        # `prf` takes the secret seed where `f` takes `M1`; the construction under
+        # both is the same, which is why they share an oracle and not a method.
+        payload = bytes(range(30, 30 + _WIDE_N))
+        got = self.family.prf(self.seed, _u8(payload), self.batch)
+        self.assertEqual(bytes(np.asarray(got)[0]), self._spec(payload))
+
+    def test_f_stays_on_sha256(self) -> None:
+        payload = bytes(range(30, 30 + _WIDE_N))
+        got = self.family.f(self.seed, self.batch, _u8(payload))
+        self.assertEqual(bytes(np.asarray(got)[0]), self._spec(payload))
+
+    def test_h_moves_to_sha512(self) -> None:
+        payload = bytes(range(2 * _WIDE_N))
+        got = self.family.h(self.seed, self.batch, _u8(payload))
+        self.assertEqual(
+            bytes(np.asarray(got)[0]), self._spec(payload, hash_fn=hashlib.sha512)
+        )
+
+    def test_t_moves_to_sha512(self) -> None:
+        payload = bytes(range(2 * _WIDE_N))
+        got = self.family.t(self.seed, self.batch, _u8(payload))
+        self.assertEqual(
+            bytes(np.asarray(got)[0]), self._spec(payload, hash_fn=hashlib.sha512)
+        )
+
+    def test_prf_msg_is_truncated_hmac_sha512(self) -> None:
+        sk_prf = bytes(range(50, 50 + _WIDE_N))
+        opt_rand = bytes(range(80, 80 + _WIDE_N))
+        message = b"the content that gets signed"
+        got = self.family.prf_msg(_u8(sk_prf), _u8(opt_rand), _u8(message))
+        expected = hmac.new(sk_prf, opt_rand + message, hashlib.sha512).digest()
+        self.assertEqual(bytes(np.asarray(got)), expected[:_WIDE_N])
+
+    def test_h_msg_is_mgf1_sha512_over_the_inner_sha512_digest(self) -> None:
+        randomizer = bytes(range(10, 10 + _WIDE_N))
+        pk_root = bytes(range(200, 200 + _WIDE_N))
+        message = b"the content that gets signed"
+        got = self.family.h_msg(_u8(randomizer), self.seed, _u8(pk_root), _u8(message))
+        expected = _spec_h_msg(
+            randomizer,
+            pk_root,
+            message,
+            hash_fn=hashlib.sha512,
+            seed=_WIDE_PK_SEED,
+            m=_WIDE_M,
+        )
+        self.assertEqual(bytes(np.asarray(got)[0]), expected)
+
+    def test_the_family_is_not_equal_to_one_over_a_single_hash(self) -> None:
+        over_one_hash = Sha2TweakableHash(Sha256(), n=_WIDE_N, m=_WIDE_M)
+        self.assertNotEqual(self.family, over_one_hash)
+        self.assertEqual(self.family, _wide_family())
+        self.assertEqual(hash(self.family), hash(_wide_family()))
 
 
 if __name__ == "__main__":

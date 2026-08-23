@@ -13,11 +13,12 @@ key and a bitmask rather than a prefix, and derives its message digest from a
 different set of operands. Asking those components for the whole family would make
 the sharing a lie the type checker happens not to catch.
 
-A parameter-set family is a `ByteHash` from hash-frx plus the sizes — which is
-what makes the SHA-2 and SHAKE sets one implementation rather than two, and is
-the reason that seam exists. `Sha2TweakableHash` is the SHA-2 instantiation
-(§11.2); a SHAKE instantiation (§11.1) is the same class shape over SHAKE256,
-differing in how each function derives its digest rather than in what it is for.
+A parameter-set family is whatever hashes its instantiation names, plus the sizes
+— which is what makes the SHA-2 and SHAKE sets one implementation rather than two,
+and is the reason that seam exists. `Sha2TweakableHash` is the SHA-2 instantiation
+(§11.2), over one hash at security category 1 and two at categories 3 and 5; a
+SHAKE instantiation (§11.1) is the same class shape over SHAKE256, differing in
+how each function derives its digest rather than in what it is for.
 
 Inputs and outputs are `uint8` arrays with a leading batch axis, because the
 callers hash a whole WOTS+ chain step or a whole Merkle level at once. `pk_seed`
@@ -45,6 +46,7 @@ path (see `docs/reference/security.md`).
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Protocol, TypeAlias, runtime_checkable
 
 import frx.numpy as fnp
@@ -202,24 +204,50 @@ def repeat_per_entry(
     return fnp.repeat(array, times, axis=0)
 
 
+@dataclass(frozen=True)
+class _Sha2Hash:
+    """A SHA-2 hash together with the compression-block size its padding needs.
+
+    The pair travels rather than the hash alone because §11.2.2 runs `PRF` and
+    `F` on one hash and the other four functions on another, and each function
+    pads `PK.seed` out to *its* hash's block. Reading the width off the hash at
+    the point of use would mean two lookups per call for a value fixed at
+    construction.
+    """
+
+    byte_hash: ByteHash
+    block_size: int
+
+    def digest(self, messages: Array) -> Array:
+        return fnp.asarray(self.byte_hash.digest(messages), dtype=fnp.uint8)
+
+
 class Sha2TweakableHash:
-    """The SHA-2 instantiation for security category 1 — FIPS 205 §11.2.1.
+    """The SHA-2 instantiation — FIPS 205 §11.2.1 and §11.2.2.
 
-    That is SLH-DSA-SHA2-128s and -128f, which reach every function with SHA-256
-    alone. Categories 3 and 5 (§11.2.2) keep SHA-256 for `PRF` and `F` but move
-    `H`, `T_l` and `PRF_msg` to SHA-512 with `toByte(0, 128 − n)`, so they are a
-    family over *two* hashes rather than one — a different constructor, not a
-    different constant.
+    §11.2.1 is security category 1 (SLH-DSA-SHA2-128s and -128f), which reaches
+    every function with SHA-256 alone. §11.2.2 is categories 3 and 5, which keep
+    SHA-256 for `PRF` and `F` and move `H`, `T_l`, `PRF_msg` and `H_msg` to
+    SHA-512 — `toByte(0, 128 − n)` for the two tweaked ones, and SHA-512's
+    128-byte block for HMAC and MGF1. So the family is over *two* hashes, and
+    `wide` is the one that differs: leave it unset for §11.2.1, where every
+    function shares the single hash.
 
-    `F`, `H`, `T_l` and `PRF` are the same construction here, differing only in
-    what follows the address: `Trunc_n(SHA-256(PK.seed ‖ toByte(0, 64 − n) ‖
-    ADRS^c ‖ <input>))`. They stay separate names because the callers and the
-    standard name them separately, and because the SHAKE instantiation does not
-    collapse them.
+    Which functions move is a strength argument rather than an arbitrary split.
+    `PRF` and `F` are preimage-bound on n-byte inputs, so SHA-256 still covers
+    them at n = 24 and 32; `H`, `T_l`, `PRF_msg` and `H_msg` are the
+    collision-bound ones, and a category-3 or -5 set claims more collision
+    strength than a 256-bit digest has.
+
+    `F`, `H`, `T_l` and `PRF` are the same construction, differing only in which
+    hash runs it and what follows the address: `Trunc_n(H(PK.seed ‖
+    toByte(0, blocksize − n) ‖ ADRS^c ‖ <input>))`. They stay separate names
+    because the callers and the standard name them separately, and because the
+    SHAKE instantiation does not collapse them.
 
     The zero padding after `PK.seed` is not decoration: it pads the seed to
-    exactly one 64-byte compression block, so an implementation may precompute
-    that block's midstate once per key and resume it per call.
+    exactly one compression block, so an implementation may precompute that
+    block's midstate once per key and resume it per call.
     """
 
     def __init__(
@@ -229,19 +257,38 @@ class Sha2TweakableHash:
         n: int,
         m: int,
         block_size: int | None = None,
+        wide: ByteHash | None = None,
     ) -> None:
-        if byte_hash.digest_size < n:
-            raise ValueError(
-                f"n={n} exceeds the {byte_hash.digest_size}-byte digest it truncates"
-            )
-        self._byte_hash = byte_hash
+        """`byte_hash` runs `PRF` and `F`; `wide` runs the rest.
+
+        `wide` unset is §11.2.1: one hash for all six functions. Setting it is
+        §11.2.2, and the caller that does so is `slh_dsa.sha2_params`, which reads
+        the security category off the parameter set.
+
+        `block_size` overrides hash-frx's table for `byte_hash` alone, because it
+        is the hash a caller wraps — a test double that counts calls, a bench that
+        measures them. Nothing wraps `wide`, so it takes the table's answer.
+        """
+        # `PRF` and `F` truncate to n, and so does every function `wide` runs, so
+        # every hash given has to reach n. Checked on the arguments rather than on
+        # the pairs below: it names the role that is short, and it leaves an unset
+        # `wide` out of it — where `wide` is `byte_hash` again, already checked.
+        for role, given in (("byte_hash", byte_hash), ("wide", wide)):
+            if given is not None and given.digest_size < n:
+                raise ValueError(
+                    f"n={n} exceeds the {given.digest_size}-byte digest "
+                    f"{role} truncates"
+                )
         # The hash's compression-block size, which HMAC and the seed padding both
         # need. `ByteHash` does not carry it, so it comes from hash-frx's table —
         # which answers 64 for SHA-256 and 128 for SHA-512, the pair §11.2.2's
-        # categories 3 and 5 need. Pass it only for a hash that table cannot name,
-        # such as a test double wrapping a row.
-        self._block_size = (
-            block_size if block_size is not None else block_size_of(byte_hash)
+        # categories 3 and 5 need.
+        self._narrow = _Sha2Hash(
+            byte_hash,
+            block_size if block_size is not None else block_size_of(byte_hash),
+        )
+        self._wide = (
+            self._narrow if wide is None else _Sha2Hash(wide, block_size_of(wide))
         )
         self.n = n
         self.m = m
@@ -252,28 +299,28 @@ class Sha2TweakableHash:
         if not isinstance(other, Sha2TweakableHash):
             return NotImplemented
         return (
-            self._byte_hash == other._byte_hash
-            and self._block_size == other._block_size
+            self._narrow == other._narrow
+            and self._wide == other._wide
             and self.n == other.n
             and self.m == other.m
         )
 
     def __hash__(self) -> int:
-        return hash((type(self), self._byte_hash, self._block_size, self.n, self.m))
+        return hash((type(self), self._narrow, self._wide, self.n, self.m))
 
     # -- the tweaked family ------------------------------------------------
 
     def prf(self, pk_seed: ArrayLike, sk_seed: ArrayLike, adrs: ArrayLike) -> Array:
-        return self._tweak(pk_seed, adrs, sk_seed)
+        return self._tweak(self._narrow, pk_seed, adrs, sk_seed)
 
     def f(self, pk_seed: ArrayLike, adrs: ArrayLike, m1: ArrayLike) -> Array:
-        return self._tweak(pk_seed, adrs, m1)
+        return self._tweak(self._narrow, pk_seed, adrs, m1)
 
     def h(self, pk_seed: ArrayLike, adrs: ArrayLike, m2: ArrayLike) -> Array:
-        return self._tweak(pk_seed, adrs, m2)
+        return self._tweak(self._wide, pk_seed, adrs, m2)
 
     def t(self, pk_seed: ArrayLike, adrs: ArrayLike, messages: ArrayLike) -> Array:
-        return self._tweak(pk_seed, adrs, messages)
+        return self._tweak(self._wide, pk_seed, adrs, messages)
 
     def prf_msg(
         self, sk_prf: ArrayLike, opt_rand: ArrayLike, message: ArrayLike
@@ -299,7 +346,7 @@ class Sha2TweakableHash:
         batch = messages.shape[0]
         randomizers = batched(randomizer, batch)
         seeds = batched(pk_seed, batch)
-        inner = self._digest(
+        inner = self._wide.digest(
             fnp.concatenate(
                 [randomizers, seeds, batched(pk_root, batch), messages], axis=-1
             )
@@ -308,7 +355,13 @@ class Sha2TweakableHash:
 
     # -- the constructions the family is built from ------------------------
 
-    def _tweak(self, pk_seed: ArrayLike, adrs: ArrayLike, payload: ArrayLike) -> Array:
+    def _tweak(
+        self,
+        sha2: _Sha2Hash,
+        pk_seed: ArrayLike,
+        adrs: ArrayLike,
+        payload: ArrayLike,
+    ) -> Array:
         # The addresses set the batch: there is one hash per position, and both
         # the seed and the payload may be shared across them. `PRF` is the case
         # that makes that concrete — one secret seed, one hash per chain.
@@ -318,21 +371,30 @@ class Sha2TweakableHash:
         batch = addresses.shape[0]
         payloads = batched(payload, batch)
         seeds = batched(pk_seed, batch)
-        padding = fnp.zeros((batch, self._block_size - self.n), dtype=fnp.uint8)
-        return self._digest(
+        padding = fnp.zeros((batch, sha2.block_size - self.n), dtype=fnp.uint8)
+        return sha2.digest(
             fnp.concatenate([seeds, padding, addresses, payloads], axis=-1)
         )[:, : self.n]
 
     def _mgf1(self, seed: Array, length: int) -> Array:
-        """MGF1 over the injected hash — RFC 8017 §B.2.1, as a `ByteHash`."""
-        return fnp.asarray(Mgf1(self._byte_hash, length).digest(seed), dtype=fnp.uint8)
+        """`H_msg`'s outer MGF1 — RFC 8017 §B.2.1, over the wide hash.
+
+        Wide for the reason `_hmac` is: §11.2.2 moves `H_msg` to SHA-512 with the
+        rest, and §11.2.1 leaves the two the same hash.
+        """
+        return fnp.asarray(
+            Mgf1(self._wide.byte_hash, length).digest(seed), dtype=fnp.uint8
+        )
 
     def _hmac(self, key: ArrayLike, message: Array) -> Array:
-        """This family's own block size, over `hmac`."""
-        return hmac(self._byte_hash, key, message, block_size=self._block_size)
+        """`PRF_msg`'s hash and block size, over `hmac`.
 
-    def _digest(self, messages: Array) -> Array:
-        return fnp.asarray(self._byte_hash.digest(messages), dtype=fnp.uint8)
+        The wide one at categories 3 and 5: §11.2.2 moves `PRF_msg` to SHA-512
+        along with the tweaked functions, so HMAC's block size moves with it.
+        """
+        return hmac(
+            self._wide.byte_hash, key, message, block_size=self._wide.block_size
+        )
 
 
 class ShakeTweakableHash:
@@ -345,8 +407,8 @@ class ShakeTweakableHash:
     needs none of them — an extendable output already produces any length, so
     the construction *is* the concatenation.
 
-    That is why `slh_dsa.shake` builds all six parameter sets where
-    `slh_dsa.sha2` builds two: there is no second hash to reach for.
+    That is why `slh_dsa.shake` names one hash where `slh_dsa.sha2` names two at
+    categories 3 and 5: there is no second hash to reach for.
 
     The address is the full 32 bytes rather than §11.2's 22-byte compression,
     which is what `compressed_address = False` tells a caller.
