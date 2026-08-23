@@ -1,9 +1,11 @@
 # Copyright 2026 Fractalyze Inc. All rights reserved.
 #
-# Moves the hash-frx commit pin and the frx pin together. They are one pin, not
-# two: hash-frx resolves frx from its own lock, so a lone bump puts two frx
-# copies on one test's sys.path and fails as a dtype error, not a version
-# conflict.
+# Moves the hash-frx commit pin and every pip pin both hubs resolve together.
+# They are one pin, not several: hash-frx resolves its own pip dependencies from
+# its own lock, so a lone bump puts two copies of a package into one test's
+# runfiles. Exactly one is imported — whichever hub the `imports` depset reaches
+# first, which BUILD dependency order decides and so differs between targets in
+# this repo — and it fails as a dtype error, not a version conflict.
 #
 # That is why no separate frx-update workflow exists — bumping frx alone would
 # open a PR that is red until hash-frx caught up.
@@ -45,5 +47,15 @@ jobs:
         with:
           upstream_repo: hash-frx
           module_name: hash_frx
-          paired_package: frx
+          # Every package pinned on both sides, not just the frx stack. Each is
+          # matched on its own name, so a release train lists every member.
+          # `absl-py` / `numpy` are absent because neither side pins a version:
+          # they carry no `==` to read, and frx's own constraints have kept the
+          # two locks resolving them identically.
+          paired_packages: |
+            frx
+            frxlib
+            frx-cuda12-pjrt
+            frx-cuda12-plugin
+            zk-dtypes
           github_token: ${{ secrets.BUMPER_GH_PAT }}
