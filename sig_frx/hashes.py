@@ -88,6 +88,14 @@ def keccak256(*values: object) -> ByteHash:
     the namespace question has no host answer to give. Ethereum's address
     derivation and message framing are the consumers. Being the device
     sponge, messages arrive as exactly `[B, L]` — a single message is B = 1.
+
+    That absence is a decision rather than a gap, so nothing here expires when
+    hash-frx grows another hash. Its host-row criterion — a native library
+    beating device dispatch, *and* a host-shaped consumer — is an AND, and
+    Keccak-256 fails the first: a plain-Python sponge is two orders off what a
+    `Host*` name promises, and paying a dependency to make one native was
+    weighed and refused. See "Which hashes get a host row" in hash-frx's
+    `docs/blocks/hash.md`.
     """
     del values  # one row exists; nothing to dispatch on
     return Keccak256()
