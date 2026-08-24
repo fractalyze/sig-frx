@@ -46,6 +46,7 @@ import numpy as np
 import zk_dtypes
 from absl.testing import absltest, parameterized
 
+from sig_frx.lattice import rejection
 from sig_frx.lattice.mldsa import arith, sampling
 from sig_frx.lattice.mldsa.testing import fips204_reference as ref
 
@@ -101,13 +102,13 @@ class BudgetTest(parameterized.TestCase):
     def test_is_the_smallest_budget_that_meets_the_margin(
         self, needed: int, accept: tuple[int, int], per_block: int
     ) -> None:
-        blocks = sampling.budget(needed, accept, per_block)
+        blocks = rejection.budget(needed, accept, per_block)
         self.assertFalse(
-            sampling._shortfall_exceeds_margin(blocks * per_block, needed, accept),
+            rejection._shortfall_exceeds_margin(blocks * per_block, needed, accept),
             "the chosen budget does not meet the margin",
         )
         self.assertTrue(
-            sampling._shortfall_exceeds_margin(
+            rejection._shortfall_exceeds_margin(
                 (blocks - 1) * per_block, needed, accept
             ),
             "a smaller budget would also have met it, so this one is not minimal",
@@ -116,12 +117,12 @@ class BudgetTest(parameterized.TestCase):
     def test_the_margin_is_the_strongest_parameter_set_s_strength(self) -> None:
         """`2^-256` is `λ` at ML-DSA-87 (Table 1), not a round number."""
         self.assertEqual(
-            sampling.LOG2_SHORTFALL, max(case["lam"] for case in _PARAMETER_SETS)
+            rejection.LOG2_SHORTFALL, max(case["lam"] for case in _PARAMETER_SETS)
         )
 
     def test_a_certain_acceptance_needs_no_slack(self) -> None:
         """The tail is exact, so `p = 1` sizes to exactly what is asked for."""
-        self.assertEqual(sampling.budget(256, (1, 1), 8), 32)
+        self.assertEqual(rejection.budget(256, (1, 1), 8), 32)
 
 
 class ExpandATest(parameterized.TestCase):

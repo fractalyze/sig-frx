@@ -40,7 +40,8 @@ from frx import Array
 
 from sig_frx import prehash
 from sig_frx.context import MAX_SIZE as MAX_CONTEXT_SIZE
-from sig_frx.lattice.mldsa import ml_dsa, sampling
+from sig_frx.lattice import rejection
+from sig_frx.lattice.mldsa import ml_dsa
 from sig_frx.lattice.mldsa.testing import fips204_reference as ref
 from sig_frx.signature import Signature
 
@@ -601,7 +602,7 @@ class InstanceTest(absltest.TestCase):
 class IterationBoundTest(absltest.TestCase):
     """The signing loop's cap, which Appendix C leaves optional and this derives.
 
-    It is `sampling.budget` asked for one success from one attempt per trial, so
+    It is `rejection.budget` asked for one success from one attempt per trial, so
     what is worth pinning here is the number that comes back rather than a second
     copy of the tail: the same two-sided check the samplers' budget gets, written
     against the acceptance rate this scheme claims.
@@ -609,7 +610,7 @@ class IterationBoundTest(absltest.TestCase):
 
     def test_is_the_smallest_bound_that_meets_the_margin(self) -> None:
         bound = ml_dsa._MAX_ITERATIONS
-        margin = sampling.LOG2_SHORTFALL
+        margin = rejection.LOG2_SHORTFALL
         num, den = ml_dsa._WORST_ACCEPTANCE
         self.assertLessEqual((den - num) ** bound << margin, den**bound)
         self.assertGreater((den - num) ** (bound - 1) << margin, den ** (bound - 1))

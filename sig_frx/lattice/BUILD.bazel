@@ -1,0 +1,20 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# The fixed-budget-plus-compaction shape both lattice standards' rejection
+# sampling is reshaped into. Depends on no scheme and on no hash: what it takes
+# is a stream of candidates and an acceptance mask, and which draws those are is
+# each scheme's own. That is what lets ML-DSA's §7.3 samplers and Falcon's
+# `HashToPoint` share it without either naming the other.
+py_library(
+    name = "rejection",
+    srcs = [
+        "__init__.py",
+        "rejection.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
