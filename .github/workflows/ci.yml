@@ -79,7 +79,27 @@ jobs:
           set -euo pipefail
           bazel --bazelrc=.bazelrc.ci test ${{ matrix.flags }} \
             ${{ github.event_name == 'schedule' && '--test_tag_filters=-local_only' || '' }} \
+            --build_event_json_file=${{ runner.temp }}/bep.json \
             --test_env=FRX_PLATFORMS=${{ matrix.platforms }} -- //...
+
+      # A target whose budget stops covering its slowest leg flakes a PR that
+      # changed nothing, so catch the margin shrinking rather than the timeout.
+      # `!cancelled()` because a leg red for some other reason is exactly when a
+      # shrinking budget is worth seeing.
+      #
+      # Only `main` and the scheduled run fail on it: durations here are mostly
+      # cache hits from earlier runs, and a pull request should not go red over
+      # a number it did not produce. The rule and the threshold are in
+      # docs/reference/conventions.md.
+      - name: Check test time budgets
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          python3 tools/check_test_budgets.py \
+            --bep ${{ runner.temp }}/bep.json \
+            --bazelrc .bazelrc.ci \
+            --leg ${{ matrix.backend }} \
+            --mode ${{ github.event_name == 'pull_request' && 'warn' || 'fail' }}
 
       # Capture the runner-local test.log a failed test leaves behind — the CI
       # stream only carries the FAIL summary, not the test output.

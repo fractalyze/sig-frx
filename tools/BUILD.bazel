@@ -1,0 +1,12 @@
+load("@rules_python//python:defs.bzl", "py_library")
+
+# Build tooling, not library code: nothing under //sig_frx depends on it, and
+# pyproject's packages.find excludes it from the wheel.
+py_library(
+    name = "check_test_budgets",
+    srcs = [
+        "__init__.py",
+        "check_test_budgets.py",
+    ],
+    visibility = ["//tools:__subpackages__"],
+)

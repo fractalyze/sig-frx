@@ -430,6 +430,72 @@ bound, so the bound cannot silently eat coverage.
 The exhaustive run over every published length stays behind `slow_kat`, so
 nothing is lost overall — only the per-PR gate shrinks.
 
+## A budget is sized from a target's worst run, not its typical one
+
+A target that times out reports a red build for a suite that works, and the edit
+that fixes it is always the same one line. What earns it a rule rather than a
+correction each time is that the measurement people reach for is the wrong one
+twice over: it is taken on a workstation, and it is taken once.
+
+**A target whose worst observed run reaches half its budget moves up a bucket.**
+The buckets are 60 / 300 / 900 / 3600 s, so moving up is coarse and cheap — a
+deadline is only spent when a test hangs.
+
+Half, rather than something tighter, is what the executor's spread makes
+necessary. Across runs of *unchanged* commits, a single target's duration on the
+CPU leg varies by a median of 2.2x — 1.7x to 2.6x over the targets long enough
+for the variation to mean anything — while the same measurement on the GPU leg
+varies by 1.07x. The CPU leg executes on a shared remote pool, so any one number
+it produces may be the fast one and the next run may be twice it; half the
+budget is the smallest round headroom that survives that. The GPU leg's
+steadiness is a property of a quiet box rather than of the leg — one GPU runner
+serves the org — so it gets the same threshold rather than a tighter one earned
+by present load.
+
+This is the quantitative half of [a target excluded from a leg has never had its
+budget validated there](#the-per-pr-gates-cost-is-distinct-shapes-not-vectors).
+Together: the budget covers the worst run of the slowest leg the target runs on.
+
+### A local measurement does not decide it
+
+The CI executor is slower than a workstation by a factor that is per-target
+rather than a constant to divide out — measured at 1.6x for one target and 3.4x
+for another. A target that reads as using a fifth of its budget locally can be
+using two thirds where it counts. Local numbers compare two implementations;
+they do not size a budget.
+
+Bazel will argue the other way, and it argues from a local run. A target sized
+for the executor trips `Test execution time … outside of range for MODERATE
+tests. Consider setting timeout="short" or size="small"` on a workstation, and
+`bazel test` prints the summary line that points at it. Every budget on this
+page is deliberately one bucket above what that warning asks for. Taking its
+advice restores the flake, so it is the one bazel diagnostic this repo overrides
+on purpose rather than silences — it is right about the local number and the
+local number is not the one that decides.
+
+### `size` moves two things and `timeout` moves one
+
+`size` picks a default deadline *and* the resource estimate bazel schedules
+against when it executes a test locally. Up to `large` that estimate barely
+moves and `size` is the ergonomic edit. `enormous` is where it jumps — so a
+target that needs the 3600 s deadline and not the weight keeps its `size` and
+declares `timeout = "eternal"`. The distinction is only visible on the GPU leg,
+which runs its tests on the runner rather than on the remote pool.
+
+### The threshold is checked rather than remembered
+
+[`check_test_budgets.py`](../../tools/check_test_budgets.py) reads the durations
+in a run's build event file against the budgets `bazel query` reports, and
+annotates every target at or above the threshold with the BUILD line that
+declares it. It fails the job on `main` and on the scheduled run, and only warns
+on a pull request — a pull request should not go red over a duration it did not
+change.
+
+It counts cached results, which is nearly all of what a merge run reports: a
+push to `main` re-reports what the pull request's run already measured. Those
+durations are real and simply older, and the duration of the last real execution
+is the one that applies the next time the target runs.
+
 ## Scheme doc skeleton
 
 Every page in [`../schemes/`](../schemes) answers three things, and everything
