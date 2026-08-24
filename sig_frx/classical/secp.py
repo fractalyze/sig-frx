@@ -18,11 +18,28 @@ is exactly what the dtypes do not expose:
   every recovery id, compressed key, and x-only key performs;
 - the byte/int ↔ point codecs the wire encodings need.
 
-Everything here is host-path: coordinate readback and per-entry construction
-are host operations. The GPU story for these curves is EC kernels over these
-same dtypes (the decision is recorded on fractalyze/sig-frx#139), not a
-traced re-derivation of the group law — which is why no namespace dispatch
-appears anywhere in this module.
+## Which side of the namespace each function is on
+
+The dtype ufuncs — `multiple`, `double_multiple`, and the compare behind
+`is_identity` — follow the namespace their arguments arrive in, so a caller
+holding a device batch gets the arithmetic there and one holding a host batch
+does not. This module never chooses for its caller
+(`docs/reference/conventions.md`). It is worth choosing: measured on an RTX
+5090 with full-size scalars, the device form of `multiple` runs 7.3x the host
+at B=256 and 105x at B=4096, where it still costs the same ~5 ms it does at
+B=64.
+
+Everything that turns a point into integers is host by nature and stays there —
+`affine_ints`, `uncompressed_rows`, `lift_x_to_parity`, `on_curve`,
+`secret_scalar` — because the standards define those on integers and Python
+has no width. `is_identity` is the one exception on the wrong side of that
+line, and its docstring carries the reason (fractalyze/xla#594).
+
+There is no `jit` here and none would help: each of these is a single fused
+op, so compiling one measured identical to running it eagerly while adding a
+compile per batch shape. The GPU story for these curves remains EC kernels
+over these same dtypes (fractalyze/sig-frx#139), not a traced re-derivation of
+the group law.
 
 ## Three dtype gotchas the codecs absorb
 
@@ -55,6 +72,7 @@ import numpy as np
 import zk_dtypes
 from frx.typing import ArrayLike
 
+from sig_frx.arrays import namespace
 from sig_frx.classical import group
 
 
@@ -163,8 +181,20 @@ def multiple(curve: Curve, scalars: list[int], points: ArrayLike) -> np.ndarray:
 
     Scalars reduce `% n` in Python first (the dtype gotcha above); the
     reduction is the group's own fact, `k·P = (k mod n)·P`.
+
+    The scalars are built in the namespace `points` arrived in, so a caller
+    that put its batch on the device gets the multiplication there and one
+    that did not keeps it on the host. This function does not choose — the
+    lift is the caller's (`docs/reference/conventions.md`).
+
+    Measured on an RTX 5090 with full-size scalars, the device form runs 7.3x
+    the host at B=256 and 105x at B=4096, where it still costs the same ~5 ms
+    it does at B=64. Those are this call's numbers, not a lane's: the readback
+    that follows it at every call site is host work either way, and moving
+    that is what `affine_ints` is waiting on.
     """
-    reduced = np.array([k % curve.n for k in scalars], dtype=curve.scalar)
+    xnp = namespace(points)
+    reduced = xnp.asarray(np.array([k % curve.n for k in scalars], dtype=curve.scalar))
     return points * reduced
 
 
@@ -176,11 +206,19 @@ def double_multiple(
     The two-term combination every verification equation reduces to, and
     the one seam a fused MSM kernel would replace (fractalyze/sig-frx#139)
     — a subtraction folds into the scalar as `n - e`.
+
+    `G` is a host constant, so it is lifted to wherever the batch already is
+    rather than pulling the batch back to it — `np.asarray` here would
+    materialize a device batch silently and cost the caller its whole lift.
+    It is passed at its own `[1]` shape and left to broadcast against the
+    scalars, which is what `generator` is documented for: expanding it to `[B]`
+    first would allocate and transfer `B` copies of one point on the device,
+    where the host got the same thing as a zero-stride view for nothing.
     """
-    points = np.asarray(points)
-    return multiple(
-        curve, g_scalars, np.broadcast_to(curve.generator, points.shape)
-    ) + multiple(curve, point_scalars, points)
+    xnp = namespace(points)
+    return multiple(curve, g_scalars, xnp.asarray(curve.generator)) + multiple(
+        curve, point_scalars, xnp.asarray(points)
+    )
 
 
 def schnorr_verdicts(
@@ -267,7 +305,24 @@ def affine_ints(curve: Curve, points: ArrayLike) -> list[tuple[int, int]]:
 
 
 def is_identity(curve: Curve, points: ArrayLike) -> np.ndarray:
-    """Whether each entry is the group identity, elementwise."""
+    """Whether each entry is the group identity, elementwise.
+
+    Answered on the host even when the batch is on a device, and the reason is
+    a live upstream bug rather than a preference.
+
+    The comparison has to be on the affine form — a projective one has no
+    unique representation, and the traced path refuses equality on it outright
+    — but at the pinned wheel the jacobian-to-affine conversion is wrong on the
+    **CPU** backend, where it returns the identity for every input
+    (fractalyze/xla#594). It is correct on CUDA and on the host, so converting
+    here would answer "every point is the identity" on exactly the leg the
+    merge gate runs, and would do it silently.
+
+    The pull-back costs the caller nothing it was not already paying: every
+    call site reads the same batch back through `affine_ints` on the next line,
+    and frx caches the materialized buffer, so this is one transfer rather than
+    two.
+    """
     points = np.asarray(points)
     return points == np.zeros(points.shape, dtype=points.dtype)
 
