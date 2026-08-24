@@ -49,14 +49,14 @@ exclude = ["sig_frx.testing", "sig_frx.testing.*", "sig_frx.*.testing", "sig_frx
 # Python tooling config. sig-frx builds via Bazel (MODULE.bazel); the tables
 # below configure pytest, which runs the `*_test.py` module tests.
 [tool.pytest.ini_options]
-testpaths = ["sig_frx"]
+testpaths = ["sig_frx", "tools"]
 python_files = ["*_test.py"]
 
 # Every def carries full type annotations; mypy's disallow_untyped_defs is what
 # enforces it. Run: `mypy` (uses the files below).
 [tool.mypy]
 python_version = "3.11"
-files = ["sig_frx"]
+files = ["sig_frx", "tools"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 warn_unused_ignores = true

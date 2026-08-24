@@ -11,11 +11,16 @@ the check reads.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 from absl.testing import absltest
 
 from tools import check_test_budgets as budgets
+
+# The workspace root `_rule` writes its locations under. The two have to agree,
+# so `_budgets` pairs them rather than leaving each call site to restate it.
+WORKSPACE = Path("/w")
 
 
 def _query_xml(*rules: str) -> str:
@@ -32,13 +37,24 @@ def _rule(label: str, size: str, timeout: str, line: int = 7) -> str:
     )
 
 
-def _bep(*events: dict[str, object]) -> str:
+def _budgets(*rules: str) -> dict[str, budgets.Budget]:
+    """Parsed budgets for `rules`, rooted where `_rule` puts them."""
+    return budgets.parse_budgets(_query_xml(*rules), WORKSPACE)
+
+
+def _bep(*events: Mapping[str, object]) -> str:
     return "\n".join(json.dumps(event) for event in events)
 
 
 def _result(
     label: str, millis: int, *, shard: int = 1, attempt: int = 1, cached: bool = False
 ) -> dict[str, object]:
+    """One `testResult` event.
+
+    `parse_durations` keys on `label` alone — `run`, `shard` and `attempt` are
+    carried so the fixture matches what bazel actually emits, not because the
+    parser reads them.
+    """
     payload: dict[str, object] = {"testAttemptDurationMillis": str(millis)}
     if cached:
         payload["cachedLocally"] = True
@@ -50,12 +66,23 @@ def _result(
     }
 
 
+def _options(*flags: str) -> dict[str, object]:
+    """The `optionsParsed` event, carrying the rc-expanded command line."""
+    return {"id": {"optionsParsed": {}}, "optionsParsed": {"cmdLine": list(flags)}}
+
+
+def _row(millis: int, *, line: int = 7) -> budgets.Row:
+    """One joined row for `//pkg:a` — the shape `annotate` formats."""
+    parsed = _budgets(_rule("//pkg:a", "small", "short", line=line))
+    durations = budgets.parse_durations(_bep(_result("//pkg:a", millis)))
+    return budgets.collect(parsed, durations)[0]
+
+
 class ParseBudgetsTest(absltest.TestCase):
     def test_reads_the_bucket_the_timeout_names(self) -> None:
-        parsed = budgets.parse_budgets(
-            _query_xml(_rule("//pkg:a", "small", "short")), Path("/w")
+        self.assertEqual(
+            _budgets(_rule("//pkg:a", "small", "short"))["//pkg:a"].seconds, 60
         )
-        self.assertEqual(parsed["//pkg:a"].seconds, 60)
 
     def test_an_explicit_timeout_beats_the_size(self) -> None:
         """`size = "large", timeout = "eternal"` is 3600 s, not 900 s.
@@ -63,16 +90,13 @@ class ParseBudgetsTest(absltest.TestCase):
         Reading the budget off `size` would report such a target at four times
         the fraction of budget it actually uses, and flag one that is fine.
         """
-        parsed = budgets.parse_budgets(
-            _query_xml(_rule("//pkg:traced", "large", "eternal")), Path("/w")
-        )
+        parsed = _budgets(_rule("//pkg:traced", "large", "eternal"))
         self.assertEqual(parsed["//pkg:traced"].seconds, 3600)
 
     def test_location_becomes_a_repo_relative_annotation_target(self) -> None:
-        parsed = budgets.parse_budgets(
-            _query_xml(_rule("//pkg:a", "small", "short", line=42)), Path("/w")
-        )
-        self.assertEqual(parsed["//pkg:a"].location, "pkg/BUILD.bazel:42")
+        parsed = _budgets(_rule("//pkg:a", "small", "short", line=42))
+        self.assertEqual(parsed["//pkg:a"].path, "pkg/BUILD.bazel")
+        self.assertEqual(parsed["//pkg:a"].line, "42")
 
     def test_a_non_test_rule_is_skipped(self) -> None:
         """A `py_library` carries no timeout, so it has no budget to check."""
@@ -80,7 +104,7 @@ class ParseBudgetsTest(absltest.TestCase):
             '<rule class="py_library" location="/w/pkg/BUILD.bazel:1:8"'
             ' name="//pkg:lib"/>'
         )
-        self.assertEqual(budgets.parse_budgets(_query_xml(rule), Path("/w")), {})
+        self.assertEqual(_budgets(rule), {})
 
 
 class ParseDurationsTest(absltest.TestCase):
@@ -127,12 +151,9 @@ class ParseDurationsTest(absltest.TestCase):
 class CollectTest(absltest.TestCase):
     def test_orders_by_fraction_of_budget_not_by_duration(self) -> None:
         """A 40 s `small` test is in more danger than a 300 s `large` one."""
-        parsed = budgets.parse_budgets(
-            _query_xml(
-                _rule("//pkg:small_one", "small", "short"),
-                _rule("//pkg:large_one", "large", "long"),
-            ),
-            Path("/w"),
+        parsed = _budgets(
+            _rule("//pkg:small_one", "small", "short"),
+            _rule("//pkg:large_one", "large", "long"),
         )
         rows = budgets.collect(
             parsed,
@@ -149,25 +170,21 @@ class CollectTest(absltest.TestCase):
 
     def test_a_target_filtered_off_this_leg_is_skipped(self) -> None:
         """`--test_tag_filters` drops targets, and a budget alone is not a run."""
-        parsed = budgets.parse_budgets(
-            _query_xml(_rule("//pkg:sweep", "large", "long")), Path("/w")
+        self.assertEqual(
+            budgets.collect(_budgets(_rule("//pkg:sweep", "large", "long")), {}), []
         )
-        self.assertEqual(budgets.collect(parsed, {}), [])
 
 
 class MainTest(absltest.TestCase):
+    def _xml(self, size: str = "small") -> str:
+        return self.create_tempfile(
+            content=_query_xml(_rule("//pkg:a", size, "short"))
+        ).full_path
+
     def _run(self, size: str, millis: int, mode: str) -> int:
-        xml = self.create_tempfile(content=_query_xml(_rule("//pkg:a", size, "short")))
         bep = self.create_tempfile(content=_bep(_result("//pkg:a", millis)))
         return budgets.main(
-            [
-                "--bep",
-                bep.full_path,
-                "--query-xml",
-                xml.full_path,
-                "--mode",
-                mode,
-            ]
+            ["--bep", bep.full_path, "--query-xml", self._xml(size), "--mode", mode]
         )
 
     def test_under_the_threshold_passes(self) -> None:
@@ -187,47 +204,55 @@ class MainTest(absltest.TestCase):
         Failing here would bury the failure the leg actually has under a
         traceback from the check.
         """
-        xml = self.create_tempfile(
-            content=_query_xml(_rule("//pkg:a", "small", "short"))
-        )
         missing = Path(self.create_tempdir().full_path) / "absent.json"
         self.assertEqual(
-            budgets.main(["--bep", str(missing), "--query-xml", xml.full_path]), 0
+            budgets.main(["--bep", str(missing), "--query-xml", self._xml()]), 0
         )
 
     def test_a_build_event_file_with_no_tests_stands_down(self) -> None:
         """An analysis failure writes a build event file carrying no results."""
-        xml = self.create_tempfile(
-            content=_query_xml(_rule("//pkg:a", "small", "short"))
-        )
         bep = self.create_tempfile(content="")
         self.assertEqual(
-            budgets.main(["--bep", bep.full_path, "--query-xml", xml.full_path]), 0
+            budgets.main(["--bep", bep.full_path, "--query-xml", self._xml()]), 0
         )
+
+    def test_a_test_timeout_override_refuses_rather_than_mis_measures(self) -> None:
+        """The declared `timeout` is not the budget bazel enforced under it.
+
+        Reporting a percentage against the wrong denominator is worse than
+        reporting nothing, because it looks like a measurement.
+        """
+        bep = self.create_tempfile(
+            content=_bep(
+                _options("--test_output=errors", "--test_timeout=1200"),
+                _result("//pkg:a", 20_000),
+            )
+        )
+        self.assertEqual(
+            budgets.main(["--bep", bep.full_path, "--query-xml", self._xml()]), 1
+        )
+
+
+class OverridingTimeoutFlagTest(absltest.TestCase):
+    def test_finds_the_flag_wherever_the_rc_files_put_it(self) -> None:
+        bep = _bep(_options("--test_output=errors", "--test_timeout=1200"))
+        self.assertEqual(budgets.overriding_timeout_flag(bep), "--test_timeout=1200")
+
+    def test_an_ordinary_run_carries_none(self) -> None:
+        bep = _bep(_options("--test_output=errors", "--test_env=FRX_PLATFORMS=cpu"))
+        self.assertIsNone(budgets.overriding_timeout_flag(bep))
 
 
 class AnnotateTest(absltest.TestCase):
     def test_points_at_the_build_line_that_declares_the_budget(self) -> None:
-        parsed = budgets.parse_budgets(
-            _query_xml(_rule("//pkg:a", "small", "short", line=42)), Path("/w")
-        )
-        row = budgets.collect(
-            parsed, budgets.parse_durations(_bep(_result("//pkg:a", 57_300)))
-        )[0]
-        annotation = budgets.annotate(row, "cpu", 0.5, "error")
+        annotation = budgets.annotate(_row(57_300, line=42), "cpu", 0.5, "error")
         self.assertIn("file=pkg/BUILD.bazel,line=42", annotation)
         self.assertIn("96%", annotation)
         self.assertIn("cpu", annotation)
 
     def test_carries_no_newline_that_would_truncate_it(self) -> None:
         """GitHub reads an annotation to the end of the line and no further."""
-        parsed = budgets.parse_budgets(
-            _query_xml(_rule("//pkg:a", "small", "short")), Path("/w")
-        )
-        row = budgets.collect(
-            parsed, budgets.parse_durations(_bep(_result("//pkg:a", 57_300)))
-        )[0]
-        self.assertNotIn("\n", budgets.annotate(row, "cpu", 0.5, "error"))
+        self.assertNotIn("\n", budgets.annotate(_row(57_300), "cpu", 0.5, "error"))
 
     def test_the_property_block_carries_no_separator_character(self) -> None:
         """`:` and `,` end a property value, so neither may appear in one.
@@ -235,13 +260,8 @@ class AnnotateTest(absltest.TestCase):
         A target name is `pkg:name`, which is exactly the shape that would
         truncate the title back to `test budget — pkg` if it leaked in.
         """
-        parsed = budgets.parse_budgets(
-            _query_xml(_rule("//pkg:a", "small", "short")), Path("/w")
-        )
-        row = budgets.collect(
-            parsed, budgets.parse_durations(_bep(_result("//pkg:a", 57_300)))
-        )[0]
-        properties = budgets.annotate(row, "cpu", 0.5, "error").split("::")[1]
+        annotation = budgets.annotate(_row(57_300), "cpu", 0.5, "error")
+        properties = annotation.split("::")[1]
         for value in (pair.split("=", 1)[1] for pair in properties.split(",")):
             self.assertNotIn(":", value)
 

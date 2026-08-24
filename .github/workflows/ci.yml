@@ -75,6 +75,7 @@ jobs:
       # dropping `slow_kat`. The expression expands to nothing on a pull request,
       # which leaves .bazelrc.ci's own default in force.
       - name: Run bazel test
+        id: bazel-test
         run: |
           set -euo pipefail
           bazel --bazelrc=.bazelrc.ci test ${{ matrix.flags }} \
@@ -82,8 +83,6 @@ jobs:
             --build_event_json_file=${{ runner.temp }}/bep.json \
             --test_env=FRX_PLATFORMS=${{ matrix.platforms }} -- //...
 
-      # A target whose budget stops covering its slowest leg flakes a PR that
-      # changed nothing, so catch the margin shrinking rather than the timeout.
       # `!cancelled()` because a leg red for some other reason is exactly when a
       # shrinking budget is worth seeing.
       #
@@ -103,8 +102,12 @@ jobs:
 
       # Capture the runner-local test.log a failed test leaves behind — the CI
       # stream only carries the FAIL summary, not the test output.
+      #
+      # Scoped to the test step rather than a bare `failure()`: the budget check
+      # above can red the job while every test passed, and the logs would then
+      # be megabytes of successful output with no failure in them to read.
       - name: Upload bazel test logs
-        if: ${{ failure() }}
+        if: ${{ failure() && steps.bazel-test.outcome == 'failure' }}
         uses: fractalyze/.github/.github/actions/upload-bazel-testlogs@main
         with:
           name: bazel-test-logs-${{ matrix.backend }}

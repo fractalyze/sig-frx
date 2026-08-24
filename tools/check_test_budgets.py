@@ -7,20 +7,15 @@ margin is shrinking, not after the flake. This reads the durations CI just
 produced against the budgets the BUILD files declare, and refuses a target whose
 worst run crosses the headroom threshold.
 
-Why the threshold is a *fraction of budget* rather than a fixed slack: the CPU
-leg's run-to-run spread for one unchanged target is ~2.2x (see
-`docs/reference/conventions.md`), so the run that produced any given number can
-be the fast one. Half the budget is the smallest round multiple that survives a
-spread-width excursion.
+The threshold is a *fraction of budget* rather than a fixed slack because the
+CPU leg's run-to-run spread for one unchanged target is wide enough that any
+single measurement may be the fast one. `docs/reference/conventions.md` carries
+the rule, the measured spread it comes from, and why cached results count.
 
 Durations come from the build event protocol rather than the console summary,
 because a sharded target's budget applies *per shard* and the summary reports
 only the aggregate. Budgets come from `bazel query` rather than from the `size`
 attribute alone, because an explicit `timeout` overrides what `size` implies.
-
-Cached results are included on purpose. A cache hit reports the duration of the
-last real execution of that exact configuration, which is precisely the number
-that will apply the next time the target actually runs.
 
 Run it against a local run:
 
@@ -40,19 +35,21 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# Bazel's four timeout buckets, in seconds. `size` selects one of these by
-# default and an explicit `timeout` overrides it, so the budget is read off
-# `timeout` — which `--xml:default_values` reports for every target either way.
-BUCKET_SECONDS = {"short": 60, "moderate": 300, "long": 900, "eternal": 3600}
-NEXT_BUCKET = {"short": "moderate", "moderate": "long", "long": "eternal"}
-
-# The `size` whose default timeout is each bucket, for the remediation hint.
-SIZE_FOR_BUCKET = {
-    "short": "small",
-    "moderate": "medium",
-    "long": "large",
-    "eternal": "enormous",
-}
+# Bazel's four timeout buckets in ascending order, each paired with the `size`
+# whose default timeout it is. `size` selects a bucket by default and an
+# explicit `timeout` overrides it, so a budget is read off `timeout` — which
+# `--xml:default_values` reports for every target either way. Ascending order is
+# what makes "one bucket up" well defined, so the ladder is written once here
+# and the lookups below are derived rather than restated.
+BUCKETS = (
+    ("short", "small", 60),
+    ("moderate", "medium", 300),
+    ("long", "large", 900),
+    ("eternal", "enormous", 3600),
+)
+BUCKET_SECONDS = {timeout: seconds for timeout, _, seconds in BUCKETS}
+# The bucket one step up, as (timeout, size). The largest has no successor.
+NEXT_BUCKET = {lower[0]: upper[:2] for lower, upper in zip(BUCKETS, BUCKETS[1:])}
 
 
 @dataclass(frozen=True)
@@ -62,7 +59,8 @@ class Budget:
     size: str
     timeout: str
     seconds: int
-    location: str
+    path: str
+    line: str
 
 
 @dataclass(frozen=True)
@@ -85,17 +83,16 @@ def parse_budgets(xml_text: str, workspace: Path) -> dict[str, Budget]:
         if label is None:
             continue
         attrs = {
-            s.get("name"): s.get("value")
+            s.get("name"): s.get("value") or ""
             for s in rule.findall("string")
             if s.get("name") in ("size", "timeout")
         }
-        timeout = attrs.get("timeout")
+        timeout = attrs.get("timeout", "")
         if timeout not in BUCKET_SECONDS:
             continue
-        location = rule.get("location", "")
         # Locations are absolute and carry a `line:col` suffix; annotations want
         # a repo-relative path and the line on its own.
-        path, _, rest = location.partition(":")
+        path, _, rest = rule.get("location", "").partition(":")
         line = rest.partition(":")[0]
         try:
             path = str(Path(path).resolve().relative_to(workspace))
@@ -105,9 +102,34 @@ def parse_budgets(xml_text: str, workspace: Path) -> dict[str, Budget]:
             size=attrs.get("size", ""),
             timeout=timeout,
             seconds=BUCKET_SECONDS[timeout],
-            location=f"{path}:{line}" if line else path,
+            path=path,
+            line=line,
         )
     return budgets
+
+
+def overriding_timeout_flag(bep_text: str) -> str | None:
+    """The `--test_timeout` in effect for the run, if one was set.
+
+    A budget read off the `timeout` attribute is the *declared* one. `bazel
+    query` cannot see `--test_timeout`, which overrides that attribute at
+    execution — so a run carrying one is measured against a denominator bazel
+    did not enforce, and every percentage here is quietly wrong. Nothing sets it
+    today; this exists so that the day someone does, the check says so instead
+    of reporting confident nonsense.
+
+    The build event file records the rc-expanded command line, so the flag is
+    visible however it arrived — `.bazelrc.ci`, a matrix leg, or a local
+    `.bazelrc.user`.
+    """
+    for line in bep_text.splitlines():
+        if '"optionsParsed"' not in line:
+            continue
+        options = json.loads(line).get("optionsParsed", {})
+        for flag in options.get("cmdLine", []):
+            if flag.startswith("--test_timeout"):
+                return str(flag)
+    return None
 
 
 def parse_durations(bep_text: str) -> dict[str, Measurement]:
@@ -163,8 +185,9 @@ class Row:
         nxt = NEXT_BUCKET.get(self.budget.timeout)
         if nxt is None:
             return "already at the largest bucket — split or shard the target"
+        timeout, size = nxt
         return (
-            f'size = "{SIZE_FOR_BUCKET[nxt]}", or timeout = "{nxt}" to move the '
+            f'size = "{size}", or timeout = "{timeout}" to move the '
             f"deadline without the scheduling weight"
         )
 
@@ -204,7 +227,6 @@ def format_table(rows: list[Row], leg: str) -> str:
 
 def annotate(row: Row, leg: str, threshold: float, level: str) -> str:
     """A GitHub workflow annotation pinned to the target's BUILD line."""
-    path, _, line = row.budget.location.partition(":")
     message = (
         f"{row.label} used {row.ratio * 100:.0f}% of its {row.budget.seconds}s "
         f"budget on the {leg} leg ({row.measurement.seconds:.1f}s), at or above "
@@ -213,7 +235,9 @@ def annotate(row: Row, leg: str, threshold: float, level: str) -> str:
     # No `:` or `,` in a property value — GitHub reads those as separators and
     # would truncate the title at the target name.
     title = f"test budget — {row.label.rsplit(':', 1)[-1]}"
-    location = f"file={path}" + (f",line={line}" if line else "")
+    location = f"file={row.budget.path}" + (
+        f",line={row.budget.line}" if row.budget.line else ""
+    )
     return f"::{level} {location},title={title}::{message}"
 
 
@@ -270,6 +294,16 @@ def main(argv: list[str] | None = None) -> int:
     if not bep.is_file():
         print(f"no build event file at {bep} — nothing to check")
         return 0
+    bep_text = bep.read_text(encoding="utf-8")
+
+    override = overriding_timeout_flag(bep_text)
+    if override is not None:
+        print(
+            f"{override} was in effect, so the declared `timeout` attribute is "
+            "not the budget bazel enforced and every percentage below would be "
+            "wrong. Teach this script to read the override, or drop the flag."
+        )
+        return 1
 
     xml_text = (
         Path(args.query_xml).read_text(encoding="utf-8")
@@ -277,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         else query_budgets_xml(args.bazelrc)
     )
     budgets = parse_budgets(xml_text, REPO)
-    durations = parse_durations(bep.read_text(encoding="utf-8"))
+    durations = parse_durations(bep_text)
     rows = collect(budgets, durations)
 
     if not rows:
