@@ -303,7 +303,7 @@ class Ecdsa:
             checks.append(ok)
             points.append(curve.point((qx, qy)) if ok else placeholder)
 
-        q_points = secp.place(curve, np.array(points, dtype=curve.point))
+        q_points = np.array(points, dtype=curve.point)
         big_r = secp.double_multiple(curve, u1_scalars, u2_scalars, q_points)
         gone = secp.is_identity(curve, big_r)
         verdicts = [
@@ -412,9 +412,7 @@ class Ecdsa:
             u1_scalars.append(u1)
             u2_scalars.append(u2)
 
-        public = secp.double_multiple(
-            curve, u1_scalars, u2_scalars, secp.place(curve, point_r)
-        )
+        public = secp.double_multiple(curve, u1_scalars, u2_scalars, point_r)
 
         # The identity has no encoding, so it is a rejection, not a key
         # (§4.1.6 rejects it by name).
