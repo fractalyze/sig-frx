@@ -126,9 +126,14 @@ py_test(
     # GPU leg against 100 s on CPU, from 1437 s and 167 s. That is 4.8x rather
     # than 24x, and 2.1x the slowest sibling on the leg rather than 7.7x.
     #
-    # The headroom under 900 s is 1.9x on a shared runner, not a comfortable
-    # margin. If the leg creeps, the bound is one constant.
+    # At 521-571 s the GPU leg is over half of `large`'s 900 s, so the deadline
+    # moves up a bucket while `size` stays `large` — see "`size` moves two
+    # things and `timeout` moves one" in
+    # ../../../../docs/reference/conventions.md. The GPU leg agrees with itself
+    # to within 1.1x run over run, so that range is the target's own cost rather
+    # than a contention artefact.
     size = "large",
+    timeout = "eternal",
     srcs = ["ml_dsa_kat_test.py"],
     deps = [
         ":ml_dsa_vectors",
