@@ -47,3 +47,23 @@ repos:
     rev: v1.7.7
     hooks:
       - id: actionlint
+-   repo: local
+    hooks:
+      - id: hash-frx-root-import
+        # hash-frx re-layers itself, and its root re-exports exist so that
+        # costs a consumer nothing — see its docs/reference/consuming.md.
+        # An import that spells the layout breaks on the next move, and the
+        # break lands on whichever PR happens to bump the pin.
+        name: hash-frx is imported off its package root
+        language: pygrep
+        entry: '^\s*(from|import)\s+hash_frx\.'
+        files: '\.py$'
+      - id: hash-frx-whole-package-dep
+        # The dep and the import are one decision: hash_frx/__init__.py ships
+        # only in //hash_frx:hash_frx, so a narrow label leaves hash_frx a
+        # namespace package with no __getattr__ and the root import fails at
+        # runtime, with analysis already green.
+        name: hash-frx is depended on as the whole package
+        language: pygrep
+        entry: '@hash_frx//hash_frx[:/]'
+        files: 'BUILD\.bazel$'
