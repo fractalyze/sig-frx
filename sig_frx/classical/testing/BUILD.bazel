@@ -81,6 +81,22 @@ py_test(
     ],
 )
 
+# The substrate reads its namespace off its arguments, so the same call is a
+# host or a device computation. Every KAT runs one of them; this runs both and
+# holds them against each other.
+py_test(
+    name = "secp_device_test",
+    size = "medium",
+    srcs = ["secp_device_test.py"],
+    deps = [
+        "//sig_frx:arrays",
+        "//sig_frx/classical:secp",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 # The Wycheproof loading and the encoding-boundary split, shared by the
 # per-PR slice and the scheduled sweep so the two cannot disagree about what
 # "runnable" means.
