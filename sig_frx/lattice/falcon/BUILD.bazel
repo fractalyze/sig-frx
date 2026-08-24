@@ -1,0 +1,21 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# `Z_q` arithmetic and the NTT over q = 12289. Depends on no hash and on no
+# scheme logic: the transform is testable against exact integer arithmetic
+# before any of keygen, sign or verify exists, which is why it lands on its own.
+# frx is a dependency because the transform is its `lax.ntt` opcode.
+py_library(
+    name = "arith",
+    srcs = [
+        "__init__.py",
+        "arith.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//sig_frx:arrays",
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)
