@@ -32,12 +32,21 @@ Whatever remains is `host`: wire parsing, Python-integer scalar arithmetic,
 challenge hashing, and verdict assembly. (Ed25519's remainder also carries
 the final extended-coordinates add and compare.)
 
-There is no traced section and no compile column: nothing in these lanes
-traces — the substrate reads coordinates back per row on purpose — so eager
-is the only path there is. Each scheme's independent and aggregate forms sit
-in separate lanes so their per-signature costs read against each other
-directly — and for both schemes the aggregate is not yet the cheaper call,
-because the scalar multiplications an MSM would collapse are most of both.
+There is no compile column, because nothing here is `jit`-ed: the point
+operations are single fused ops, for which compiling measured no better than
+running them eagerly. There is no traced *section* either, but that is no
+longer the same as saying nothing traces — a batch at or above
+`secp.DEVICE_MIN_BATCH` is placed on the device by the schemes, so the
+`mult` bucket of every secp lane is a device cost at the larger batch sizes
+and a host cost below it. The split is therefore visible in the numbers
+rather than in the columns: watch `mult`'s share collapse as `B` crosses the
+threshold. What stays host at every size is the per-row codec and the
+readback, which is why those buckets are the ones that now dominate.
+
+Each scheme's independent and aggregate forms sit in separate lanes so their
+per-signature costs read against each other directly — and for both schemes
+the aggregate is not yet the cheaper call, because the scalar
+multiplications an MSM would collapse are most of both.
 
     bazel run //sig_frx/classical/testing:verify_bench -- --batches=1,16,256
 """

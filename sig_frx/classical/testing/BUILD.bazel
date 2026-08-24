@@ -89,8 +89,10 @@ py_test(
     size = "medium",
     srcs = ["secp_device_test.py"],
     deps = [
+        ":ecdsa_wycheproof_vectors",
         "//sig_frx:arrays",
         "//sig_frx/classical:secp",
+        "//sig_frx/testing:kat",
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),

@@ -158,6 +158,7 @@ class Secp256k1Sha256:
             [prefix & 1 for prefix, _ in pk_wire],
         )
         ok = np.array(checks, dtype=bool) & on_curve
+        key_points = secp.place(curve, key_points)
 
         challenges = [
             frost.compute_challenge(self, commitment, key, msg.tobytes())
