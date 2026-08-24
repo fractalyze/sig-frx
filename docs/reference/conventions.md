@@ -81,19 +81,13 @@ harder.
 
 `from hash_frx import Sha256`, never `from hash_frx.sha256 import Sha256`, and
 the Bazel dep is the whole `@hash_frx//hash_frx` rather than a narrow label. The
-two are one decision, not two: `hash_frx/__init__.py` ships only in that target,
-so a narrow dep set leaves `hash_frx` a namespace package with no `__getattr__`,
-and the root import fails at runtime with analysis already green.
+two are one decision, and hash-frx's
+[consuming page](https://github.com/fractalyze/hash-frx/blob/main/docs/reference/consuming.md)
+states why, along with what to do about a name its root does not export.
 
-hash-frx re-layers itself — `hmac`, `hkdf` and `pbkdf2` moved under `adapter/`
-once already, breaking every consumer that had spelled the layout — and its root
-re-exports exist so that costs us nothing. They are lazy, so the whole-package
-dep buys insulation rather than import time.
-
-A name the root does not re-export is an upstream fix to pursue, not a carve-out
-to keep here. Until one lands, convert a module wholesale or not at all:
-splitting its names across both spellings leaves the same coupling and two
-imports to read.
+The `hash-frx-root-import` and `hash-frx-whole-package-dep` hooks hold both
+halves, so this section is context for the rule rather than the thing enforcing
+it.
 
 ## A rejection loop is not a `while` on secret data
 
