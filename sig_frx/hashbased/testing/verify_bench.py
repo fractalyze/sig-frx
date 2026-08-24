@@ -115,7 +115,9 @@ def _fixture(
     params = slh_dsa.SHA2_PARAMETER_SETS[name]
     measured = _MeasuredHash()
     scheme = slh_dsa.SlhDsa(
-        Sha2TweakableHash(measured, n=params.n, m=params.m),
+        # `block_size` is explicit because hash-frx's table is keyed on the row's
+        # type name, and this stands in for `Sha256` under its own.
+        Sha2TweakableHash(measured, n=params.n, m=params.m, block_size=64),
         params,
         deterministic=True,
     )
