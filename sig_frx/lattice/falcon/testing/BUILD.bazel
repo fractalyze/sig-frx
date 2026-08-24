@@ -2,19 +2,17 @@ load("@rules_python//python:defs.bzl", "py_test")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
-# `medium` for a leg that has not been measured, not for the work. The CPU leg
-# runs this in 4.2 s on a workstation, which projects to roughly 9-14 s on the
-# executor and would fit `small`. The GPU leg is the one that decides and it is
-# unmeasured — a CUDA-less box refuses `FRX_PLATFORMS=cuda` outright rather than
-# falling back — and this compiles the transform at both degrees, which is the
-# shape that has cost far more on that leg elsewhere in this repo.
+# Sized from the executor: 10.1 s on the CPU leg against 3.4 s on the GPU one,
+# so CPU is the leg that decides and `small`'s 60 s covers it at 17%. The CPU
+# leg's run-to-run spread is around 2.2x, which puts even a bad run near 44% —
+# inside the half-a-budget rule in ../../../../docs/reference/conventions.md.
 #
-# So this is the guess ../../../../docs/reference/conventions.md says a size is
-# until the target runs on the leg; the first CI run replaces it with a number.
-# Bazel will call it too big from a local run, which that page addresses.
+# The workstation figure is 4.2 s and would have argued for `small` too, but it
+# is not what decided this: a CUDA-less box refuses `FRX_PLATFORMS=cuda` rather
+# than falling back, so the GPU leg was unmeasurable here and this waited for CI.
 py_test(
     name = "arith_test",
-    size = "medium",
+    size = "small",
     srcs = ["arith_test.py"],
     deps = [
         "//sig_frx/lattice/falcon:arith",
