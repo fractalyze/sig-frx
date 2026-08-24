@@ -18,8 +18,8 @@ is exactly what the dtypes do not expose:
   every recovery id, compressed key, and x-only key performs;
 - the byte/int ↔ point codecs the wire encodings need.
 
-Everything here is host-path: `.raw` readback and per-entry construction are
-host operations. The GPU story for these curves is EC kernels over these
+Everything here is host-path: coordinate readback and per-entry construction
+are host operations. The GPU story for these curves is EC kernels over these
 same dtypes (the decision is recorded on fractalyze/sig-frx#139), not a
 traced re-derivation of the group law — which is why no namespace dispatch
 appears anywhere in this module.
@@ -80,25 +80,36 @@ class Curve:
         """Order of the base point, prime."""
         return zk_dtypes.pfinfo(self.scalar).modulus
 
+    def _residue(self, stored: Any) -> int:
+        """A curve constant as its residue, whatever the storage is.
+
+        `ecinfo` reports the constants the way the point type stores them,
+        which for a Montgomery type is `value · R`, not the value. `from_raw`
+        adopts the storage without re-encoding it, and the field's own
+        conversion reads the residue back out — the same `astype`-not-bitcast
+        rule the module docstring states, applied to metadata.
+        """
+        return int(self.field.from_raw(int(stored)))
+
     @functools.cached_property
     def a(self) -> int:
         """Curve coefficient a."""
-        return int(zk_dtypes.ecinfo(self.point).a)
+        return self._residue(zk_dtypes.ecinfo(self.point).a)
 
     @functools.cached_property
     def b(self) -> int:
         """Curve coefficient b."""
-        return int(zk_dtypes.ecinfo(self.point).b)
+        return self._residue(zk_dtypes.ecinfo(self.point).b)
 
     @functools.cached_property
     def gx(self) -> int:
         """Base point, affine x."""
-        return int(zk_dtypes.ecinfo(self.point).gx)
+        return self._residue(zk_dtypes.ecinfo(self.point).gx)
 
     @functools.cached_property
     def gy(self) -> int:
         """Base point, affine y."""
-        return int(zk_dtypes.ecinfo(self.point).gy)
+        return self._residue(zk_dtypes.ecinfo(self.point).gy)
 
     @functools.cached_property
     def one(self) -> np.ndarray:
@@ -227,13 +238,21 @@ def host_multiple_of_g(curve: Curve, scalar: int) -> tuple[int, int]:
 def affine_ints(curve: Curve, points: ArrayLike) -> list[tuple[int, int]]:
     """Any point batch back to affine `(x, y)` Python integers.
 
+    The coordinates come out as base-field values rather than off the point's
+    `raw`, because `raw` hands back the storage: for a Montgomery point type
+    that is `x · R`, not `x`, and the difference is invisible to anything that
+    only round-trips. Viewing the affine pair as its two field elements and
+    converting those is the module's `astype`-not-bitcast rule — the view
+    reinterprets the coordinate layout, the conversion reads the residue.
+
     The identity reads back as `(0, 0)`, which no real point on these curves
     occupies (`x = 0` would need `b` to be a residue *and* `y = 0` needs
     2-torsion a prime-order group cannot have) — callers reject it before
     encoding.
     """
-    converted = np.asarray(points).astype(curve.point).astype(object)
-    return [entry.raw for entry in converted]
+    affine = np.asarray(points).astype(curve.point)
+    coords = affine.reshape(-1).view(curve.field).astype(object)
+    return [(int(coords[2 * i]), int(coords[2 * i + 1])) for i in range(affine.size)]
 
 
 def is_identity(curve: Curve, points: ArrayLike) -> np.ndarray:
