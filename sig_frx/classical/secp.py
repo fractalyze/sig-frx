@@ -24,7 +24,7 @@ same dtypes (the decision is recorded on fractalyze/sig-frx#139), not a
 traced re-derivation of the group law — which is why no namespace dispatch
 appears anywhere in this module.
 
-## Two dtype gotchas the codecs absorb
+## Three dtype gotchas the codecs absorb
 
 A point dtype's scalar branch turns a bare integer into `k·G`, so a
 coordinate pair must arrive as one tuple argument (`point((x, y))`), never
@@ -32,6 +32,17 @@ as a row of ints. And a field value refuses an integer in `[n, 2²⁵⁶)` —
 construction and int *operands* in a scalar expression alike abort instead
 of reducing (fractalyze/zk_dtypes#179) — so every scalar is reduced `% n`
 in Python before it meets a dtype value; sound, since `k·P = (k mod n)·P`.
+
+The third is why the substrate is the Montgomery variants: a non-Montgomery
+prime field has no REDC to lower to, so a traced reduction becomes a
+bit-serial shift-and-subtract loop — measured at 14× the Montgomery cost for
+batched scalar multiplication on an RTX 5090. The price is that storage stops
+being the residue. Constructors and `astype` convert, and `ecinfo` does not:
+it reports constants as stored, so `Curve` reads them back through
+`from_raw`. `raw` on a point likewise hands back `x · R`, so `affine_ints`
+views the coordinates as field values and converts those instead. Every
+readback in this module goes through one of those two, which is what keeps
+the wire encodings defined on residues.
 """
 
 from __future__ import annotations
@@ -131,19 +142,19 @@ class Curve:
 
 # SEC 2 §2.4.1, "Recommended Parameters secp256k1". The Koblitz curve.
 SECP256K1 = Curve(
-    point=zk_dtypes.secp256k1_g1_affine,
-    accumulator=zk_dtypes.secp256k1_g1_jacobian,
-    scalar=zk_dtypes.secp256k1_sf,
-    field=zk_dtypes.secp256k1_bf,
+    point=zk_dtypes.secp256k1_g1_affine_mont,
+    accumulator=zk_dtypes.secp256k1_g1_jacobian_mont,
+    scalar=zk_dtypes.secp256k1_sf_mont,
+    field=zk_dtypes.secp256k1_bf_mont,
 )
 
 # SEC 2 §2.4.2, "Recommended Parameters secp256r1" — NIST's P-256
 # (FIPS 186-5 §6.1.1 points at SP 800-186 §3.2.1.3 for the same values).
 SECP256R1 = Curve(
-    point=zk_dtypes.secp256r1_g1_affine,
-    accumulator=zk_dtypes.secp256r1_g1_jacobian,
-    scalar=zk_dtypes.secp256r1_sf,
-    field=zk_dtypes.secp256r1_bf,
+    point=zk_dtypes.secp256r1_g1_affine_mont,
+    accumulator=zk_dtypes.secp256r1_g1_jacobian_mont,
+    scalar=zk_dtypes.secp256r1_sf_mont,
+    field=zk_dtypes.secp256r1_bf_mont,
 )
 
 
