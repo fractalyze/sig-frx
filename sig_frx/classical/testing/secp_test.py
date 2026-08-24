@@ -11,6 +11,7 @@ one place, and the derivation is held against them directly.
 
 from __future__ import annotations
 
+import numpy as np
 from absl.testing import absltest
 
 from sig_frx.classical import secp
@@ -37,6 +38,18 @@ _SECP256R1 = dict(
 )
 
 
+# The x-coordinates of 2G and 3G on secp256k1. A readback that returned the
+# storage rather than the residue would still round-trip and still satisfy the
+# curve equation, so the multiples are pinned to values computed outside this
+# stack.
+_SECP256K1_2G_X = (
+    0xC6047F94_41ED7D6D_3045406E_95C07CD8_5C778E4B_8CEF3CA7_ABAC09B9_5C709EE5
+)
+_SECP256K1_3G_X = (
+    0xF9308A01_9258C310_49344F85_F89D5229_B531C845_836F99B0_8601F113_BCE036F9
+)
+
+
 class SecpTest(absltest.TestCase):
     def test_derived_constants_match_sec2(self) -> None:
         for curve, expected in (
@@ -51,6 +64,40 @@ class SecpTest(absltest.TestCase):
         # than to the standard: G must lie on y² = x³ + ax + b (mod p).
         for curve in (secp.SECP256K1, secp.SECP256R1):
             self.assertTrue(secp.on_curve(curve, curve.gx, curve.gy))
+
+    def test_affine_ints_returns_residues_not_storage(self) -> None:
+        # `affine_ints` is where a point stops being a dtype and becomes the
+        # integers the standards define encodings on. A substrate whose
+        # storage is not the residue — a Montgomery point type — reads back
+        # self-consistently, so pin the multiples to the values above and let
+        # the curve equation tie each y to its x.
+        curve = secp.SECP256K1
+        points = np.array([curve.point((curve.gx, curve.gy))] * 3, dtype=curve.point)
+        got = secp.affine_ints(curve, secp.multiple(curve, [1, 2, 3], points))
+
+        self.assertEqual(got[0], (curve.gx, curve.gy))
+        self.assertEqual(got[1][0], _SECP256K1_2G_X)
+        self.assertEqual(got[2][0], _SECP256K1_3G_X)
+        for x, y in got:
+            self.assertTrue(secp.on_curve(curve, x, y))
+
+    def test_uncompressed_rows_encode_the_residue(self) -> None:
+        # SEC 1 §2.3.3 is defined on the integers, so the wire bytes are the
+        # place a storage-versus-residue mix-up escapes the process.
+        curve = secp.SECP256K1
+        g = np.array([curve.point((curve.gx, curve.gy))], dtype=curve.point)
+        row = secp.uncompressed_rows(curve, g, np.array([True]))[0]
+
+        self.assertEqual(row[0], 4)
+        self.assertEqual(int.from_bytes(bytes(row[1:33]), "big"), curve.gx)
+        self.assertEqual(int.from_bytes(bytes(row[33:]), "big"), curve.gy)
+
+    def test_host_multiple_of_g_returns_residues(self) -> None:
+        # The signing path's readback, which never passes through
+        # `affine_ints`.
+        curve = secp.SECP256K1
+        self.assertEqual(secp.host_multiple_of_g(curve, 1), (curve.gx, curve.gy))
+        self.assertEqual(secp.host_multiple_of_g(curve, 2)[0], _SECP256K1_2G_X)
 
 
 if __name__ == "__main__":
