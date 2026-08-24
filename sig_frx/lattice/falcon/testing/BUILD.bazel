@@ -45,13 +45,11 @@ py_library(
     ],
 )
 
-# 11.4 s on this workstation. The executor runs 1.6-3.4x slower per target, so
-# the number that matters is somewhere under 40 s, and `small`'s 60 s would be
-# two thirds spent before the CPU leg's ~2.2x run-to-run spread is counted.
-# `medium` rather than the bucket the local figure argues for, per the
-# half-a-budget rule in ../../../../docs/reference/conventions.md; the sibling
-# `arith_test` sits at `small` because its number came from CI and this one's
-# has not yet.
+# Sized from the executor: 17.7 s on the CPU leg against 11.5 s on the GPU one,
+# so CPU is the leg that decides. `small` would sit at 30% of its 60 s, which
+# the CPU leg's ~2.2x run-to-run spread takes to 65% on a bad run — past the
+# half-a-budget rule in ../../../../docs/reference/conventions.md. `medium`
+# covers the same worst run at 13%.
 py_test(
     name = "encoding_test",
     size = "medium",
@@ -65,12 +63,16 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
-# 48.6 s on this workstation, most of it compiles: the published cases carry a
-# different message length each, so nearly every one of them traces its own
-# program, which is the per-PR cost `conventions.md` attributes to distinct
-# shapes rather than to vectors. Scaled by the executor factor that lands near
-# 165 s, over half of `medium`, so it takes the next bucket up and CI is what
-# confirms it.
+# Sized from the executor, and **the GPU leg is the one that decides** — 243.0 s
+# against the CPU leg's 82.1 s. That inverts the sibling `arith_test`, where CPU
+# is slower, and the cause is the cost `conventions.md` attributes to distinct
+# shapes rather than to vectors: the published cases carry a different message
+# length each, so nearly every one traces its own program, and a compile is what
+# the GPU leg is worst at.
+#
+# `large`'s 900 s covers that worst run at 27%. `medium` would have been at 81%
+# — a target that passes on a workstation at 48.6 s and flakes where it counts,
+# which is the whole of why a local number does not size a budget.
 py_test(
     name = "verify_test",
     size = "large",
