@@ -46,6 +46,19 @@ against exact integer arithmetic rather than against a table.
 negacyclic transform needs a primitive `2n`-th one — 1024 and 2048 for Falcon's
 two parameter sets, both inside it.
 
+## The surface stops at `base_mul`, and a composed `mul` is not an omission
+
+`ntt` / `intt` / `base_mul` is the aligned set, and there is no `a · b` on top of
+them. Verification computes one product, `s1 = c − s2·h`, and the composed form
+would transform `h` inside every call: a third of the transform work, for an
+operand that is the public key and does not change per signature. Under a batch
+that assembles by vmapping a one-signature body — this repo's pattern — `h` is
+lifted onto the batch axis and the same NTT is computed `B` times over identical
+rows, which nothing downstream can common up because the rows are real data.
+
+So the caller hoists `ntt(h)` and stays in the transform domain, and the shape
+that would have invited otherwise is absent rather than documented against.
+
 ## Two representations, on purpose
 
 The transform works on `FIELD`; a norm does not. Falcon bounds `‖(s1, s2)‖²`
@@ -83,12 +96,15 @@ DEGREES = (512, 1024)
 FIELD = zk_dtypes.prime_field(Q)
 
 
-def _checked_degree(w: ArrayLike) -> int:
-    """The transform length, refused unless Falcon defines it."""
+def _check_degree(w: ArrayLike) -> None:
+    """Refuses a transform length Falcon does not define.
+
+    Reads the shape and nothing else, so under a tracer it is a metadata test
+    that emits no HLO.
+    """
     n = np.shape(w)[-1]
     if n not in DEGREES:
         raise ValueError(f"degree {n} is not a Falcon parameter set: {DEGREES}")
-    return n
 
 
 def to_field(w: ArrayLike) -> Any:
@@ -106,10 +122,18 @@ def centered(w: ArrayLike) -> Any:
 
     What a norm has to be measured over: `q − 1` is the coefficient `−1`, and
     summing its square as `(q − 1)²` would reject every honest signature.
+
+    Written the way ML-DSA's `centered` is written, down to the `where`, so that
+    diffing the two files shows one modulus differing and nothing else — the
+    cost [`conventions.md`](../../../docs/reference/conventions.md) names is not
+    the duplicated lines but two adaptations that look unrelated. The leading
+    `%` is what carries the same property theirs has: a value already centered
+    is its own representative, which a norm over `LowBits`-style output needs.
     """
     xnp = namespace(w)
     canonical = xnp.asarray(w).astype(np.uint32).astype(np.int32)
-    return canonical - np.int32(Q) * (canonical > np.int32(Q // 2))
+    low = canonical % np.int32(Q)
+    return xnp.where(low > Q // 2, low - np.int32(Q), low)
 
 
 def ntt(w: ArrayLike) -> Any:
@@ -119,12 +143,20 @@ def ntt(w: ArrayLike) -> Any:
     transform domain. A raw integer array is refused rather than read as a
     residue: the opcode reads the field's algebra to derive its root.
 
+    **No `generator=`, deliberately** — where ML-DSA's call pins one. The
+    opcode's default root is taken, and what makes that safe is a property of
+    the scheme rather than of this function: no transform-domain value is ever
+    serialized, hashed or compared, so the root cancels inside every call that
+    introduces it. A step that broke that invariant would need the pin back, and
+    would not fail a round trip or a convolution check when it did — see the
+    module docstring and
+    [`conventions.md`](../../../docs/reference/conventions.md).
+
     The result is a device array whichever namespace the input arrived in — the
     transform is an opcode with no host implementation, so the lift is forced
-    rather than chosen
-    ([`conventions.md`](../../../docs/reference/conventions.md)).
+    rather than chosen.
     """
-    _checked_degree(w)
+    _check_degree(w)
     return lax.ntt(w, ntt_type=lax.NttType.NEGACYCLIC_NTT)
 
 
@@ -132,9 +164,9 @@ def intt(w_hat: ArrayLike) -> Any:
     """The inverse negacyclic NTT, batched over leading axes.
 
     The trailing scale by `n^-1` is the opcode's, not ours: its inverse mode
-    applies it.
+    applies it. Unpinned for the reason `ntt` gives.
     """
-    _checked_degree(w_hat)
+    _check_degree(w_hat)
     return lax.ntt(w_hat, ntt_type=lax.NttType.NEGACYCLIC_INTT)
 
 
@@ -149,13 +181,3 @@ def base_mul(a_hat: ArrayLike, b_hat: ArrayLike) -> Any:
     """
     xnp = namespace(a_hat, b_hat)
     return xnp.asarray(a_hat) * xnp.asarray(b_hat)
-
-
-def mul(a: ArrayLike, b: ArrayLike) -> Any:
-    """`a · b` in `Z_q[x]/(x^n + 1)`, over `FIELD` coefficients.
-
-    The round trip through the transform domain is an implementation of the ring
-    multiplication and not a second operation, which is why verification calls
-    this rather than assembling the three steps itself.
-    """
-    return intt(base_mul(ntt(a), ntt(b)))
