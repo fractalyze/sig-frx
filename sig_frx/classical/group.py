@@ -49,18 +49,61 @@ def bytes_below(data: Any, bound: int, *, byteorder: Literal["little", "big"]) -
     return verdict == -1
 
 
-def pow_const(curve: Any, base: ArrayLike, exponent: int) -> Any:
+def _window_digits(exponent: int, window: int) -> list[int]:
+    """`exponent` in base `2^window`, most significant digit first.
+
+    The leading digit is non-zero, which is what lets the ladder below seed
+    the accumulator from the table instead of from one.
+    """
+    mask = (1 << window) - 1
+    digits = []
+    while exponent:
+        digits.append(exponent & mask)
+        exponent >>= window
+    return digits[::-1]
+
+
+def pow_const(curve: Any, base: ArrayLike, exponent: int, *, window: int = 4) -> Any:
     """`base^exponent` in the curve's base field, for a static exponent.
 
-    Square-and-multiply with the branches decided at trace time — the exponent
-    is a Python integer, so the unrolled ~256 squarings compile once per
-    exponent and the value path stays pure field arithmetic.
+    A fixed-window ladder: `base^1 … base^(2^w - 1)` is tabulated once, then
+    the exponent is consumed `w` bits at a time. Both callers are square
+    roots whose exponent has almost every bit set — `(p+1)/4` on the SEC
+    curves, `(p-5)/8` on ed25519 — which is the bit-at-a-time method's worst
+    case, so the window is worth about a third of the multiplications there
+    (~325 against ~501 for a 254-bit exponent at `w = 4`).
+
+    `w = 4` is the floor for a 256-bit exponent; 3 and 5 both cost a few
+    percent more, because a wider window pays for its table faster than it
+    saves on digits. It is a parameter because the cost only holds for
+    exponents of that size, not because a caller is expected to tune it.
+
+    The exponent is a Python integer, so the digits, the table size, and the
+    ladder's branches are all decided at trace time exactly as the bit loop's
+    were: the kernel still unrolls and compiles once per exponent, and the
+    value path stays pure field arithmetic.
     """
-    acc = base * np.array(0, dtype=curve.field) + curve.one
-    for bit in bin(exponent)[2:]:
-        acc = acc * acc
-        if bit == "1":
-            acc = acc * base
+    if window < 1:
+        raise ValueError("window must be at least 1")
+    if exponent < 0:
+        raise ValueError("pow_const does not invert; exponent must be >= 0")
+    # `curve.one` is a scalar, so it is broadcast against `base` to give the
+    # empty product the batch's shape.
+    if exponent == 0:
+        return base * np.array(0, dtype=curve.field) + curve.one
+
+    digits = _window_digits(exponent, window)
+    # `table[i]` is `base^(i + 1)`, built only as far as the digits reach.
+    table = [base]
+    for _ in range(1, max(digits)):
+        table.append(table[-1] * base)
+
+    acc = table[digits[0] - 1]
+    for digit in digits[1:]:
+        for _ in range(window):
+            acc = acc * acc
+        if digit:
+            acc = acc * table[digit - 1]
     return acc
 
 
