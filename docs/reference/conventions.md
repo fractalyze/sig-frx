@@ -90,14 +90,10 @@ once already, breaking every consumer that had spelled the layout — and its ro
 re-exports exist so that costs us nothing. They are lazy, so the whole-package
 dep buys insulation rather than import time.
 
-The exception is a name hash-frx does not re-export, today the SHAKE rates
-alone: [`sampling.py`](../../sig_frx/lattice/mldsa/sampling.py) and
-[`sign_bench.py`](../../sig_frx/lattice/mldsa/testing/sign_bench.py) keep one
-layout import each, and their narrow `//hash_frx/keccak` dep with it. Convert a
-module wholesale or not at all — `sign_bench` needs four names that have a root
-form and two that do not, and taking the four off the root would leave the same
-coupling plus a second import to read. When a name is missing from the root, the
-fix worth pursuing is upstream.
+A name the root does not re-export is an upstream fix to pursue, not a carve-out
+to keep here. Until one lands, convert a module wholesale or not at all:
+splitting its names across both spellings leaves the same coupling and two
+imports to read.
 
 ## A rejection loop is not a `while` on secret data
 

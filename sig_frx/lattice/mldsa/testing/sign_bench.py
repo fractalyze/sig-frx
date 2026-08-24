@@ -44,12 +44,7 @@ import frx.numpy as fnp
 import numpy as np
 from absl import app, flags
 from frx import Array
-
-# Kept whole rather than split across both spellings: four of these six names
-# have a root form and two do not, and taking the four off the root would leave
-# the same layout coupling plus a second import to read. Converts in one move
-# when hash-frx re-exports the rates.
-from hash_frx.keccak.byte_hashes import (
+from hash_frx import (
     SHAKE128_RATE,
     SHAKE256_RATE,
     HostShake128,
