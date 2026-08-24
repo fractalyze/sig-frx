@@ -60,6 +60,18 @@ there. The lift onto the device is the one that needs a rule, because it succeed
 everywhere except on the path that cannot afford it — and pays a dispatch per
 operation to batch a signature with itself even where it works.
 
+**The one callee that lifts anyway, and what it had to show.**
+[`secp.py`](../../sig_frx/classical/secp.py)'s `multiple` and `double_multiple`
+place their point batch themselves, on a batch-size threshold. It is the only
+exception in the repo and it is allowed because the hazard above cannot reach
+it: the rule protects a *signing* path from being dragged onto a 32-bit
+integer lane, a point dtype has no integer lane, and the only signing caller
+of those seams arrives at `B = 1`, which is below any threshold and so never
+moves. What it buys is that the decision exists once rather than at each of
+the five places a verification batch is born, where a sixth that forgot would
+be silently slow. An exception wants that shape of argument — why the hazard
+is absent, and what the duplication would have cost — not just a measurement.
+
 **An operation with a host implementation picks it the same way.** A lift needs a
 reason, and "the callee only has a device form" is the reason `arith.ntt` lifts:
 `frx.lax.ntt` has no host implementation, so there is nowhere else for a host

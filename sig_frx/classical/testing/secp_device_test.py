@@ -160,16 +160,36 @@ class CurvePlacementTest(absltest.TestCase):
         self.assertTrue(secp.SECP256K1.traceable)
         self.assertFalse(secp.SECP256R1.traceable)
 
-    def test_a_batch_below_the_threshold_stays_on_the_host(self) -> None:
-        small = _generators(secp.SECP256K1, secp.DEVICE_MIN_BATCH - 1)
-        big = _generators(secp.SECP256K1, secp.DEVICE_MIN_BATCH)
-        self.assertFalse(arrays.traced(secp.place(secp.SECP256K1, small)))
-        self.assertTrue(arrays.traced(secp.place(secp.SECP256K1, big)))
+    def test_the_threshold_decides_where_a_multiple_runs(self) -> None:
+        # Asserted through the seam rather than through the placement helper,
+        # because where the arithmetic ends up is the claim; the helper is an
+        # implementation detail of these two functions.
+        curve = secp.SECP256K1
+        for count, want_traced in (
+            (secp.DEVICE_MIN_BATCH - 1, False),
+            (secp.DEVICE_MIN_BATCH, True),
+        ):
+            result = secp.multiple(curve, [1] * count, _generators(curve, count))
+            self.assertEqual(arrays.traced(result), want_traced, f"B={count}")
+
+    def test_a_single_signature_is_never_moved(self) -> None:
+        # The seam's own definition of one verification, and the case the
+        # device loses by 25x. It is also the shape the signing path reaches
+        # these seams in, which is what keeps the namespace rule's hazard out.
+        curve = secp.SECP256K1
+        self.assertFalse(
+            arrays.traced(secp.multiple(curve, [1], _generators(curve, 1)))
+        )
+        # And the signing readback still answers in host integers, which is
+        # what it would stop doing if `B = 1` were ever placed.
+        self.assertEqual(secp.host_multiple_of_g(curve, 1), (curve.gx, curve.gy))
 
     def test_an_untraceable_curve_stays_on_the_host_at_any_size(self) -> None:
         # The case that would raise rather than run slowly.
-        big = _generators(secp.SECP256R1, secp.DEVICE_MIN_BATCH * 2)
-        self.assertFalse(arrays.traced(secp.place(secp.SECP256R1, big)))
+        curve = secp.SECP256R1
+        count = secp.DEVICE_MIN_BATCH * 2
+        result = secp.multiple(curve, [1] * count, _generators(curve, count))
+        self.assertFalse(arrays.traced(result))
 
 
 class WycheproofVerdictParityTest(parameterized.TestCase):
