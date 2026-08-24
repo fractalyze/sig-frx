@@ -110,9 +110,13 @@ py_test(
 # The multi-tree half: the per-layer index split, keygen over the top tree only,
 # and the wider signature. Single-tree is the `d = 1` case of the same class and
 # is gated by `rfc8391_xmss_test`.
+#
+# `large` because the CPU leg measures 105.4 s to 268.5 s across runs of
+# unchanged commits, and the top of that range leaves no margin under `medium`'s
+# 300 s. See ../../../docs/reference/conventions.md.
 py_test(
     name = "rfc8391_xmssmt_test",
-    size = "medium",
+    size = "large",
     srcs = ["rfc8391_xmssmt_test.py"],
     deps = [
         ":rfc8391_vectors",
@@ -136,9 +140,12 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# `medium` for the same reason as `xmss_test`: 12.2 s to 31.4 s on the CPU leg
+# across unchanged commits, which is half of `small`'s 60 s at the top of that
+# range and one contended run from a timeout.
 py_test(
     name = "wots_test",
-    size = "small",
+    size = "medium",
     srcs = ["wots_test.py"],
     deps = [
         "//sig_frx/hashbased:adrs",
@@ -200,9 +207,13 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# `large` from the CPU leg's worst run: 114.3 s to 224.9 s across unchanged
+# commits, against `medium`'s 300 s. The GPU leg runs it in a steady ~120 s —
+# the slowest leg is what a budget covers, per
+# ../../../docs/reference/conventions.md.
 py_test(
     name = "slh_dsa_test",
-    size = "medium",
+    size = "large",
     srcs = ["slh_dsa_test.py"],
     deps = [
         "//sig_frx:context",
@@ -274,11 +285,17 @@ py_library(
 # ones; `slh_dsa_sweep_test` is the exhaustive run.
 py_test(
     name = "slh_dsa_kat_test",
-    # The longest test in this package — ~276 s on the CI executor, which does
-    # not fit `medium`'s 300 s with any margin. Size it from the executor rather
-    # than from a dev workstation: the same run takes ~175 s locally, so a local
-    # measurement reports roughly twice the headroom that CI has.
+    # The longest test in this package. Size it from the executor rather than
+    # from a dev workstation: a local run reports roughly twice the headroom CI
+    # has.
+    #
+    # The CPU leg measures 301.7 s to 572.2 s across runs of unchanged commits,
+    # so the worst run is over half of `large`'s 900 s. The deadline moves up a
+    # bucket and `size` stays `large` — see "`size` moves two things and
+    # `timeout` moves one" in ../../../docs/reference/conventions.md. The GPU
+    # leg runs the same target in a steady ~285 s.
     size = "large",
+    timeout = "eternal",
     srcs = ["slh_dsa_kat_test.py"],
     deps = [
         ":slh_dsa_vectors",
@@ -356,9 +373,15 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# `medium` for the margin rather than the runtime. The work is a few seconds of
+# hashing, but this target measures 24.5 s to 57.3 s on the CPU leg across runs
+# of unchanged commits — so `small`'s 60 s was decided by executor load rather
+# than by the test, and one commit both passed and timed out under it. Sized
+# from the worst run on the slowest leg, per
+# ../../../docs/reference/conventions.md.
 py_test(
     name = "xmss_test",
-    size = "small",
+    size = "medium",
     srcs = ["xmss_test.py"],
     deps = [
         "//sig_frx/hashbased:hypertree",
