@@ -2,14 +2,14 @@ load("@rules_python//python:defs.bzl", "py_test")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
-# Sized from the executor: 10.1 s on the CPU leg against 3.4 s on the GPU one,
-# so CPU is the leg that decides and `small`'s 60 s covers it at 17%. The CPU
-# leg's run-to-run spread is around 2.2x, which puts even a bad run near 44% —
+# Sized from the executor: 4.0 s on the CPU leg against 2.9 s on the GPU one, so
+# CPU is the leg that decides and `small`'s 60 s covers it at 7%. The CPU leg's
+# run-to-run spread is around 2.2x, which leaves a bad run near 15% — well
 # inside the half-a-budget rule in ../../../../docs/reference/conventions.md.
 #
-# The workstation figure is 4.2 s and would have argued for `small` too, but it
-# is not what decided this: a CUDA-less box refuses `FRX_PLATFORMS=cuda` rather
-# than falling back, so the GPU leg was unmeasurable here and this waited for CI.
+# The workstation figure would have argued for `small` too, but it is not what
+# decided this: a CUDA-less box refuses `FRX_PLATFORMS=cuda` rather than falling
+# back, so the GPU leg was unmeasurable there and this waited for CI.
 py_test(
     name = "arith_test",
     size = "small",
