@@ -19,3 +19,45 @@ py_library(
         requirement("zk_dtypes"),
     ],
 )
+
+# §3.11's wire formats. Depends on `:arith` for the modulus the 14-bit public
+# key width is derived from, and on nothing else — no hash, no scheme logic —
+# so the decoder and its rejections are gated before verification exists.
+py_library(
+    name = "encoding",
+    srcs = [
+        "__init__.py",
+        "encoding.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":arith",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+# §3.10 — verification, over the two libraries above. The `Signature` seam and
+# the shared context rule are the only dependencies that are not Falcon's own;
+# `HashToPoint` reaches its SHAKE through `//sig_frx:hashes` rather than by
+# naming a sponge, so no hash-frx dependency appears here beyond the rate
+# constant its budget is counted in.
+py_library(
+    name = "verify",
+    srcs = [
+        "__init__.py",
+        "verify.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":arith",
+        ":encoding",
+        "//sig_frx:context",
+        "//sig_frx:hashes",
+        "//sig_frx:signature",
+        "//sig_frx/lattice:rejection",
+        "@hash_frx//hash_frx",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
