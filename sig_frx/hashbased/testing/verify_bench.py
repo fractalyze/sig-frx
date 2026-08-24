@@ -45,7 +45,7 @@ import numpy as np
 from absl import app, flags
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx.sha256 import Sha256
+from hash_frx import Sha256
 
 from sig_frx.hashbased import fors, hypertree, slh_dsa
 from sig_frx.hashbased.tweakable import Sha2TweakableHash

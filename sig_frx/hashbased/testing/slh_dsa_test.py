@@ -30,7 +30,7 @@ import numpy as np
 from absl.testing import absltest
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx.sha256 import Sha256
+from hash_frx import Sha256
 
 from sig_frx.context import MAX_SIZE as MAX_CONTEXT_SIZE
 from sig_frx.hashbased import fors, hypertree, slh_dsa, tree, xmss

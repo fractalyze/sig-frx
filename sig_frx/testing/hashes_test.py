@@ -29,12 +29,7 @@ import frx
 import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
-from hash_frx.keccak.byte_hashes import (
-    HostShake128,
-    HostShake256,
-    Shake128,
-    Shake256,
-)
+from hash_frx import HostShake128, HostShake256, Shake128, Shake256
 
 from sig_frx import hashes
 from sig_frx.lattice.mldsa import ml_dsa, sampling

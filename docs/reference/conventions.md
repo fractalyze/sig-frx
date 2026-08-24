@@ -6,7 +6,10 @@ This page carries only what is specific to implementing signature schemes. The
 rules every FRX consumer shares — `@jit` placement, `for` vs `lax.scan` vs
 `vmap`, pytree registration mechanics, seam conformance pins, the `testing/`
 layout, the comment rules — are not repeated here. They are identical in every
-repo built on FRX, and a copy per repo is exactly how they drift apart.
+repo built on FRX, and a copy per repo is exactly how they drift apart; read
+them in
+[`zorch`'s page](https://github.com/fractalyze/zorch/blob/main/docs/reference/conventions.md),
+which states them in full.
 
 ## Batch verification is the compilation unit
 
@@ -73,6 +76,28 @@ A commitment computed by the transform is a device array because the transform
 has no other form, and hashing it is a device hash; bringing it back to the host
 first is a decision about that value with its own cost, not this rule applied
 harder.
+
+## hash-frx is reached by its names, not by its file tree
+
+`from hash_frx import Sha256`, never `from hash_frx.sha256 import Sha256`, and
+the Bazel dep is the whole `@hash_frx//hash_frx` rather than a narrow label. The
+two are one decision, not two: `hash_frx/__init__.py` ships only in that target,
+so a narrow dep set leaves `hash_frx` a namespace package with no `__getattr__`,
+and the root import fails at runtime with analysis already green.
+
+hash-frx re-layers itself — `hmac`, `hkdf` and `pbkdf2` moved under `adapter/`
+once already, breaking every consumer that had spelled the layout — and its root
+re-exports exist so that costs us nothing. They are lazy, so the whole-package
+dep buys insulation rather than import time.
+
+The exception is a name hash-frx does not re-export, today the SHAKE rates
+alone: [`sampling.py`](../../sig_frx/lattice/mldsa/sampling.py) and
+[`sign_bench.py`](../../sig_frx/lattice/mldsa/testing/sign_bench.py) keep one
+layout import each, and their narrow `//hash_frx/keccak` dep with it. Convert a
+module wholesale or not at all — `sign_bench` needs four names that have a root
+form and two that do not, and taking the four off the root would leave the same
+coupling plus a second import to read. When a name is missing from the root, the
+fix worth pursuing is upstream.
 
 ## A rejection loop is not a `while` on secret data
 
