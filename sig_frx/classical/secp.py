@@ -68,11 +68,12 @@ import functools
 from dataclasses import dataclass
 from typing import Any
 
+import frx.numpy as fnp
 import numpy as np
 import zk_dtypes
 from frx.typing import ArrayLike
 
-from sig_frx.arrays import namespace
+from sig_frx.arrays import namespace, traced
 from sig_frx.classical import group
 
 
@@ -157,6 +158,28 @@ class Curve:
         """`G` as a `[1]`-shaped affine array, broadcastable over any batch."""
         return np.array([self.point((self.gx, self.gy))], dtype=self.point)
 
+    @functools.cached_property
+    def traceable(self) -> bool:
+        """Whether a traced array can hold this curve's points at all.
+
+        A point type needs a row in frx's admission table, and secp256r1 has
+        none at the pinned wheel while secp256k1 does. Probed rather than
+        listed: a list would be a second place to update and would go stale
+        silently the moment the rows land, where this starts answering `True`
+        on its own.
+
+        Any failure answers `False`, not only the `TypeError` seen today. The
+        fallback is the host path, which is always correct, so a probe that
+        guesses wrong costs speed — while one that let a new exception type
+        through would restore the crash this exists to stop, at the batch
+        sizes no gate covers.
+        """
+        try:
+            fnp.asarray(self.generator)
+        except Exception:  # noqa: BLE001 — see above; the fallback is correct.
+            return False
+        return True
+
 
 # SEC 2 §2.4.1, "Recommended Parameters secp256k1". The Koblitz curve.
 SECP256K1 = Curve(
@@ -174,6 +197,46 @@ SECP256R1 = Curve(
     scalar=zk_dtypes.secp256r1_sf_mont,
     field=zk_dtypes.secp256r1_bf_mont,
 )
+
+
+# Where a verification batch stops being cheaper on the host — see `place`
+# for the measurement and why one number covers both backends.
+DEVICE_MIN_BATCH = 64
+
+
+def place(curve: Curve, points: ArrayLike) -> Any:
+    """A verification batch moved off the host once the batch pays for it.
+
+    The substrate itself never chooses a namespace — `multiple` and the rest
+    read it off their arguments, and this repo's rule is that the lift belongs
+    to the caller (`docs/reference/conventions.md`). This is that caller's
+    decision written once instead of five times, and a scheme opts into it by
+    calling it; nothing here applies it on anyone's behalf.
+
+    The decision is a batch-size threshold because the cost it is trading
+    against is a fixed one. Measured on an RTX 5090 with full-size scalars,
+    lifting a batch, multiplying and reading it back costs about 5 ms on CUDA
+    regardless of size, so it loses badly to the host on a single signature
+    (0.12 ms against 3.2 ms) and wins from roughly a batch of 64 up — 1.7x
+    there, 26x at 1 024. The CPU backend has no such floor and is ahead from a
+    batch of 2, so one threshold picked for CUDA is safe for both: below it
+    nothing moves and nothing regresses, above it both backends gain.
+
+    A curve whose points a traced array cannot hold stays on the host at every
+    size. That is not a tuning decision: lifting secp256r1 raises rather than
+    running slowly, so a batch of P-256 signatures large enough to cross the
+    threshold would fail outright — which the KAT gate cannot see, because its
+    batches are smaller than that.
+
+    A batch that is already traced is left alone — the caller has placed it
+    and this is not the function that second-guesses that.
+    """
+    if traced(points):
+        return points
+    host = np.asarray(points)
+    if host.shape[0] < DEVICE_MIN_BATCH or not curve.traceable:
+        return host
+    return fnp.asarray(host)
 
 
 def multiple(curve: Curve, scalars: list[int], points: ArrayLike) -> np.ndarray:

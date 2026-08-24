@@ -16,12 +16,16 @@ is the distinction `secp_test.py` exists to keep honest.
 
 from __future__ import annotations
 
+from unittest import mock
+
 import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest, parameterized
 
 from sig_frx import arrays
 from sig_frx.classical import secp
+from sig_frx.classical.testing import ecdsa_wycheproof_vectors as wycheproof
+from sig_frx.testing import kat
 
 # secp256k1 only, and not by preference. A traced array can hold a point type
 # only if frx's admission table has a row for it, and at the pinned wheel
@@ -142,6 +146,62 @@ class SecpDeviceParityTest(parameterized.TestCase):
         points = fnp.asarray(_generators(curve, 4))
         result = secp.double_multiple(curve, [1] * 4, [1] * 4, points)
         self.assertTrue(arrays.traced(result))
+
+
+class CurvePlacementTest(absltest.TestCase):
+    def test_which_curves_a_traced_array_can_hold(self) -> None:
+        """States the gap `place` routes around, so it is not silent.
+
+        Without this, secp256r1's fallback to the host makes the parity test
+        above compare the host path against itself and pass for the wrong
+        reason. When frx admits the P-256 point types this fails, which is the
+        prompt to widen `_CURVES` and drop the special case.
+        """
+        self.assertTrue(secp.SECP256K1.traceable)
+        self.assertFalse(secp.SECP256R1.traceable)
+
+    def test_a_batch_below_the_threshold_stays_on_the_host(self) -> None:
+        small = _generators(secp.SECP256K1, secp.DEVICE_MIN_BATCH - 1)
+        big = _generators(secp.SECP256K1, secp.DEVICE_MIN_BATCH)
+        self.assertFalse(arrays.traced(secp.place(secp.SECP256K1, small)))
+        self.assertTrue(arrays.traced(secp.place(secp.SECP256K1, big)))
+
+    def test_an_untraceable_curve_stays_on_the_host_at_any_size(self) -> None:
+        # The case that would raise rather than run slowly.
+        big = _generators(secp.SECP256R1, secp.DEVICE_MIN_BATCH * 2)
+        self.assertFalse(arrays.traced(secp.place(secp.SECP256R1, big)))
+
+
+class WycheproofVerdictParityTest(parameterized.TestCase):
+    """The verdicts a consumer sees must not depend on where the batch ran.
+
+    The substrate tests above compare coordinates. This runs the published
+    Wycheproof corpus through the whole scheme and compares the thing that
+    actually leaves the library, because that is what a chain treats as
+    consensus — and because every batch the merge gate builds is smaller than
+    `secp.DEVICE_MIN_BATCH`, so without forcing the threshold nothing here
+    would exercise the device path at the scheme level at all.
+
+    Each leg is held against Wycheproof's published verdicts rather than
+    against the other leg, which is the stronger statement: two paths that
+    agree while both being wrong pass a parity check and fail this one.
+    """
+
+    @parameterized.named_parameters(
+        *(
+            (f"_{name}{label}", name, threshold)
+            for name in wycheproof.SCHEMES
+            for label, threshold in (("_host", 1 << 30), ("_device", 0))
+        )
+    )
+    def test_verdicts_do_not_depend_on_where_the_batch_ran(
+        self, curve: str, threshold: int
+    ) -> None:
+        runnable, _ = wycheproof.load(curve)
+        with mock.patch.object(secp, "DEVICE_MIN_BATCH", threshold):
+            kat.check(
+                wycheproof.SCHEMES[curve], wycheproof.subset(runnable, per_bucket=2)
+            )
 
 
 if __name__ == "__main__":

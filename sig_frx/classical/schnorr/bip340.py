@@ -202,6 +202,11 @@ class Bip340:
         r_points, r_lifted = secp.lift_x_to_parity(_CURVE, r_ints, [0] * len(r_ints))
         if not bool(np.all(ok & r_lifted)):
             return False
+        # Placed below the rejection, not above it: the guard reads host
+        # booleans that are already in hand, so lifting first would move a
+        # batch this call is about to throw away — on the path an adversary
+        # picks.
+        r_points = secp.place(_CURVE, r_points)
 
         n = _CURVE.n
         coefficients = group.batch_coefficients(
@@ -265,7 +270,7 @@ class Bip340:
             _CURVE, [pk % p for pk in pk_ints], [0] * len(pk_ints)
         )
         ok = np.array(checks, dtype=bool) & on_curve
-        return keys, messages, signatures, ok, key_points
+        return keys, messages, signatures, ok, secp.place(_CURVE, key_points)
 
     def _challenge_scalars(
         self, keys: np.ndarray, messages: np.ndarray, signatures: np.ndarray
