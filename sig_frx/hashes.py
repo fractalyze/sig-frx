@@ -29,8 +29,6 @@ is what says so, and it is why nothing below can pick wrong in a way that runs.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 from hash_frx import (
     ByteHash,
     HostSha256,
@@ -40,14 +38,10 @@ from hash_frx import (
     Sha256,
     Shake128,
     Shake256,
+    Xof,
 )
 
 from sig_frx.arrays import traced
-
-# A `ByteHash` family: the constructor an output length is handed to. It is the
-# type `tweakable.ShakeTweakableHash` already takes an XOF as, so a caller that
-# holds one of these can pass it there unchanged.
-Xof = Callable[[int], ByteHash]
 
 
 def shake128(*values: object) -> Xof:
