@@ -19,7 +19,7 @@ import hashlib
 
 import numpy as np
 from absl.testing import absltest
-from hash_frx.sha256 import HostSha256, Sha256
+from hash_frx import HostSha256, Sha256
 
 from sig_frx.hashbased import rfc8391_adrs as a
 from sig_frx.hashbased import rfc8391_hashes, rfc8391_params

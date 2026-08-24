@@ -28,7 +28,7 @@ import hashlib
 
 import numpy as np
 from absl.testing import absltest
-from hash_frx.sha256 import Sha256
+from hash_frx import Sha256
 
 from sig_frx.hashbased import rfc8391_adrs as a
 from sig_frx.hashbased import rfc8391_params, rfc8391_wots, rfc8391_xmss, tree

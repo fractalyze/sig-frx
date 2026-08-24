@@ -31,15 +31,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from hash_frx.byte_hash import ByteHash
-from hash_frx.keccak.byte_hashes import (
+from hash_frx import (
+    ByteHash,
+    HostSha256,
     HostShake128,
     HostShake256,
     Keccak256,
+    Sha256,
     Shake128,
     Shake256,
 )
-from hash_frx.sha256 import HostSha256, Sha256
 
 from sig_frx.arrays import traced
 

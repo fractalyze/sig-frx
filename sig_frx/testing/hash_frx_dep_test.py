@@ -26,8 +26,7 @@ import frx.numpy as fnp
 import hash_frx
 import numpy as np
 from absl.testing import absltest
-from hash_frx.byte_hash import ByteHash
-from hash_frx.sha256 import HostSha256, Sha256
+from hash_frx import ByteHash, HostSha256, Sha256
 
 # Equal length, because `digest` takes a batch of equal-length messages.
 _MESSAGES = (b"abcdefgh", b"sig-frx\n", b"\x00" * 8)

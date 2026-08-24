@@ -41,7 +41,7 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx.byte_hash import ByteHash
+from hash_frx import ByteHash
 
 
 @runtime_checkable
