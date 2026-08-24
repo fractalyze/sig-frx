@@ -406,6 +406,30 @@ express instead of dropping it, and the harness refuses the case. Running the
 plain operation against a vector published for another one reports a pass for a
 case nobody ran, which is worse than a failure because it looks like coverage.
 
+### The per-PR gate's cost is distinct shapes, not vectors
+
+Both validation programs vary the message length per case, so a published set is
+nearly all singletons and a traced implementation compiles about once per case.
+That is free on a backend that inlines the hash and ruinous on one that routes a
+whole-hash marker, whose decomposition is the entire absorb and squeeze — traced
+per shape, and in proportion to the message's block count rather than its length,
+so two messages in one block bucket cost one compile. Hence the cost is a
+property of the corpus *and* the backend: **a target excluded from a leg has
+never had its budget validated there**, and the `size` it carries is a guess
+until it runs, however carefully the comment argues for it.
+
+What bounds that cost is the number of vectors per operation, not their length.
+Capping the length looks equivalent and is not: a program draws each case's
+pre-hash function at random and those cases carry long messages, so a length cap
+empties whole operations rather than trimming them — and a gate that quietly
+stopped exercising an operation reads exactly like one that got cheaper. ML-DSA's
+gate keeps the shortest few of each operation for that reason, and asserts that
+every operation, both signing modes and every pre-hash function survive the
+bound, so the bound cannot silently eat coverage.
+
+The exhaustive run over every published length stays behind `slow_kat`, so
+nothing is lost overall — only the per-PR gate shrinks.
+
 ## Scheme doc skeleton
 
 Every page in [`../schemes/`](../schemes) answers three things, and everything
