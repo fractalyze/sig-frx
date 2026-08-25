@@ -40,28 +40,53 @@ parameter, a tweak and a message into fixed positions and read a truncated
 prefix back — reverses for free by placing and slicing from the other end. The
 reversal is a layout decision made once at the boundary, never data movement.
 
-"Once" is load-bearing on the callers too. This seam states the convention in
-one place, and it stays one place only if the layers that build state share a
-placement helper rather than each working out which end to fill from; a second
-module that re-derives it has turned a boundary into a convention spread across
-the package.
+"Once" is load-bearing on the callers too, and it is why the two modes below
+live here rather than in a module of their own. The convention is exactly two
+functions — `_reversed_lanes`, where a leanSpec lane range sits in a reversed
+vector, and `_join`, which turns `a ‖ b` into `R(b) ‖ R(a)` — and every
+placement here goes through one of them. A second module that re-derived either
+has turned a boundary into a convention spread across the package.
 
 Nothing else about the two widths differs, so both come from one builder: width
 16 is the chain hash, width 24 the message, tree and leaf hashes.
+
+## The two modes over it
+
+- **Compression** — `Truncate(Permute(padded) + padded)`. The feed-forward
+  addition is part of the Hades design; the chain step, the Merkle interior node
+  and the message hash all reach the permutation this way.
+- **Sponge** — capacity lanes first, then rate lanes, absorbing by overwriting
+  the rate. The Merkle *leaf* needs it: it hashes `DIMENSION` digests at once and
+  no state is wide enough to compress them.
+
+Neither is hash-frx's. Its `Compression` has no feed-forward term and takes a
+fixed `(arity, chunk)` grid rather than a flat operand list; its `Sponge` puts
+capacity *after* the rate, starts it at zero rather than at a domain separator,
+and squeezes from the other side. Each differs in construction rather than in
+parameterization, so this is a reimplementation and not a seam hash-frx should
+grow — the same "is this one scheme's?" answer that sited the constants.
+
+Both modes take the operands the spec names — the digest, the public parameter,
+the tweak — rather than one pre-concatenated vector, so `_join` is what reverses
+the piece order and no caller decides which end to fill from.
 
 Two pointers a later reader will want. Conjugating here rather than teaching
 hash-frx the lane is the settled choice, recorded on
 [#195](https://github.com/fractalyze/sig-frx/issues/195); hash-frx's own
 `PoseidonParams` leaves the lane-as-a-parameter surface to its redesign epic, and
 if that surface ever lands this module unwinds to passing the constants through.
-And the permutation does not lower at these widths yet —
-[hash-frx#293](https://github.com/fractalyze/hash-frx/issues/293), which is a
-limit of the marker's MDS attribute above width 7 rather than anything about the
-conjugation.
+And the permutation lowers to one kernel at both widths, but on hash-frx's
+**generic** fused-region marker rather than the dedicated classic-Poseidon
+emitter: that emitter applies the MDS as a small-integer add-chain, so it takes
+entries in `[0, 64)` and no matrix over a 31-bit field qualifies. Correct, and
+at ~180 permutations per verification the gap is worth closing —
+[xla#604](https://github.com/fractalyze/xla/issues/604). Nothing about it is the
+conjugation's doing.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from functools import lru_cache
 from typing import Final
 
@@ -77,6 +102,16 @@ _WIDTHS: Final = {
     16: (_c.WIDTH_16_ROUNDS, _c.MDS_FIRST_ROW_16, _c.ROUND_CONSTANTS_16),
     24: (_c.WIDTH_24_ROUNDS, _c.MDS_FIRST_ROW_24, _c.ROUND_CONSTANTS_24),
 }
+
+# leanSpec states it in `spec/crypto/koalabear.py`; `zk_dtypes` reduces
+# internally and exposes no modulus, so the base of a decomposition is named
+# here rather than read off the dtype.
+_PRIME: Final = 2**31 - 2**24 + 1
+
+# Upstream fixes the domain separator at width 24 rather than at the sponge's
+# own width — the sponge is the only construction that needs one, and it runs
+# there.
+_DOMAIN_SEPARATOR_WIDTH: Final = 24
 
 
 def _to_field(canonical: np.ndarray) -> Array:
@@ -127,3 +162,153 @@ def lane_reversed_permutation(width: int) -> Poseidon:
     if width not in _WIDTHS:
         raise ValueError(f"leanSig hashes at widths {sorted(_WIDTHS)}, not {width}")
     return Poseidon(_params(width))
+
+
+def _reversed_lanes(start: int, length: int, size: int) -> slice:
+    """Where leanSpec lanes `[start, start + length)` sit in a reversed vector.
+
+    Reversal maps lane `i` of a `size`-long vector to `size - 1 - i`, so a range
+    that starts `start` from the front starts `start` from the back. Every read
+    and write in this module is expressed through this rather than through an
+    index worked out at the call site.
+    """
+    stop = size - start
+    return slice(stop - length, stop)
+
+
+def _join(pieces: Sequence[Array]) -> Array:
+    """Concatenate lane-reversed `pieces` listed in leanSpec's order.
+
+    `R(a ‖ b) = R(b) ‖ R(a)`: reversing a concatenation reverses the order of
+    its parts as well as each part. Callers name their operands the way the spec
+    writes them and this puts them where the reversed state wants them.
+    """
+    return fnp.concatenate(list(pieces)[::-1])
+
+
+def _int_to_base_p(value: int, num_limbs: int) -> list[int]:
+    """`value` as `num_limbs` base-p limbs, least significant first.
+
+    Host-only, and the packing is why: `safe_domain_separator` shifts its
+    lengths into 32-bit slots, so the value it decomposes is wider than any lane
+    and only a Python integer holds it without truncating (`CLAUDE.md`). Each
+    limb it returns is below `p`, which is what may then cross onto the device.
+
+    A short decomposition is rejected rather than truncated — dropping the high
+    part would silently change the hash, which is upstream's reasoning too.
+    """
+    limbs = []
+    remaining = value
+    for _ in range(num_limbs):
+        limbs.append(remaining % _PRIME)
+        remaining //= _PRIME
+    if remaining:
+        raise ValueError(f"value does not fit in {num_limbs} base-p limbs")
+    return limbs
+
+
+def compress(operands: Sequence[Array], *, width: int, output_length: int) -> Array:
+    """Poseidon in compression mode: `Truncate(Permute(padded) + padded)`.
+
+    `operands` are the pieces the spec names, each lane-reversed, listed in the
+    spec's own order — for a chain step, `(digest, parameter, tweak)`. They are
+    zero-extended to `width`, permuted, added back, and the leading
+    `output_length` elements are the digest.
+
+    Returns a lane-reversed digest, so a caller that feeds it straight back in —
+    which is what a chain step and a Merkle walk do — never reverses anything.
+    """
+    if not operands:
+        raise ValueError("compress needs at least one operand")
+
+    length = sum(operand.shape[0] for operand in operands)
+    if length > width:
+        raise ValueError(f"{length} operand elements do not fit a width-{width} state")
+    # Upstream's own bound, and it is on the unpadded length: truncating to more
+    # than was fed in would return padding as digest.
+    if output_length > length:
+        raise ValueError(
+            f"output_length {output_length} exceeds the {length} elements fed in"
+        )
+
+    padded = _join([*operands, fnp.zeros(width - length, dtype=operands[0].dtype)])
+    state = lane_reversed_permutation(width).permute(padded) + padded
+    return state[_reversed_lanes(0, output_length, width)]
+
+
+def sponge(
+    operands: Sequence[Array],
+    capacity: Array,
+    *,
+    width: int,
+    output_length: int,
+) -> Array:
+    """Poseidon in sponge mode, over a lane-reversed state.
+
+    `capacity` is the domain separator (`safe_domain_separator`) and sits in the
+    leading lanes upstream, so the reversed state carries it in the tail and the
+    rate leads. `operands` follow the same convention `compress` states.
+
+    The squeeze loops because the construction does, not because leanSig asks
+    it to: every call the scheme makes wants `HASH_LENGTH_FIELD_ELEMENTS` = 8
+    out of a rate of 15. A `sponge` that quietly handled only that would be a
+    trap for the next caller, and the loop is gated rather than assumed.
+    """
+    if not operands:
+        raise ValueError("sponge needs at least one operand")
+
+    capacity_length = capacity.shape[0]
+    if capacity_length >= width:
+        raise ValueError(
+            f"a capacity of {capacity_length} leaves no rate lane at width {width}"
+        )
+
+    rate = width - capacity_length
+    length = sum(operand.shape[0] for operand in operands)
+    dtype = capacity.dtype
+
+    # Padding to a whole number of chunks makes every absorb the same width, so
+    # the block loop needs no tail case.
+    absorbed_length = length + (-length % rate)
+    absorbed = _join([*operands, fnp.zeros(absorbed_length - length, dtype=dtype)])
+
+    permutation = lane_reversed_permutation(width)
+    capacity_lanes = _reversed_lanes(0, capacity_length, width)
+
+    state = _join([capacity, fnp.zeros(rate, dtype=dtype)])
+    for block in range(absorbed_length // rate):
+        chunk = absorbed[_reversed_lanes(block * rate, rate, absorbed_length)]
+        state = permutation.permute(_join([state[capacity_lanes], chunk]))
+
+    squeezed: list[Array] = []
+    remaining = output_length
+    while remaining:
+        take = min(remaining, rate)
+        squeezed.append(state[_reversed_lanes(capacity_length, take, width)])
+        remaining -= take
+        if remaining:
+            state = permutation.permute(state)
+    return _join(squeezed)
+
+
+def safe_domain_separator(lengths: Sequence[int], capacity_length: int) -> Array:
+    """A sponge capacity that binds it to one hashing task's shape.
+
+    The lengths pack into 32-bit slots, decompose base-p and compress. Two
+    sponges absorbing differently shaped data therefore start from different
+    capacities and cannot collide.
+
+    Depends only on the configuration, so a caller hashing many leaves computes
+    it once and hoists it; it is not cached here because the array it returns is
+    concrete and would outlive the backend it was built on.
+    """
+    packed = 0
+    for length in lengths:
+        packed = (packed << 32) | length
+
+    limbs = _int_to_base_p(packed, _DOMAIN_SEPARATOR_WIDTH)
+    return compress(
+        [_to_field(np.asarray(limbs[::-1]))],
+        width=_DOMAIN_SEPARATOR_WIDTH,
+        output_length=capacity_length,
+    )
