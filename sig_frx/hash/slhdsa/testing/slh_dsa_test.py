@@ -450,7 +450,7 @@ class DigestSplitTest(absltest.TestCase):
         )
         randomizers = np.stack(
             [
-                np.asarray(scheme._tweak.prf_msg(secret_key[16:32], public_key[:16], m))
+                np.asarray(scheme.tweak.prf_msg(secret_key[16:32], public_key[:16], m))
                 for m in messages
             ]
         )

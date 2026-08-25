@@ -19,3 +19,78 @@ py_library(
         requirement("frx"),
     ],
 )
+
+py_library(
+    name = "adrs",
+    srcs = [
+        "__init__.py",
+        "adrs.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//sig_frx/hash:adrs",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+# WOTS+C, the one-time signature the stateful path signs with. The chain walk is
+# `//sig_frx/hash:wots`'s under a different address; what lands here is the map
+# from a message digest to a constant-sum index set.
+py_library(
+    name = "wots_c",
+    srcs = [
+        "__init__.py",
+        "wots_c.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs",
+        "//sig_frx/hash:adrs_encoding",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash:wots",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+# The FXMSS tree, verification side. The walk is not `//sig_frx/hash:tree`'s: the
+# leaf index is 64 bits where that one takes a lane-wide column, and the depth
+# varies per entry where that one is a fixed height.
+py_library(
+    name = "fxmss",
+    srcs = [
+        "__init__.py",
+        "fxmss.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs",
+        ":wots_c",
+        "//sig_frx/hash:bytestring",
+        "//sig_frx/hash:tweakable",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+# The assembled scheme: the indicator byte that chooses a path, and the select
+# that runs both and keeps each entry's verdict.
+py_library(
+    name = "shrincs",
+    srcs = [
+        "__init__.py",
+        "shrincs.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":fxmss",
+        ":stateless",
+        "//sig_frx:context",
+        "//sig_frx:hashes",
+        "//sig_frx/hash:tweakable",
+        "@hash_frx//hash_frx",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
