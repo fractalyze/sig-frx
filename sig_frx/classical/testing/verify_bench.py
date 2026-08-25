@@ -32,10 +32,14 @@ Whatever remains is `host`: wire parsing, Python-integer scalar arithmetic,
 challenge hashing, and verdict assembly. (Ed25519's remainder also carries
 the final extended-coordinates add and compare.)
 
-There is no compile column, because nothing here is `jit`-ed: the point
-operations are single fused ops, for which compiling measured no better than
-running them eagerly. There is no traced *section* either, but that is no
-longer the same as saying nothing traces — a batch at or above
+There is no compile column, and one seam now needs that said rather than
+assumed: the square-root ladder is `jit`-ed (see `secp.sqrt`), so a placed
+`lift` pays a compile the first time a process meets a batch shape. It does
+not appear below — every batch size here is warmed before it is timed, which
+puts that cost outside every number in the table. The point operations are
+not `jit`-ed: each is a single fused op, for which compiling measured no
+better than running it eagerly. There is no traced *section* either, but that
+is no longer the same as saying nothing traces — a batch at or above
 `secp.DEVICE_MIN_BATCH` is placed on the device by the schemes, so both the
 `mult` and the `lift` buckets of every secp lane are a device cost at the
 larger batch sizes and a host cost below it. The split is therefore visible
@@ -69,9 +73,9 @@ steady state. That makes it blind by construction to any change that moves
 cost to the *first* call at a shape — a compile, a lazily built table, a
 device probe. Such a change reads here as a pure win, and the larger the
 first-call cost the cleaner the win looks. A change that could have one is
-measured by timing the first call separately, not by reading this table:
-`jit`-ing the square-root ladder cut its steady state by 6.5x while adding
-~1.9 s of compile per batch shape, none of which would have appeared below.
+measured by timing the first call separately, not by reading this table: the
+square-root ladder's `jit` cuts its steady state by ~19x while adding
+~1.5-2.6 s of compile per batch shape, none of which appears below.
 
 Each scheme's independent and aggregate forms sit in separate lanes so their
 per-signature costs read against each other directly — and for both schemes
