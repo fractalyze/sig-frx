@@ -99,6 +99,21 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# Both substrates reach `group.pow_const`, so it is held against the
+# bit-at-a-time definition on both curves' exponents rather than per scheme.
+py_test(
+    name = "group_test",
+    size = "small",
+    srcs = ["group_test.py"],
+    deps = [
+        "//sig_frx/classical:edwards",
+        "//sig_frx/classical:group",
+        "//sig_frx/classical:secp",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 # The Wycheproof loading and the encoding-boundary split, shared by the
 # per-PR slice and the scheduled sweep so the two cannot disagree about what
 # "runnable" means.
