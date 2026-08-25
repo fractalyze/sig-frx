@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest, parameterized
+from frx import Array
 
 from sig_frx.classical import edwards, group, secp
 
@@ -92,6 +94,28 @@ class PowConstTest(parameterized.TestCase):
         squares = np.array([1, 4, 9, 16, 25, 36], dtype=curve.field)
         root = secp.sqrt(curve, squares)
         self.assertTrue(bool(np.all(root * root == squares)))
+
+    @parameterized.named_parameters(
+        (name, curve, exponent) for name, curve, exponent in _CURVES
+    )
+    def test_the_ladder_follows_a_traced_base(self, curve: Any, exponent: int) -> None:
+        """`pow_const` is handed device arrays now, so it is tested with them.
+
+        `secp.lift_x_to_parity` places its coordinate batch before calling
+        `sqrt`, so above that threshold this ladder runs traced. Covering it
+        only through the lift would leave the component's own contract
+        untested and localize a failure one layer too high — and the batch
+        sizes where it happens are ones no known-answer test reaches.
+
+        The result must also stay traced: a helper here that read a value
+        back would still produce the right numbers while silently costing
+        its caller the device.
+        """
+        base = fnp.asarray(_sample_batch(curve))
+        got = group.pow_const(curve, base, exponent)
+        self.assertIsInstance(got, Array)
+        want = _binary_pow(curve, _sample_batch(curve), exponent)
+        self.assertTrue(bool(np.all(np.asarray(got) == want)))
 
     def test_negative_exponent_is_refused(self) -> None:
         # The helper has no inverse in it; a negative exponent would otherwise

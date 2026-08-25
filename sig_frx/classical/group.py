@@ -10,9 +10,14 @@ big-endian and compares its bounds as host integers) but which are written
 against neither curve. The group law itself lives in the curated zk_dtypes
 point types (fractalyze/sig-frx#139 for the Weierstrass family, #36 for the
 Edwards one), so nothing here walks scalar bits or selects points anymore.
-Nothing here dispatches on a namespace either — these are host helpers over
-the values their callers have already placed, and the one place the choice is
-live is `secp.py`'s ufunc seam, which reads it off its own arguments.
+Nothing here dispatches on a namespace either — these are operator-generic
+over the values their callers have already placed, so each follows whichever
+namespace it is handed. `pow_const` is the one that now sees both: `secp.py`'s
+lift places its coordinate batch before calling `sqrt`, so the ladder runs
+traced above that threshold and on the host below it. Keep it that way — a
+helper here that reached for numpy directly, or read a value back, would
+break the placed path only at the batch sizes the known-answer tests never
+reach.
 
 The last two are the aggregate verifiers' shared parts. BIP-340 and ZIP-215
 specify unrelated schemes over unrelated curves, and both check a batch the

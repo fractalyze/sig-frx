@@ -60,17 +60,26 @@ there. The lift onto the device is the one that needs a rule, because it succeed
 everywhere except on the path that cannot afford it — and pays a dispatch per
 operation to batch a signature with itself even where it works.
 
-**The one callee that lifts anyway, and what it had to show.**
+**The callees that lift anyway, and what they had to show.**
 [`secp.py`](../../sig_frx/classical/secp.py)'s `multiple` and `double_multiple`
-place their point batch themselves, on a batch-size threshold. It is the only
-exception in the repo and it is allowed because the hazard above cannot reach
-it: the rule protects a *signing* path from being dragged onto a 32-bit
-integer lane, a point dtype has no integer lane, and the only signing caller
-of those seams arrives at `B = 1`, which is below any threshold and so never
-moves. What it buys is that the decision exists once rather than at each of
-the five places a verification batch is born, where a sixth that forgot would
-be silently slow. An exception wants that shape of argument — why the hazard
-is absent, and what the duplication would have cost — not just a measurement.
+place their point batch themselves, on a batch-size threshold, and
+`lift_x_to_parity` places the square root's coordinate batch on the same one.
+They are the only exceptions in the repo and they are allowed because the
+hazard above cannot reach them: the rule protects a *signing* path from being
+dragged onto a 32-bit integer lane, neither a point dtype nor a base-field
+dtype has an integer lane, and every signing caller of those seams arrives at
+`B = 1`, which is below any threshold and so never moves. What it buys is that
+the decision exists once rather than at each of the five places a verification
+batch is born, where a sixth that forgot would be silently slow. An exception
+wants that shape of argument — why the hazard is absent, and what the
+duplication would have cost — not just a measurement.
+
+Three seams, one exception: they share a single placement function, so the
+threshold cannot drift between them and the argument above is made once rather
+than three times. That module's docstring is where the details live — how the
+threshold was measured, and why the seams must not assume the device admits
+every dtype a curve is built from. Growing the exception means adding a caller
+to that function, not writing a second one.
 
 **An operation with a host implementation picks it the same way.** A lift needs a
 reason, and "the callee only has a device form" is the reason `arith.ntt` lifts:

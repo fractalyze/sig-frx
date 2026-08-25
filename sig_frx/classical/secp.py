@@ -18,41 +18,59 @@ is exactly what the dtypes do not expose:
   every recovery id, compressed key, and x-only key performs;
 - the byte/int ↔ point codecs the wire encodings need.
 
-## The two seams that place, and why they are the exception
+## The three seams that place, and why they are the exception
 
 `multiple` and `double_multiple` put their point batch on the device when it
-is large enough to pay for the trip, and keep it on the host when it is not.
-Everything else here follows the namespace its arguments arrive in, and a
-batch that arrives already traced is left where the caller put it.
+is large enough to pay for the trip, and `lift_x_to_parity` does the same
+with the square root's coordinate batch. Everything else here follows the
+namespace its arguments arrive in, and a batch that arrives already traced is
+left where the caller put it.
 
 That is a documented exception to "a value is used in the namespace it
 arrives in" (`docs/reference/conventions.md`), so it needs its reason stated
 rather than assumed. The rule exists to stop a callee dragging a *signing*
 path onto the device, where an integer array lane is 32 bits and a host
-Python integer has no width. Neither half of that hazard reaches here: a
-point dtype carries no integer lane, and the only signing caller of these
-seams is `host_multiple_of_g`, at `B = 1` — below any threshold, so it never
-moves.
+Python integer has no width. Neither half of that hazard reaches any of the
+three: what they place is a point dtype or a base-field dtype, neither of
+which carries an integer lane, and the signing callers arrive at `B = 1` —
+`host_multiple_of_g` at the point seams, FROST's `deserialize_element` at the
+lift — which is below any threshold, so they never move.
 
 What the exception buys is that the decision exists once. Every verification
 batch in this repo is born in one of five places and consumed by one of these
-two seams; asking each birthplace to remember would be one decision written
-five times, and a sixth that forgets would be silently slow rather than
-wrong. It is worth deciding: measured on an RTX 5090 with full-size scalars,
-the device form of `multiple` runs 7.3x the host at B=256 and 105x at B=4096,
-where it still costs the same ~5 ms it does at B=64.
+seams; asking each birthplace to remember would be one decision written five
+times, and a sixth that forgets would be silently slow rather than wrong.
+That is why `_place` is one function all three call: one round trip, one
+number, and — because it reads the admission probe off the dtype it is handed
+rather than taking it as an argument — no way to pair a batch with the wrong
+question. That last part matters here: frx's rows are per dtype, so at the
+pinned wheel P-256's field is admitted while its points are not, and a seam
+that asked the point question on the square root's behalf would strand it on
+the host over a gap in a type it never touches. It is worth deciding:
+measured on an RTX 5090 with full-size scalars, the device form of `multiple`
+runs 7.3x the host at B=256 and 105x at B=4096, where it still costs the same
+~5 ms it does at B=64.
 
 Everything that turns a point into integers is host by nature and stays there —
-`affine_ints`, `uncompressed_rows`, `lift_x_to_parity`, `on_curve`,
-`secret_scalar` — because the standards define those on integers and Python
-has no width. `is_identity` is the one exception on the wrong side of that
-line, and its docstring carries the reason (fractalyze/xla#594).
+`affine_ints`, `uncompressed_rows`, `on_curve`, `secret_scalar` — because the
+standards define those on integers and Python has no width, which is why
+`lift_x_to_parity` places its ladder and not its readback. `is_identity` is
+the one exception on the wrong side of that line, and its docstring carries
+the reason (fractalyze/xla#594).
 
-There is no `jit` here and none would help: each of these is a single fused
-op, so compiling one measured identical to running it eagerly while adding a
-compile per batch shape. The GPU story for these curves remains EC kernels
-over these same dtypes (fractalyze/sig-frx#139), not a traced re-derivation of
-the group law.
+There is no `jit` here, and for the point seams none would help: each is a
+single fused op, so compiling one measured identical to running it eagerly
+while adding a compile per batch shape. The square root is the one place that
+claim does not reach — it is ~325 chained multiplications rather than one op,
+so it is launch-bound and a compile does fuse it. It is still not taken, on
+the measurement rather than the principle: on an RTX 5090 at B=1024, jitting
+the ladder cut the placed `lift` call from ~5.5 ms to ~0.85 ms but raised the
+first call at each batch shape from ~0.1 s to ~1.95 s, which needs about 390
+batches at one shape before it is ahead. It becomes worth revisiting behind a
+compile cache that outlives the process, not before.
+
+The GPU story for these curves remains EC kernels over these same dtypes
+(fractalyze/sig-frx#139), not a traced re-derivation of the group law.
 
 ## Three dtype gotchas the codecs absorb
 
@@ -173,25 +191,19 @@ class Curve:
 
     @functools.cached_property
     def traceable(self) -> bool:
-        """Whether a traced array can hold this curve's points at all.
+        """Whether a traced array can hold this curve's points at all."""
+        return _admits(self.point)
 
-        A point type needs a row in frx's admission table, and secp256r1 has
-        none at the pinned wheel while secp256k1 does. Probed rather than
-        listed: a list would be a second place to update and would go stale
-        silently the moment the rows land, where this starts answering `True`
-        on its own.
+    @functools.cached_property
+    def field_traceable(self) -> bool:
+        """Whether a traced array can hold this curve's base-field elements.
 
-        Any failure answers `False`, not only the `TypeError` seen today. The
-        fallback is the host path, which is always correct, so a probe that
-        guesses wrong costs speed — while one that let a new exception type
-        through would restore the crash this exists to stop, at the batch
-        sizes no gate covers.
+        A different question from `traceable`, because the admission table is
+        keyed on the dtype: at the pinned wheel `secp256r1_bf_mont` has a row
+        while `secp256r1_g1_affine_mont` has none. The lift asks this one, and
+        `_place` asks it for itself off whatever dtype it is handed.
         """
-        try:
-            fnp.asarray(self.generator)
-        except Exception:  # noqa: BLE001 — see above; the fallback is correct.
-            return False
-        return True
+        return _admits(self.field)
 
 
 # SEC 2 §2.4.1, "Recommended Parameters secp256k1". The Koblitz curve.
@@ -212,21 +224,45 @@ SECP256R1 = Curve(
 )
 
 
-# Where a verification batch stops being cheaper on the host — see `place`
+# Where a verification batch stops being cheaper on the host — see `_place`
 # for the measurement and why one number covers both backends.
 DEVICE_MIN_BATCH = 64
 
 
-def _place(curve: Curve, points: ArrayLike) -> Any:
-    """A batch of points moved off the host once the batch pays for it.
+@functools.cache
+def _admits(dtype: Any) -> bool:
+    """Whether frx's admission table has a row for `dtype`.
 
-    This is the one place in the repo where a callee lifts its caller's value,
-    against the rule in `docs/reference/conventions.md`, and the module
-    docstring's "the two seams that place" section is where that exception is
-    argued. The short form: the rule exists to stop a signing path being
-    dragged onto a 32-bit integer lane, and neither half of that can happen
-    here — a point dtype has no integer lane, and the only signing caller
-    reaches these seams at `B = 1`, below any threshold.
+    Keyed on the dtype because that is what the table is keyed on: a curve's
+    points and its base field are admitted independently, and at the pinned
+    wheel P-256 has a row for the second and none for the first. Probed rather
+    than listed — a list would be a second place to update and would go stale
+    silently the moment a row lands, where this starts answering `True` on its
+    own.
+
+    Any failure answers `False`, not only the `TypeError` seen today. The
+    fallback is the host path, which is always correct, so a probe that
+    guesses wrong costs speed — while one that let a new exception type
+    through would restore the crash this exists to stop, at the batch sizes no
+    gate covers.
+    """
+    try:
+        fnp.asarray(np.zeros(1, dtype=dtype))
+    except Exception:  # noqa: BLE001 — see above; the fallback is correct.
+        return False
+    return True
+
+
+def _place(values: ArrayLike) -> Any:
+    """A batch moved off the host once it is large enough to pay for the trip.
+
+    The repo's only exception to the rule in
+    `docs/reference/conventions.md` that a callee does not lift its caller's
+    value, and the module docstring's "the three seams that place" section is
+    where that is argued. The short form: the rule exists to stop a signing
+    path being dragged onto a 32-bit integer lane, neither a point dtype nor a
+    field dtype has one, and every signing caller arrives at `B = 1`, below any
+    threshold.
 
     The decision is a batch-size threshold because the cost it is trading
     against is a fixed one. Measured on an RTX 5090 with full-size scalars,
@@ -235,22 +271,27 @@ def _place(curve: Curve, points: ArrayLike) -> Any:
     (0.12 ms against 3.2 ms) and wins from roughly a batch of 64 up — 1.7x
     there, 26x at 1 024. The CPU backend has no such floor and is ahead from a
     batch of 2, so one threshold picked for CUDA is safe for both: below it
-    nothing moves and nothing regresses, above it both backends gain.
+    nothing moves and nothing regresses, above it both backends gain. One
+    number covers all three seams because two that drifted apart would be two
+    answers to one question, not because the crossovers are identical.
 
-    A curve whose points a traced array cannot hold stays on the host at every
-    size. That is not a tuning decision: lifting secp256r1 raises rather than
+    A dtype a traced array cannot hold stays on the host at every size. That is
+    not a tuning decision: lifting secp256r1's *points* raises rather than
     running slowly, so a batch of P-256 signatures large enough to cross the
     threshold would fail outright — which the KAT gate cannot see, because its
-    batches are smaller than that.
+    batches are smaller than that. The probe is read off the values rather than
+    passed in, so a seam cannot pair a batch with the wrong question, and it is
+    consulted only after the threshold check — a signing path at `B = 1` must
+    not pay a device round trip to be told it is staying home.
 
-    A batch that is already traced is left alone, which is what lets the two
-    seams both call this: `double_multiple` places once and the `multiple`
-    calls under it then see a decision already made.
+    A batch that is already traced is left alone, which is what lets the seams
+    nest: `double_multiple` places once and the `multiple` calls under it then
+    see a decision already made.
     """
-    if traced(points):
-        return points
-    host = np.asarray(points)
-    if host.shape[0] < DEVICE_MIN_BATCH or not curve.traceable:
+    if traced(values):
+        return values
+    host = np.asarray(values)
+    if host.shape[0] < DEVICE_MIN_BATCH or not _admits(host.dtype):
         return host
     return fnp.asarray(host)
 
@@ -272,7 +313,7 @@ def multiple(curve: Curve, scalars: list[int], points: ArrayLike) -> np.ndarray:
     that follows it is host work either way, and moving that is what
     `affine_ints` is waiting on.
     """
-    points = _place(curve, points)
+    points = _place(points)
     xnp = namespace(points)
     reduced = xnp.asarray(np.array([k % curve.n for k in scalars], dtype=curve.scalar))
     return points * reduced
@@ -300,7 +341,7 @@ def double_multiple(
     its own: deciding once for the batch and lifting `G` to wherever it landed
     is what keeps the two terms in the same namespace.
     """
-    points = _place(curve, points)
+    points = _place(points)
     xnp = namespace(points)
     return multiple(curve, g_scalars, xnp.asarray(curve.generator)) + multiple(
         curve, point_scalars, points
@@ -456,8 +497,16 @@ def lift_x_to_parity(
     point the row carries junk coordinates the caller's mask drops; `xs`
     arrive as integers already reduced below `p` (the callers' encodings
     check that bound where the byte order still exists).
+
+    The square root is placed on the same threshold the point seams use — it
+    is the third seam that lifts, and the module docstring argues why. Only
+    the ladder moves: the parity choice needs a residue's low bit and the
+    point construction is per entry, both host by nature, so the coordinates
+    come back either way. `_place` sees a field batch here and asks the field
+    question, which is what keeps P-256 — whose points a traced array cannot
+    hold, but whose field it can — on the device path anyway.
     """
-    x_field = np.array(xs, dtype=curve.field)
+    x_field = _place(np.array(xs, dtype=curve.field))
     rhs = _weierstrass_rhs(curve, x_field)
     root = sqrt(curve, rhs)
     ok = np.asarray(root * root == rhs)

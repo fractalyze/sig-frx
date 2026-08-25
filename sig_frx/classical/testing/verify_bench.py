@@ -36,12 +36,22 @@ There is no compile column, because nothing here is `jit`-ed: the point
 operations are single fused ops, for which compiling measured no better than
 running them eagerly. There is no traced *section* either, but that is no
 longer the same as saying nothing traces — a batch at or above
-`secp.DEVICE_MIN_BATCH` is placed on the device by the schemes, so the
-`mult` bucket of every secp lane is a device cost at the larger batch sizes
-and a host cost below it. The split is therefore visible in the numbers
-rather than in the columns: watch `mult`'s share collapse as `B` crosses the
-threshold. What stays host at every size is the per-row codec and the
-readback, which is why those buckets are the ones that now dominate.
+`secp.DEVICE_MIN_BATCH` is placed on the device by the schemes, so both the
+`mult` and the `lift` buckets of every secp lane are a device cost at the
+larger batch sizes and a host cost below it. The split is therefore visible
+in the numbers rather than in the columns: watch each share collapse as `B`
+crosses the threshold. What stays host at every size is the per-row codec and
+the readback, which is why those buckets are the ones that now dominate —
+`readback` first in all three secp lanes.
+
+Every batch size is run once before it is timed, so what this reports is
+steady state. That makes it blind by construction to any change that moves
+cost to the *first* call at a shape — a compile, a lazily built table, a
+device probe. Such a change reads here as a pure win, and the larger the
+first-call cost the cleaner the win looks. A change that could have one is
+measured by timing the first call separately, not by reading this table:
+`jit`-ing the square-root ladder cut its steady state by 6.5x while adding
+~1.9 s of compile per batch shape, none of which would have appeared below.
 
 Each scheme's independent and aggregate forms sit in separate lanes so their
 per-signature costs read against each other directly — and for both schemes
