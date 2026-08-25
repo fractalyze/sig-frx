@@ -250,10 +250,14 @@ def _digest(live: Sequence[Any]) -> Any:
 
     A rung has to return something that depends on all of its work or XLA
     deletes it, and it has to return something *small* or the timing is a
-    transfer. A sum per live array is both. It is not free — a reduction over
-    `[slen]` is real work on either leg — but `stream` is live in every rung
-    from `bits` down, so that cost is common to all of them and cancels in the
-    differences the table is actually about.
+    transfer. A sum per live array is both.
+
+    It is not free — a reduction over `[slen]` is real work on either leg — but
+    `stream` is live from `bits` through `locate`, so that cost is common to
+    those and cancels in the differences the table is about. It does **not**
+    cancel at `tail`, the one rung that consumes `stream` rather than carrying
+    it: that marginal is understated by a reduction, and is the rung to trust
+    least.
     """
     total = None
     for value in live:
