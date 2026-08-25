@@ -40,12 +40,15 @@ is where the checksum used to be.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import dataclass
+
 import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hash import adrs_encoding, wots
+from sig_frx.hash import adrs_encoding, bytestring, wots
 from sig_frx.hash.shrincs import adrs as sf_adrs
 from sig_frx.hash.tweakable import TweakableHash, repeat_per_entry
 
@@ -98,10 +101,9 @@ def map_digest(
     digests = fnp.asarray(message_digests, dtype=fnp.uint8)
     counter_bytes = fnp.asarray(counters, dtype=fnp.uint8)
     batch = digests.shape[0]
-    grind = sf_adrs.encode_batch(sf_adrs.wots_c_grind(node_heights, node_indices))
     hashed = tweak.t(
         pk_seed,
-        grind[:, : sf_adrs.GRIND_TWEAK_BYTES],
+        sf_adrs.grind_tweak(node_heights, node_indices),
         fnp.concatenate(
             [
                 digests,
@@ -145,7 +147,7 @@ def pk_from_sig(
             f"a WOTS+C signature batch is [B, {SIGNATURE_SIZE}], got shape "
             f"{tuple(parts.shape)}"
         )
-    batch = parts.shape[0]
+    chains = _chains(node_heights, node_indices)
     indexes, accepted = map_digest(
         tweak,
         pk_seed,
@@ -157,7 +159,7 @@ def pk_from_sig(
 
     # Chain-major within each entry, which is the layout `wots.chain` walks and
     # the order the tips are concatenated back in.
-    tips = parts[:, COUNTER_BYTES:].reshape(batch * CHAIN_COUNT, _N)
+    tips = parts[:, COUNTER_BYTES:].reshape(chains.count * CHAIN_COUNT, _N)
     starts = indexes.reshape(-1)
     ends = wots.chain(
         tweak,
@@ -167,14 +169,44 @@ def pk_from_sig(
         tips,
         starts,
         _MAX_INDEX - starts,
-        _chain_addresses(node_heights, node_indices, batch),
+        _chain_addresses(chains),
     )
-    return _compress(tweak, pk_seed, ends, node_heights, node_indices, batch), accepted
+    return _compress(tweak, pk_seed, ends, node_heights, node_indices), accepted
 
 
-def _chain_addresses(
-    node_heights: ArrayLike, node_indices: ArrayLike, batch: int
-) -> list[np.ndarray | Array]:
+@dataclass(frozen=True)
+class _Chains:
+    """A batch of leaves widened to the chains they own, chain-major.
+
+    Leaf 0's `CHAIN_COUNT` chains, then leaf 1's — the layout `wots.chain` walks
+    and the order a signature's tips are concatenated in. The three columns are
+    held together because they are always built together and always have to agree
+    about the row count, which `_compress` reshapes on and nothing else was
+    checking. `wots.WotsPosition` is the sibling module's version of the same
+    idea.
+
+    Built once per call and passed down: `repeat_rows` materializes a copy, so a
+    tree of 2^16 leaves that derives these twice pays 67 MB for the second one.
+    """
+
+    heights: adrs_encoding.Field
+    indices: adrs_encoding.Field
+    chains: np.ndarray
+    count: int
+
+
+def _chains(node_heights: ArrayLike, node_indices: ArrayLike) -> _Chains:
+    """The chain-major columns for a batch of leaves at these positions."""
+    count = int(np.shape(node_indices)[0])
+    return _Chains(
+        heights=adrs_encoding.repeat_rows(node_heights, CHAIN_COUNT),
+        indices=adrs_encoding.repeat_rows(node_indices, CHAIN_COUNT),
+        chains=np.tile(np.arange(CHAIN_COUNT, dtype=np.uint32), count),
+        count=count,
+    )
+
+
+def _chain_addresses(chains: _Chains) -> Iterator[np.ndarray | Array]:
     """Every chain's address at every step, chain-major within each entry.
 
     Encoded once at step zero and spliced per step: only the hash index moves, and
@@ -184,16 +216,15 @@ def _chain_addresses(
     Shared by the two directions rather than written twice: a signer walks the
     chains from zero and a verifier from the message's indexes, and the addresses
     those walks tweak with are the same batch.
+
+    Yielded rather than listed. `wots.chain` reads them once, forward, and each is
+    a full `[count · 32, 22]` copy — building all fifteen up front holds 692 MB at
+    a balanced depth of 16 where two of them suffice.
     """
     at_first_step = sf_adrs.encode_batch(
-        sf_adrs.wots_c_hash(
-            adrs_encoding.repeat_rows(node_heights, CHAIN_COUNT),
-            adrs_encoding.repeat_rows(node_indices, CHAIN_COUNT),
-            np.tile(np.arange(CHAIN_COUNT, dtype=np.uint32), batch),
-            0,
-        )
+        sf_adrs.wots_c_hash(chains.heights, chains.indices, chains.chains, 0)
     )
-    return [sf_adrs.with_hash_index(at_first_step, step) for step in range(_MAX_INDEX)]
+    return (sf_adrs.with_hash_index(at_first_step, step) for step in range(_MAX_INDEX))
 
 
 def _compress(
@@ -202,7 +233,6 @@ def _compress(
     ends: Array,
     node_heights: ArrayLike,
     node_indices: ArrayLike,
-    batch: int,
 ) -> Array:
     """`T_sf` over each entry's chain ends — the FXMSS leaf they make. `[B, 16]`.
 
@@ -213,7 +243,7 @@ def _compress(
     return tweak.t(
         pk_seed,
         sf_adrs.encode_batch(sf_adrs.wots_c_pk(node_heights, node_indices)),
-        ends.reshape(batch, CHAINS_SIZE),
+        ends.reshape(int(np.shape(node_indices)[0]), CHAINS_SIZE),
     )
 
 
@@ -225,32 +255,26 @@ def secret_values(
     pk_seed: ArrayLike,
     sk_seed: ArrayLike,
     sf_structure: ArrayLike,
-    node_heights: ArrayLike,
-    node_indices: ArrayLike,
+    chains: _Chains,
 ) -> Array:
     """Each leaf's `CHAIN_COUNT` chain starting points — `[B · 32, 16]`.
 
-    Chain-major within each entry, the layout `_chain_addresses` builds and
-    `wots.chain` walks. `sf_structure` is the tree's two structure bytes, which
-    ride in the address for the reason `adrs.wots_c_prf` gives and are placed in
-    their word by that builder.
+    Chain-major within each entry, which is what `chains` already lays out and
+    what `wots.chain` walks. `sf_structure` is the tree's two structure bytes,
+    which ride in the address for the reason `adrs.wots_c_prf` gives and are
+    placed in their word by that builder.
 
     `pk_seed` is `[n]` when one key owns the whole batch — which is what key
     generation is — or `[B, n]` when it does not, the same rule `pk_from_sig`
     follows. `sk_seed` is always one key's.
     """
-    indices = fnp.asarray(node_indices, dtype=fnp.uint8)
-    batch = indices.shape[0]
     return tweak.prf(
         # One leaf is `CHAIN_COUNT` chains, the same widening `pk_from_sig` does.
         repeat_per_entry(pk_seed, CHAIN_COUNT),
         sk_seed,
         sf_adrs.encode_batch(
             sf_adrs.wots_c_prf(
-                adrs_encoding.repeat_rows(node_heights, CHAIN_COUNT),
-                adrs_encoding.repeat_rows(indices, CHAIN_COUNT),
-                sf_structure,
-                np.tile(np.arange(CHAIN_COUNT, dtype=np.uint32), batch),
+                chains.heights, chains.indices, sf_structure, chains.chains
             )
         ),
     )
@@ -271,17 +295,17 @@ def public_key(
     `2^d` leaves rather than `2^d` calls.
     """
     indices = fnp.asarray(node_indices, dtype=fnp.uint8)
-    batch = indices.shape[0]
-    rows = batch * CHAIN_COUNT
+    chains = _chains(node_heights, indices)
+    rows = chains.count * CHAIN_COUNT
     ends = wots.chain(
         tweak,
         repeat_per_entry(pk_seed, CHAIN_COUNT),
-        secret_values(tweak, pk_seed, sk_seed, sf_structure, node_heights, indices),
+        secret_values(tweak, pk_seed, sk_seed, sf_structure, chains),
         fnp.zeros(rows, dtype=fnp.uint32),
         fnp.full(rows, _MAX_INDEX, dtype=fnp.uint32),
-        _chain_addresses(node_heights, indices, batch),
+        _chain_addresses(chains),
     )
-    return _compress(tweak, pk_seed, ends, node_heights, indices, batch)
+    return _compress(tweak, pk_seed, ends, node_heights, indices)
 
 
 def grind(
@@ -314,7 +338,7 @@ def grind(
             tweak,
             pk_seed,
             digests,
-            _counter_bytes(np.arange(base, base + _GRIND_BLOCK)),
+            bytestring.big_endian(np.arange(base, base + _GRIND_BLOCK), COUNTER_BYTES),
             heights,
             indices,
         )
@@ -347,36 +371,20 @@ def sign(
     index = fnp.asarray(node_index, dtype=fnp.uint8).reshape(1, -1)
     heights = fnp.asarray(node_height, dtype=fnp.uint32).reshape(1)
     counter, indexes = grind(tweak, pk_seed, message_digest, heights, index)
+    chains = _chains(heights, index)
     ends = wots.chain(
         tweak,
         pk_seed,
-        secret_values(tweak, pk_seed, sk_seed, sf_structure, heights, index),
+        secret_values(tweak, pk_seed, sk_seed, sf_structure, chains),
         fnp.zeros(CHAIN_COUNT, dtype=fnp.uint32),
         indexes,
-        _chain_addresses(heights, index, 1),
+        _chain_addresses(chains),
     )
     return fnp.concatenate(
         [
-            fnp.asarray(_counter_bytes([counter])[0], dtype=fnp.uint8),
+            fnp.asarray(
+                bytestring.big_endian([counter], COUNTER_BYTES)[0], dtype=fnp.uint8
+            ),
             ends.reshape(CHAINS_SIZE),
         ]
-    )
-
-
-def _counter_bytes(counters: ArrayLike) -> np.ndarray:
-    """Counters as `[rows, COUNTER_BYTES]` big-endian.
-
-    One place, because a counter is a number while the grind enumerates it and
-    bytes from the moment it reaches a hash — and they are the same bytes the
-    signature carries. Reinterpreted rather than shifted apart, which is what
-    `adrs_encoding` does to an address field for the same reason.
-
-    Host-only and unbounded on purpose: every counter here comes from below
-    `_GRIND_LIMIT`, which is what the width holds by construction.
-    """
-    return (
-        np.asarray(counters)
-        .astype(f">u{COUNTER_BYTES}")
-        .view(np.uint8)
-        .reshape(-1, COUNTER_BYTES)
     )

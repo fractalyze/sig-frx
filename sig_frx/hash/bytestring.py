@@ -58,6 +58,26 @@ def index_column(values: ArrayLike) -> ByteString:
     return xnp.asarray(values, dtype=xnp.uint32).reshape(-1)
 
 
+def big_endian(values: ArrayLike, width: int) -> np.ndarray:
+    """Numbers as `[rows, width]` big-endian bytes — the way into a `ByteString`.
+
+    The counterpart of the readers below, which all take one and none of which
+    make one. Two callers wanted the same reinterpret at different widths: an
+    FXMSS node index at eight bytes, a WOTS+C grinding counter at two.
+
+    Reinterpreted rather than shifted apart, which is what `adrs_encoding` does to
+    an address field and for the same reason: shifting each byte out costs a
+    multiply per element, and these are built a whole batch at a time.
+
+    Host-only. A value that does not fit `width` wraps rather than raising, so a
+    caller passes one it has already bounded — both of this module's do, by the
+    format that gave them the width.
+    """
+    if width not in (1, 2, 4, 8):
+        raise ValueError(f"a big-endian width is 1, 2, 4 or 8 bytes, got {width}")
+    return np.asarray(values).astype(f">u{width}").view(np.uint8).reshape(-1, width)
+
+
 def is_bytes(value: int | ByteString) -> bool:
     """Whether this value is a byte string rather than a number.
 

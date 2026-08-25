@@ -163,8 +163,7 @@ def pk_from_sig(
     count = position.count
     if parts.ndim != 3 or parts.shape[0] != count:
         raise ValueError(
-            f"one signature per tree: got shape {tuple(parts.shape)} for "
-            f"{count} trees"
+            f"one signature per tree: got shape {tuple(parts.shape)} for {count} trees"
         )
     indices = bytestring.index_column(leaf_indices)
     # The leaf index is which key pair of that tree signed, so it is the batch's

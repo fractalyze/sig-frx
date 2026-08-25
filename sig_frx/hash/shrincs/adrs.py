@@ -54,7 +54,7 @@ class StatefulAdrsType(enum.IntEnum):
 # the type — and not the twelve-byte payload behind them, which that function
 # leaves to its own message. Taken from the layout rather than restated, so that
 # a slot moving moves this with it.
-GRIND_TWEAK_BYTES = adrs.COMPRESSED_HEADER_SIZE
+_GRIND_TWEAK_BYTES = adrs.COMPRESSED_HEADER_SIZE
 
 
 def wots_c_hash(
@@ -122,6 +122,17 @@ def _left_aligned(value: adrs.Field) -> np.ndarray:
 def wots_c_grind(node_height: Field, node_index: Field) -> adrs.Adrs:
     """Mapping a message digest into the constant-sum space, under a counter."""
     return adrs.Adrs(node_height, node_index, StatefulAdrsType.WOTS_C_GRIND, (0, 0, 0))
+
+
+def grind_tweak(node_height: Field, node_index: Field) -> np.ndarray | Array:
+    """The bytes `H_grind` tweaks with — the header, without the payload behind it.
+
+    The whole rule in one place. `H_grind` is the one hash here that tweaks with
+    part of an address rather than all of it, and where the part ends is this
+    module's fact, so the slice is here rather than at the caller that would
+    otherwise have to be told the header's width.
+    """
+    return encode_batch(wots_c_grind(node_height, node_index))[:, :_GRIND_TWEAK_BYTES]
 
 
 def with_hash_index(encoded: np.ndarray | Array, step: int) -> np.ndarray | Array:

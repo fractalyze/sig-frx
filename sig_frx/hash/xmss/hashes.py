@@ -193,8 +193,7 @@ class Rfc8391Hashes:
         payloads = _batched(payload, batch)
         if payloads.shape[-1] != mask_words * self.n:
             raise ValueError(
-                f"this hash takes {mask_words * self.n} bytes, got "
-                f"{payloads.shape[-1]}"
+                f"this hash takes {mask_words * self.n} bytes, got {payloads.shape[-1]}"
             )
         key = self.prf(pub_seed, with_key_and_mask(addresses, 0))
         mask = fnp.concatenate(

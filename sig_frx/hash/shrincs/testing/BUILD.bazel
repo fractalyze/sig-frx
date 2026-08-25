@@ -78,6 +78,7 @@ py_test(
     deps = [
         ":stateful_vectors",
         "//sig_frx/hash:tweakable",
+        "//sig_frx/hash/shrincs",
         "//sig_frx/hash/shrincs:fxmss",
         "@hash_frx//hash_frx",
         requirement("absl_py"),

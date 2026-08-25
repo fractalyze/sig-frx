@@ -303,7 +303,7 @@ def root(
     leaves = _leaves(tweak, pk_seed, sk_seed, structure)
     if structure.shape == SHAPE_BALANCED:
         return tree.root(tweak, pk_seed, leaves, _node_addresses(structure.bottom))
-    return _spine(tweak, pk_seed, leaves, structure, structure.depth)[0]
+    return _spine(tweak, pk_seed, leaves, structure, structure.depth)
 
 
 def sign(
@@ -411,7 +411,7 @@ def _spine(
     structure: Structure,
     levels: int,
 ) -> Array:
-    """An unbalanced tree's left-hand node `levels` steps up. `[1, 16]`.
+    """An unbalanced tree's left-hand node `levels` steps up. `[16]`.
 
     The node at index zero and height `bottom + levels`: at zero steps it is the
     one left-hand leaf, and at `depth` steps it is the root. Each step combines the
@@ -432,7 +432,9 @@ def _spine(
             sf_adrs.encode_batch(sf_adrs.fxmss_tree(structure.bottom + step + 1, 0)),
             fnp.concatenate([node, leaves[1 + step : 2 + step]], axis=-1),
         )
-    return node
+    # A batch of one throughout, because that is what `tweak.h` takes; the caller
+    # wants the node, not a batch it has to unwrap.
+    return node[0]
 
 
 def _auth_path(
@@ -459,7 +461,7 @@ def _auth_path(
     rights = leaves[1:]
     row = leaf_height - structure.bottom
     below = (
-        _spine(tweak, pk_seed, leaves, structure, row)[0]
+        _spine(tweak, pk_seed, leaves, structure, row)
         if leaf_index == 1
         else rights[row]
     )
@@ -477,4 +479,4 @@ def index_bytes(values: np.ndarray) -> np.ndarray:
     crosses into an address as bytes rather than as a number, because the slot is
     eight bytes wide and an array lane is four (`../bytestring.py`).
     """
-    return values.astype(">u8").view(np.uint8).reshape(-1, INDEX_BYTES)
+    return bytestring.big_endian(values, INDEX_BYTES)

@@ -278,7 +278,9 @@ class Shrincs:
         )[0]
         return fnp.concatenate(
             [
-                fnp.asarray(np.array([leaf_height], dtype=np.uint8), dtype=fnp.uint8),
+                # The indicator byte is the leaf's height, which is already the
+                # first of the nine position bytes bound into the digest.
+                fnp.asarray(positions[:1], dtype=fnp.uint8),
                 random,
                 # The field is as many whole bytes as the leaf's depth needs, and
                 # a verifier derives that width back from the indicator byte.
@@ -580,11 +582,12 @@ def randomizer(
         ]
     )
     byte_hash = hashes.sha256(message)
-    block = block_size_of(byte_hash)
+    # The key is filled out to a whole block with `0xFF`, which is SHRINCS's own
+    # construction — `hmac` derives the same width for itself.
     key = fnp.concatenate(
         [
             fnp.asarray(sk_prf, dtype=fnp.uint8),
-            fnp.full(block - _N, 0xFF, dtype=fnp.uint8),
+            fnp.full(block_size_of(byte_hash) - _N, 0xFF, dtype=fnp.uint8),
         ]
     )
-    return tweakable.hmac(byte_hash, block, key, message)[:_N]
+    return tweakable.hmac(byte_hash, key, message)[:_N]

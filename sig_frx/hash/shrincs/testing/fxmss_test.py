@@ -21,7 +21,7 @@ import numpy as np
 from absl.testing import absltest
 from hash_frx import Sha256
 
-from sig_frx.hash.shrincs import fxmss
+from sig_frx.hash.shrincs import fxmss, shrincs
 from sig_frx.hash.shrincs.testing import stateful_vectors as vectors
 from sig_frx.hash.tweakable import Sha2TweakableHash
 
@@ -59,6 +59,26 @@ class ConstantTest(absltest.TestCase):
         self.assertEqual(fxmss.HEIGHT, 255)
         self.assertEqual(fxmss.SIGNATURE_SIZE_MIN, 530)
         self.assertEqual(fxmss.SIGNATURE_SIZE_MAX, 4594)
+
+    def test_the_batched_width_rule_agrees_with_the_host_one(self) -> None:
+        """`shrincs.index_field_widths` says it is pinned here. Now it is.
+
+        The same rule stated twice — once for a parser holding one concrete depth,
+        once for a batch of them — so the two have to agree at every depth a leaf
+        can sit at, not only at the ones the vectors happen to use.
+        """
+        heights = np.arange(fxmss.HEIGHT + 1, dtype=np.uint32)
+        widths, bits = shrincs.index_field_widths(heights)
+        self.assertEqual(
+            [int(w) for w in np.asarray(widths)],
+            [fxmss.index_field_bytes(fxmss.HEIGHT - int(h)) for h in heights],
+        )
+        # The companion column: the bits an index may carry at that depth, capped
+        # where the eight-byte field stops being able to hold more.
+        self.assertEqual(
+            [int(b) for b in np.asarray(bits)],
+            [min(fxmss.HEIGHT - int(h), 8 * fxmss.INDEX_BYTES) for h in heights],
+        )
 
     def test_the_index_field_widens_with_the_depth(self) -> None:
         # The widths the cases below actually exercise, plus the two boundaries:
