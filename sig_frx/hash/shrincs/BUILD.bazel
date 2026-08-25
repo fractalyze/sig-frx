@@ -1,0 +1,21 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# SHRINCS — a stateful hash-based signature with a stateless fallback, under one
+# public key. The stateless half is SLH-DSA at a parameter set FIPS 205 does not
+# publish, so it depends on `//sig_frx/hash/slhdsa` and adds a wrapper rather
+# than reimplementing anything.
+py_library(
+    name = "stateless",
+    srcs = [
+        "__init__.py",
+        "stateless.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash/slhdsa:slh_dsa",
+        "@hash_frx//hash_frx",
+        requirement("frx"),
+    ],
+)

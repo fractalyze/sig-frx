@@ -1,0 +1,35 @@
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+load("//:defs.bzl", "GPU_PLUGIN_DEPS")
+
+# SHRINCS publishes no vectors, so these are transcribed from the reference
+# implementation its specification names as normative, pinned to a commit. The
+# provenance is the module docstring; there is no file to fetch.
+py_library(
+    name = "vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "vectors.py",
+    ],
+)
+
+# `medium` on the executor rather than on this measurement. The CPU leg here is
+# 10.0 s — every verification shares one batch shape, so the suite pays one
+# compile of the verification program and not one per distinct `B` — and bazel
+# reports the size as oversized on that basis. It stays `medium` until CI says
+# otherwise: this package measures 2.1-2.7x slower on the executor and the GPU
+# leg is the one that compiles worst, which together put the worst run near
+# `small`'s 60 s. Sized from the slowest leg's worst run, per
+# ../../../../docs/reference/conventions.md.
+py_test(
+    name = "stateless_test",
+    size = "medium",
+    srcs = ["stateless_test.py"],
+    deps = [
+        ":vectors",
+        "//sig_frx/hash/shrincs:stateless",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
