@@ -9,9 +9,10 @@ byte-to-field sum, which only the Edwards encodings call today (SEC 1 is
 big-endian and compares its bounds as host integers) but which are written
 against neither curve. The group law itself lives in the curated zk_dtypes
 point types (fractalyze/sig-frx#139 for the Weierstrass family, #36 for the
-Edwards one), so nothing here walks scalar bits or selects points anymore —
-and with the traced path gone from both substrates, nothing here dispatches
-on a namespace either.
+Edwards one), so nothing here walks scalar bits or selects points anymore.
+Nothing here dispatches on a namespace either — these are host helpers over
+the values their callers have already placed, and the one place the choice is
+live is `secp.py`'s ufunc seam, which reads it off its own arguments.
 
 The last two are the aggregate verifiers' shared parts. BIP-340 and ZIP-215
 specify unrelated schemes over unrelated curves, and both check a batch the

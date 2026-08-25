@@ -39,7 +39,7 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx.byte_hash import ByteHash
+from hash_frx import ByteHash
 
 from sig_frx.hashbased import rfc8391_adrs
 from sig_frx.hashbased.rfc8391_params import CoreHash, XmssParams

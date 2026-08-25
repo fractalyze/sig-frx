@@ -52,8 +52,7 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx.keccak.byte_hashes import Shake256
-from hash_frx.sha256 import Sha256
+from hash_frx import Sha256, Shake256
 
 from sig_frx import context as ctx
 from sig_frx import prehash

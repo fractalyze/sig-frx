@@ -6,7 +6,10 @@ This page carries only what is specific to implementing signature schemes. The
 rules every FRX consumer shares — `@jit` placement, `for` vs `lax.scan` vs
 `vmap`, pytree registration mechanics, seam conformance pins, the `testing/`
 layout, the comment rules — are not repeated here. They are identical in every
-repo built on FRX, and a copy per repo is exactly how they drift apart.
+repo built on FRX, and a copy per repo is exactly how they drift apart; read
+them in
+[`zorch`'s page](https://github.com/fractalyze/zorch/blob/main/docs/reference/conventions.md),
+which states them in full.
 
 ## Batch verification is the compilation unit
 
@@ -57,6 +60,18 @@ there. The lift onto the device is the one that needs a rule, because it succeed
 everywhere except on the path that cannot afford it — and pays a dispatch per
 operation to batch a signature with itself even where it works.
 
+**The one callee that lifts anyway, and what it had to show.**
+[`secp.py`](../../sig_frx/classical/secp.py)'s `multiple` and `double_multiple`
+place their point batch themselves, on a batch-size threshold. It is the only
+exception in the repo and it is allowed because the hazard above cannot reach
+it: the rule protects a *signing* path from being dragged onto a 32-bit
+integer lane, a point dtype has no integer lane, and the only signing caller
+of those seams arrives at `B = 1`, which is below any threshold and so never
+moves. What it buys is that the decision exists once rather than at each of
+the five places a verification batch is born, where a sixth that forgot would
+be silently slow. An exception wants that shape of argument — why the hazard
+is absent, and what the duplication would have cost — not just a measurement.
+
 **An operation with a host implementation picks it the same way.** A lift needs a
 reason, and "the callee only has a device form" is the reason `arith.ntt` lifts:
 `frx.lax.ntt` has no host implementation, so there is nowhere else for a host
@@ -74,6 +89,18 @@ has no other form, and hashing it is a device hash; bringing it back to the host
 first is a decision about that value with its own cost, not this rule applied
 harder.
 
+## hash-frx is reached by its names, not by its file tree
+
+`from hash_frx import Sha256`, never `from hash_frx.sha256 import Sha256`, and
+the Bazel dep is the whole `@hash_frx//hash_frx` rather than a narrow label. The
+two are one decision, and hash-frx's
+[consuming page](https://github.com/fractalyze/hash-frx/blob/main/docs/reference/consuming.md)
+states why, along with what to do about a name its root does not export.
+
+The `hash-frx-root-import` and `hash-frx-whole-package-dep` hooks hold both
+halves, so this section is context for the rule rather than the thing enforcing
+it.
+
 ## A rejection loop is not a `while` on secret data
 
 "Sample until the candidate is in range" — ML-DSA's signing loop, Falcon's
@@ -84,15 +111,16 @@ scheme picks is a decision its page records, along with the timing consequence
 
 ## The lattice NTT is `frx.lax.ntt`, and the adaptations are the shared part
 
-ML-DSA's transform lives here; ML-KEM's lives in
-[`enc-frx`](https://github.com/fractalyze/enc-frx). Both are the same op, and
-what each repo writes around it is small, identical in shape, and different in
-constants — which is the part worth keeping aligned.
+ML-DSA's and Falcon's transforms live here; ML-KEM's lives in
+[`enc-frx`](https://github.com/fractalyze/enc-frx). All three are the same op,
+and what each scheme writes around it is small, identical in shape, and
+different in constants — which is the part worth keeping aligned.
 
-**Both schemes want the same transform, and `frx.lax.ntt` is it.** They multiply
-in the negacyclic ring `Z_q[X]/(X^n + 1)`, which is the op's `NEGACYCLIC_NTT`
-mode. They are not even different lengths in any deep sense: the 2-adicity of
-`q − 1` is 13 for ML-DSA and 8 for ML-KEM, and a length-`n` negacyclic transform
+**Every one of them wants the same transform, and `frx.lax.ntt` is it.** They
+multiply in the negacyclic ring `Z_q[X]/(X^n + 1)`, which is the op's
+`NEGACYCLIC_NTT` mode. They are not even different lengths in any deep sense:
+the 2-adicity of `q − 1` is 13 for ML-DSA, 8 for ML-KEM and 12 for Falcon, and a
+length-`n` negacyclic transform
 needs a primitive `2n`-th root — so ML-DSA gets length 256 directly, and ML-KEM
 gets length 128 applied to the even and odd coefficient halves, which is exactly
 what FIPS 203's "incomplete" NTT and its degree-1 base case `mod (X² − ζ)`
@@ -102,21 +130,42 @@ describe. Reframing, not a different algorithm.
 root from the runtime modulus rather than matching a curated family, so neither
 8380417 nor 3329 needs to be curated, and neither repo hand-walks the layers.
 
-**What the op does not decide, and each scheme therefore pins.** Two things,
-and both are constants rather than code:
+**What the op does not decide, and a scheme therefore pins — when it has to.**
+Two things, both constants rather than code:
 
 - *Which root.* The `generator` argument is a generator of the multiplicative
-  group, not the root: the op derives `g^((q−1)/2n)` itself. A standard names
-  the root — FIPS 204's `ζ = 1753`, FIPS 203's `ζ = 17` — so each scheme pins
-  that root's preimage under that map, and searches for it rather than
-  transcribing it, for the same reason the standards' tables are generated in
-  these repos and not copied. Left unpinned the op finds *a* primitive `2n`-th
-  root: a correct negacyclic transform against the wrong root, which round-trips
-  and convolves like the right one, so only the published vectors catch it.
-- *Which order.* The op returns natural order, `out[k] = w(ζ^(2k+1))`; both
-  standards index the same values by bit-reversal. The conversion is
+  group, not the root: the op derives `g^((q−1)/2n)` itself. A standard that
+  names a root — FIPS 204's `ζ = 1753`, FIPS 203's `ζ = 17` — has its preimage
+  under that map pinned, searched for rather than transcribed, for the same
+  reason the standards' tables are generated in these repos and not copied.
+- *Which order.* The op returns natural order, `out[k] = w(ζ^(2k+1))`; a
+  standard that indexes the same values by bit-reversal needs
   `lax.bit_reverse` on the transform axis and nothing else — it is an
   involution, so both directions use the same call.
+
+**Whether either pin is required is decided by one question: does any value in
+the transform domain leave the implementation?** Ask it of the scheme, not of
+the transform.
+
+| scheme | what observes the domain | pins |
+|---|---|---|
+| ML-DSA | `ExpandA` samples `Â` **directly from the seed**, so a public key commits to one root; `BitRev8` fixes the table order | root and order |
+| ML-KEM | the same shape, at `BitRev7` | root and order |
+| Falcon | nothing — the public key is a coefficient-domain `h`, the signature a compressed coefficient-domain `s`, and nothing is sampled in the domain | neither |
+
+Where the domain is observable, leaving the root unpinned gives *a* primitive
+`2n`-th root: a correct negacyclic transform against the wrong root, which
+round-trips and convolves like the right one, so only the published vectors
+catch it. Where it is not, every producer and consumer of a domain value sits
+inside one call and the root cancels — pinning would import a convention no
+standard states, and gating on a particular reference's intermediate values
+would pin the repo to that implementation's private choice, which
+[the byte-exactness rule](#known-answer-tests-are-the-gate) declines to do.
+
+The asymmetry is a property of the scheme and not of the code, so it is worth
+restating where it bites: a step that begins serializing, hashing or comparing a
+transform-domain value needs the pin back, and will not fail a round trip or a
+convolution check on the day it does.
 
 **The modulus widths are not a reason to write anything by hand, and they look
 enough like it to be worth disarming.** 8380417 is 23-bit and 3329 is 12-bit,
@@ -136,12 +185,22 @@ manipulation — FIPS 204's rounding functions, FIPS 203's compression. It is al
 why the transform takes `FIELD` and refuses a raw integer array: the op reads the
 algebra, not the bytes.
 
-The convention across the two repos is that they **look alike**: same module
+The convention across all of them is that they **look alike**: same module
 layout, the same names for the transform and its base multiplication (`ntt`,
-`intt`, `base_mul`), the same two pins above in the same shape. The cost being
-avoided is not duplicated lines — there are barely any left — but two
-adaptations that look unrelated, so a mistake understood in one is never looked
-for in the other.
+`intt`, `base_mul`), and the pins above written the same way — including a
+scheme that pins neither, which says so at the call site rather than differing
+by an absence. The cost being avoided is not duplicated lines — there are barely
+any left — but two adaptations that look unrelated, so a mistake understood in
+one is never looked for in the other. It applies inside this repo as much as
+across the two: `centered` is spelled identically in ML-DSA and Falcon so that
+diffing them shows one modulus and nothing else.
+
+What the aligned set deliberately stops short of is a composed `a · b`. A scheme
+whose caller reuses an operand across products — ML-DSA hoists `Â`, `ĉ` and the
+key polynomials — would pay a transform per call for it, and a scheme whose
+batch assembles by vmapping a one-signature body would compute the same
+transform once per batch row over identical data. Callers hoist and stay in the
+transform domain; `intt` is applied once at the end.
 
 There is no shared name for a reduction because neither file performs one — that
 is the field dtype's job, and a wrapper named for it would be a function that

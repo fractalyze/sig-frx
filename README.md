@@ -16,15 +16,31 @@ symmetric primitive it needs, and on **FRX** — Fractalyze's fork of
   embarrassingly parallel — a batch of `B` signatures verifies in one call, so the
   work maps onto a GPU's width rather than a Python loop.
 - **Standards-exact.** Every scheme reproduces its specification byte for byte
-  (SLH-DSA = FIPS 205, ML-DSA = FIPS 204, Falcon = the FN-DSA submission, XMSS =
-  RFC 8391), gated on the published known-answer tests.
+  (SLH-DSA = FIPS 205, ML-DSA = FIPS 204, XMSS / XMSS-MT = RFC 8391, ECDSA =
+  SEC 1 + RFC 6979, Ed25519 = RFC 8032, BIP-340, FROST = RFC 9591), gated on the
+  published known-answer tests.
 - **Chain-agnostic core, chain variants on top.** ECDSA and EdDSA cores name no
   blockchain; Ethereum and Bitcoin conventions (message hashing, recovery,
   low-`S`, encoding) ride as thin variants over the shared core.
 
 ## Status
 
-Bootstrapping. Work is tracked on the
+Constructible through `Signature` today:
+
+| family | schemes |
+|---|---|
+| Hash-based | SLH-DSA (FIPS 205), XMSS and XMSS-MT (RFC 8391) |
+| Lattice | ML-DSA (FIPS 204) |
+| Classical | ECDSA over secp256k1 and P-256, with the Ethereum and Bitcoin variants; BIP-340 Schnorr; Ed25519 |
+| Threshold | FROST (RFC 9591), Ed25519 and secp256k1 ciphersuites |
+
+**Falcon (FN-DSA) is planned, not shipped** — `sig_frx/lattice/` carries `mldsa`
+and nothing else. It is tracked by
+[#24](https://github.com/fractalyze/sig-frx/issues/24)–[#28](https://github.com/fractalyze/sig-frx/issues/28).
+A scheme is listed above only when a consumer can construct it, since that is
+what picking a scheme by construction means.
+
+Remaining work is tracked on the
 [issues](https://github.com/fractalyze/sig-frx/issues).
 
 ## Development

@@ -68,7 +68,7 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx.sha256 import Sha256
+from hash_frx import Sha256
 
 from sig_frx import context as context_rules
 from sig_frx.hashbased import rfc8391_adrs, rfc8391_wots, tree, wots

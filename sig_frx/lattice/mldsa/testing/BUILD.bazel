@@ -199,7 +199,7 @@ py_binary(
         "//sig_frx/lattice/mldsa:encoding",
         "//sig_frx/lattice/mldsa:ml_dsa",
         "//sig_frx/lattice/mldsa:sampling",
-        "@hash_frx//hash_frx/keccak",
+        "@hash_frx//hash_frx",
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),

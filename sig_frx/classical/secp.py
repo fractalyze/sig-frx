@@ -18,11 +18,41 @@ is exactly what the dtypes do not expose:
   every recovery id, compressed key, and x-only key performs;
 - the byte/int ↔ point codecs the wire encodings need.
 
-Everything here is host-path: coordinate readback and per-entry construction
-are host operations. The GPU story for these curves is EC kernels over these
-same dtypes (the decision is recorded on fractalyze/sig-frx#139), not a
-traced re-derivation of the group law — which is why no namespace dispatch
-appears anywhere in this module.
+## The two seams that place, and why they are the exception
+
+`multiple` and `double_multiple` put their point batch on the device when it
+is large enough to pay for the trip, and keep it on the host when it is not.
+Everything else here follows the namespace its arguments arrive in, and a
+batch that arrives already traced is left where the caller put it.
+
+That is a documented exception to "a value is used in the namespace it
+arrives in" (`docs/reference/conventions.md`), so it needs its reason stated
+rather than assumed. The rule exists to stop a callee dragging a *signing*
+path onto the device, where an integer array lane is 32 bits and a host
+Python integer has no width. Neither half of that hazard reaches here: a
+point dtype carries no integer lane, and the only signing caller of these
+seams is `host_multiple_of_g`, at `B = 1` — below any threshold, so it never
+moves.
+
+What the exception buys is that the decision exists once. Every verification
+batch in this repo is born in one of five places and consumed by one of these
+two seams; asking each birthplace to remember would be one decision written
+five times, and a sixth that forgets would be silently slow rather than
+wrong. It is worth deciding: measured on an RTX 5090 with full-size scalars,
+the device form of `multiple` runs 7.3x the host at B=256 and 105x at B=4096,
+where it still costs the same ~5 ms it does at B=64.
+
+Everything that turns a point into integers is host by nature and stays there —
+`affine_ints`, `uncompressed_rows`, `lift_x_to_parity`, `on_curve`,
+`secret_scalar` — because the standards define those on integers and Python
+has no width. `is_identity` is the one exception on the wrong side of that
+line, and its docstring carries the reason (fractalyze/xla#594).
+
+There is no `jit` here and none would help: each of these is a single fused
+op, so compiling one measured identical to running it eagerly while adding a
+compile per batch shape. The GPU story for these curves remains EC kernels
+over these same dtypes (fractalyze/sig-frx#139), not a traced re-derivation of
+the group law.
 
 ## Three dtype gotchas the codecs absorb
 
@@ -51,10 +81,12 @@ import functools
 from dataclasses import dataclass
 from typing import Any
 
+import frx.numpy as fnp
 import numpy as np
 import zk_dtypes
 from frx.typing import ArrayLike
 
+from sig_frx.arrays import namespace, traced
 from sig_frx.classical import group
 
 
@@ -139,6 +171,28 @@ class Curve:
         """`G` as a `[1]`-shaped affine array, broadcastable over any batch."""
         return np.array([self.point((self.gx, self.gy))], dtype=self.point)
 
+    @functools.cached_property
+    def traceable(self) -> bool:
+        """Whether a traced array can hold this curve's points at all.
+
+        A point type needs a row in frx's admission table, and secp256r1 has
+        none at the pinned wheel while secp256k1 does. Probed rather than
+        listed: a list would be a second place to update and would go stale
+        silently the moment the rows land, where this starts answering `True`
+        on its own.
+
+        Any failure answers `False`, not only the `TypeError` seen today. The
+        fallback is the host path, which is always correct, so a probe that
+        guesses wrong costs speed — while one that let a new exception type
+        through would restore the crash this exists to stop, at the batch
+        sizes no gate covers.
+        """
+        try:
+            fnp.asarray(self.generator)
+        except Exception:  # noqa: BLE001 — see above; the fallback is correct.
+            return False
+        return True
+
 
 # SEC 2 §2.4.1, "Recommended Parameters secp256k1". The Koblitz curve.
 SECP256K1 = Curve(
@@ -158,13 +212,69 @@ SECP256R1 = Curve(
 )
 
 
+# Where a verification batch stops being cheaper on the host — see `place`
+# for the measurement and why one number covers both backends.
+DEVICE_MIN_BATCH = 64
+
+
+def _place(curve: Curve, points: ArrayLike) -> Any:
+    """A batch of points moved off the host once the batch pays for it.
+
+    This is the one place in the repo where a callee lifts its caller's value,
+    against the rule in `docs/reference/conventions.md`, and the module
+    docstring's "the two seams that place" section is where that exception is
+    argued. The short form: the rule exists to stop a signing path being
+    dragged onto a 32-bit integer lane, and neither half of that can happen
+    here — a point dtype has no integer lane, and the only signing caller
+    reaches these seams at `B = 1`, below any threshold.
+
+    The decision is a batch-size threshold because the cost it is trading
+    against is a fixed one. Measured on an RTX 5090 with full-size scalars,
+    lifting a batch, multiplying and reading it back costs about 5 ms on CUDA
+    regardless of size, so it loses badly to the host on a single signature
+    (0.12 ms against 3.2 ms) and wins from roughly a batch of 64 up — 1.7x
+    there, 26x at 1 024. The CPU backend has no such floor and is ahead from a
+    batch of 2, so one threshold picked for CUDA is safe for both: below it
+    nothing moves and nothing regresses, above it both backends gain.
+
+    A curve whose points a traced array cannot hold stays on the host at every
+    size. That is not a tuning decision: lifting secp256r1 raises rather than
+    running slowly, so a batch of P-256 signatures large enough to cross the
+    threshold would fail outright — which the KAT gate cannot see, because its
+    batches are smaller than that.
+
+    A batch that is already traced is left alone, which is what lets the two
+    seams both call this: `double_multiple` places once and the `multiple`
+    calls under it then see a decision already made.
+    """
+    if traced(points):
+        return points
+    host = np.asarray(points)
+    if host.shape[0] < DEVICE_MIN_BATCH or not curve.traceable:
+        return host
+    return fnp.asarray(host)
+
+
 def multiple(curve: Curve, scalars: list[int], points: ArrayLike) -> np.ndarray:
     """`scalars[i] · points[i]`, one batched kernel call — `[B]` jacobian.
 
     Scalars reduce `% n` in Python first (the dtype gotcha above); the
     reduction is the group's own fact, `k·P = (k mod n)·P`.
+
+    The batch is placed first (`_place`) and the scalars are then built in the
+    namespace it ended up in, so a batch large enough to pay for the device
+    runs there and a small one — a single signature especially — does not. A
+    caller that has already placed its batch keeps that choice.
+
+    Measured on an RTX 5090 with full-size scalars, the device form runs 7.3x
+    the host at B=256 and 105x at B=4096, where it still costs the same ~5 ms
+    it does at B=64. Those are this call's numbers, not a lane's: the readback
+    that follows it is host work either way, and moving that is what
+    `affine_ints` is waiting on.
     """
-    reduced = np.array([k % curve.n for k in scalars], dtype=curve.scalar)
+    points = _place(curve, points)
+    xnp = namespace(points)
+    reduced = xnp.asarray(np.array([k % curve.n for k in scalars], dtype=curve.scalar))
     return points * reduced
 
 
@@ -176,11 +286,25 @@ def double_multiple(
     The two-term combination every verification equation reduces to, and
     the one seam a fused MSM kernel would replace (fractalyze/sig-frx#139)
     — a subtraction folds into the scalar as `n - e`.
+
+    `G` is a host constant, so it is lifted to wherever the batch already is
+    rather than pulling the batch back to it — `np.asarray` here would
+    materialize a device batch silently and cost the caller its whole lift.
+    It is passed at its own `[1]` shape and left to broadcast against the
+    scalars, which is what `generator` is documented for: expanding it to `[B]`
+    first would allocate and transfer `B` copies of one point on the device,
+    where the host got the same thing as a zero-stride view for nothing.
+
+    The placement happens here rather than in the two `multiple` calls below,
+    because `G` arrives `[1]`-shaped and would never reach the threshold on
+    its own: deciding once for the batch and lifting `G` to wherever it landed
+    is what keeps the two terms in the same namespace.
     """
-    points = np.asarray(points)
-    return multiple(
-        curve, g_scalars, np.broadcast_to(curve.generator, points.shape)
-    ) + multiple(curve, point_scalars, points)
+    points = _place(curve, points)
+    xnp = namespace(points)
+    return multiple(curve, g_scalars, xnp.asarray(curve.generator)) + multiple(
+        curve, point_scalars, points
+    )
 
 
 def schnorr_verdicts(
@@ -267,7 +391,24 @@ def affine_ints(curve: Curve, points: ArrayLike) -> list[tuple[int, int]]:
 
 
 def is_identity(curve: Curve, points: ArrayLike) -> np.ndarray:
-    """Whether each entry is the group identity, elementwise."""
+    """Whether each entry is the group identity, elementwise.
+
+    Answered on the host even when the batch is on a device, and the reason is
+    a live upstream bug rather than a preference.
+
+    The comparison has to be on the affine form — a projective one has no
+    unique representation, and the traced path refuses equality on it outright
+    — but at the pinned wheel the jacobian-to-affine conversion is wrong on the
+    **CPU** backend, where it returns the identity for every input
+    (fractalyze/xla#594). It is correct on CUDA and on the host, so converting
+    here would answer "every point is the identity" on exactly the leg the
+    merge gate runs, and would do it silently.
+
+    The pull-back costs the caller nothing it was not already paying: every
+    call site reads the same batch back through `affine_ints` on the next line,
+    and frx caches the materialized buffer, so this is one transfer rather than
+    two.
+    """
     points = np.asarray(points)
     return points == np.zeros(points.shape, dtype=points.dtype)
 

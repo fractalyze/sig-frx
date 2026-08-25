@@ -29,24 +29,19 @@ is what says so, and it is why nothing below can pick wrong in a way that runs.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
-from hash_frx.byte_hash import ByteHash
-from hash_frx.keccak.byte_hashes import (
+from hash_frx import (
+    ByteHash,
+    HostSha256,
     HostShake128,
     HostShake256,
     Keccak256,
+    Sha256,
     Shake128,
     Shake256,
+    Xof,
 )
-from hash_frx.sha256 import HostSha256, Sha256
 
 from sig_frx.arrays import traced
-
-# A `ByteHash` family: the constructor an output length is handed to. It is the
-# type `tweakable.ShakeTweakableHash` already takes an XOF as, so a caller that
-# holds one of these can pass it there unchanged.
-Xof = Callable[[int], ByteHash]
 
 
 def shake128(*values: object) -> Xof:
@@ -87,6 +82,14 @@ def keccak256(*values: object) -> ByteHash:
     the namespace question has no host answer to give. Ethereum's address
     derivation and message framing are the consumers. Being the device
     sponge, messages arrive as exactly `[B, L]` — a single message is B = 1.
+
+    That absence is a decision rather than a gap, so nothing here expires when
+    hash-frx grows another hash. Its host-row criterion — a native library
+    beating device dispatch, *and* a host-shaped consumer — is an AND, and
+    Keccak-256 fails the first: a plain-Python sponge is two orders off what a
+    `Host*` name promises, and paying a dependency to make one native was
+    weighed and refused. See "Which hashes get a host row" in hash-frx's
+    `docs/blocks/hash.md`.
     """
     del values  # one row exists; nothing to dispatch on
     return Keccak256()

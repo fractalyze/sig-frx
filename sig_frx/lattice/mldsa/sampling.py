@@ -72,7 +72,7 @@ import frx.core
 import frx.numpy as fnp
 import numpy as np
 from frx.typing import ArrayLike
-from hash_frx.keccak.byte_hashes import SHAKE128_RATE, SHAKE256_RATE
+from hash_frx import SHAKE128_RATE, SHAKE256_RATE
 
 from sig_frx.arrays import namespace
 from sig_frx.hashes import shake128, shake256

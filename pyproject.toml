@@ -5,7 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sig-frx"
 dynamic = ["version"]
-description = "sig-frx — FRX-native digital signatures: SLH-DSA, ML-DSA, Falcon, XMSS, ECDSA, EdDSA behind one Signature seam."
+# PyPI renders this string, so it names only schemes a consumer can construct.
+description = "sig-frx — FRX-native digital signatures: SLH-DSA, ML-DSA, XMSS, ECDSA, EdDSA, FROST behind one Signature seam."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

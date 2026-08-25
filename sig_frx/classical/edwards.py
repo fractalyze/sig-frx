@@ -17,10 +17,16 @@ this module keeps is exactly what the dtypes do not expose:
 - the host-integer scalar handling, and the cofactor multiplication the
   verification rules are told apart by (`mul_by_cofactor` below).
 
-Everything here is host-path, like `secp.py`: `.raw` readback and per-entry
-construction are host operations, and the GPU story for this curve is EC
-kernels over these same dtypes (fractalyze/sig-frx#36), not a traced
-re-derivation of the group law.
+Everything here is host-path: `.raw` readback and per-entry construction are
+host operations, and the GPU story for this curve is EC kernels over these
+same dtypes (fractalyze/sig-frx#36), not a traced re-derivation of the group
+law.
+
+`secp.py` no longer is, in one respect: its dtype ufuncs follow the namespace
+their arguments arrive in. The same conversion applies here — the two
+`multiple`s are the same three lines — and is left for whoever brings the
+first Edwards caller that holds a device batch, rather than done on
+speculation for a second substrate nobody has asked to lift.
 
 ## Canonical storage is load-bearing
 

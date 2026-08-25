@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 from absl.testing import absltest
-from hash_frx.sha256 import Sha256
+from hash_frx import Sha256
 
 from sig_frx.hashbased import adrs, fors, tree
 from sig_frx.hashbased.tweakable import Sha2TweakableHash

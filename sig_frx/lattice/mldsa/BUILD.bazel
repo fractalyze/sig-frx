@@ -68,10 +68,10 @@ py_library(
     ],
 )
 
-# FIPS 204 §7.3's pseudorandom sampling. The keccak dependency is the whole of
-# it — every sampler is a SHAKE squeezed to a fixed length and rejection-sampled
-# — and `:arith` supplies the field and the modulus the accepted candidates land
-# in. No scheme logic above it, so the samplers are gated against the standard
+# FIPS 204 §7.3's pseudorandom sampling. Hashing is the whole of it — every
+# sampler is a SHAKE squeezed to a fixed length and rejection-sampled — and
+# `:arith` supplies the field and the modulus the accepted candidates land in.
+# No scheme logic above it, so the samplers are gated against the standard
 # before keygen, sign or verify exists.
 py_library(
     name = "sampling",
@@ -85,7 +85,7 @@ py_library(
         ":encoding",
         "//sig_frx:arrays",
         "//sig_frx:hashes",
-        "@hash_frx//hash_frx/keccak",
+        "@hash_frx//hash_frx",
         requirement("frx"),
         requirement("numpy"),
     ],

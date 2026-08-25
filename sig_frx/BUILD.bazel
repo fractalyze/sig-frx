@@ -42,9 +42,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":arrays",
-        "@hash_frx//hash_frx:byte_hash",
-        "@hash_frx//hash_frx:sha256",
-        "@hash_frx//hash_frx/keccak",
+        "@hash_frx//hash_frx",
     ],
 )
 
@@ -69,9 +67,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":context",
-        "@hash_frx//hash_frx:byte_hash",
-        "@hash_frx//hash_frx:sha256",
-        "@hash_frx//hash_frx/keccak",
+        "@hash_frx//hash_frx",
         requirement("frx"),
         requirement("numpy"),
     ],
