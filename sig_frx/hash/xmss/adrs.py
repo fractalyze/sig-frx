@@ -156,7 +156,7 @@ def encode(adrs: Adrs) -> bytes:
     """One address as its 32 bytes, word by word, the way §2.5 writes it.
 
     `encode_batch` produces these same bytes for a whole batch at once, and
-    `rfc8391_adrs_test` requires the two to agree — this is the form that agreement
+    `adrs_test` requires the two to agree — this is the form that agreement
     is checked against.
     """
     return adrs_encoding.encode(_fields(adrs), _SLOTS)

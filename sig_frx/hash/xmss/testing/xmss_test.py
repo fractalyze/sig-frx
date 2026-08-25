@@ -1,7 +1,7 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """XMSS reproduces the reference implementation's key and signature digests.
 
-The gate for the scheme, the way `rfc8391_wots_test` is the gate for the
+The gate for the scheme, the way `wots_test` is the gate for the
 substrate. What makes these vectors worth more than a round trip is the index:
 the generator forces the key to `2^(h-1)` before signing, so an implementation
 that mishandled a non-zero index — in the randomizer, in the message digest, in
@@ -32,8 +32,7 @@ from hash_frx import Sha256
 
 from sig_frx.hash import tree
 from sig_frx.hash.xmss import adrs as a
-from sig_frx.hash.xmss import params as p
-from sig_frx.hash.xmss import wots, xmss
+from sig_frx.hash.xmss import params, wots, xmss
 from sig_frx.hash.xmss.hashes import Rfc8391Hashes, sha2_hashes
 from sig_frx.hash.xmss.testing import vectors as v
 
@@ -430,7 +429,7 @@ class SeamTest(absltest.TestCase):
         with self.assertRaisesRegex(ValueError, "padding_len"):
             xmss.Xmss(
                 Rfc8391Hashes(Sha256(), n=24, padding_len=32),
-                p.XMSS_PARAMETER_SETS[0x0D],
+                params.XMSS_PARAMETER_SETS[0x0D],
             )
 
     def test_a_wrongly_sized_key_or_signature_is_an_error(self) -> None:

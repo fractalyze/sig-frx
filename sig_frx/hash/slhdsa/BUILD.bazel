@@ -5,6 +5,13 @@ load("@sig_frx_pip//:requirements.bzl", "requirement")
 # `//sig_frx/hash` because each has exactly one consumer: `fors` and `hypertree`
 # are reached only by `slh_dsa`, and `xmss` only through `hypertree`. They move
 # up when a second scheme asks for them, not before.
+#
+# That move is not symmetric, and the asymmetry is worth knowing before relying
+# on it: `fors` and `hypertree` can take their own names one level up, and
+# `xmss` cannot. `sig_frx/hash/xmss/` is RFC 8391's package, so
+# `sig_frx/hash/xmss.py` is a file that cannot exist beside it. A second
+# consumer of this FIPS 205 §6 layer promotes it under a name that says which
+# XMSS it is — the promotion is available, the name is not.
 
 py_library(
     name = "fors",

@@ -1,7 +1,7 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """XMSS-MT reproduces the reference implementation's key and signature digests.
 
-Single-tree XMSS is the `d = 1` case of the same class, and `rfc8391_xmss_test`
+Single-tree XMSS is the `d = 1` case of the same class, and `xmss_test`
 gates that; what is left for here is everything the layer count changes — the
 per-layer index split, keygen building only the top tree, the wider signature, and
 the narrower index field.

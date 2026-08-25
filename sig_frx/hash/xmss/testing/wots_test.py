@@ -26,8 +26,7 @@ from absl.testing import absltest
 from hash_frx import Sha256
 
 from sig_frx.hash.xmss import adrs as a
-from sig_frx.hash.xmss import hashes, wots
-from sig_frx.hash.xmss import params as p
+from sig_frx.hash.xmss import hashes, params, wots
 from sig_frx.hash.xmss.testing import vectors as v
 
 
@@ -51,7 +50,7 @@ class _Setup:
 
     def __init__(self, oid: int) -> None:
         self.vectors = v.REFERENCE[oid]
-        self.params = p.XMSS_PARAMETER_SETS[oid]
+        self.params = params.XMSS_PARAMETER_SETS[oid]
         self.hashes = hashes.sha2_hashes(self.params, Sha256())
         self.wots = self.params.wots
         n = self.params.n
