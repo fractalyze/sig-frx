@@ -63,7 +63,7 @@ decision, its alternatives and the provenance are on
 [fractalyze/sig-frx#16](https://github.com/fractalyze/sig-frx/issues/16).
 
 **The gate is this scheme's own tests, not the shared KAT harness**, for the two
-reasons [`../reference/conventions.md`](../reference/conventions.md#not-every-scheme-is-driven-by-the-shared-harness)
+reasons [`../reference/testing.md`](../reference/testing.md#not-every-scheme-is-driven-by-the-shared-harness)
 sets out: there is no vector file to normalize, and a stateful scheme has no
 seam-shaped `sign` for the harness to drive. What that buys back is rejection
 cases a generic bit flip cannot reach — a signature relabelled with another index,

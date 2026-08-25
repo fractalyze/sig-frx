@@ -13,7 +13,7 @@ Wycheproof gate; its round trip here is smoke for the signing path those
 verify-only sets cannot reach.
 
 Recovery (SEC 1 §4.1.6) publishes no vectors, so its authority is
-cross-consistency (`conventions.md`): round trips against keygen's own key,
+cross-consistency (`testing.md`): round trips against keygen's own key,
 the wrapping-x case held to verification's independent second-candidate
 branch, and the rejection set. The identity-result guard is exercised at the
 scalar seam below the message hash, because reaching it through H would take

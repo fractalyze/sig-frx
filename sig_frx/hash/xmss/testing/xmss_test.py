@@ -19,7 +19,7 @@ file to normalize — the values are transcribed constants with their provenance
 `vectors` — and a stateful scheme has no seam-shaped `sign` for that
 harness to drive. So the negative cases it would have generated are written out
 here in full, plus the rejections that need to know what an XMSS signature is.
-`docs/reference/conventions.md` states the rule this is the exception to.
+`docs/reference/testing.md` states the rule this is the exception to.
 """
 
 from __future__ import annotations

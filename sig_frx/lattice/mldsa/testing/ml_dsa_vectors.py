@@ -30,7 +30,7 @@ operation here names, so `kat.load_acvp` records it as unsupported and the harne
 will not run it. That is a different thing from a coverage boundary: a boundary
 drops cases this scheme could run if a hash existed, and a refusal is the harness
 declining to report a pass for a case nobody ran
-([`conventions.md`](../../../../docs/reference/conventions.md)). It is also the
+([`testing.md`](../../../../docs/reference/testing.md)). It is also the
 single largest slice of what is published — a quarter of `sigGen` and of `sigVer`
 — which is why it is named here rather than left to be inferred from a count.
 """

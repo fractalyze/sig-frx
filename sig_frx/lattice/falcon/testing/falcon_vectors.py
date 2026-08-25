@@ -2,7 +2,7 @@
 """Falcon known-answer vectors, transcribed from the round-3 submission package.
 
 Falcon publishes no ACVP set — FN-DSA is still draft — so the authority is the
-one [`conventions.md`](../../../../docs/reference/conventions.md) names next: the
+one [`testing.md`](../../../../docs/reference/testing.md) names next: the
 reference implementation the standard points at, and the vectors its own
 generator publishes. These are those, and being transcribed constants rather
 than a fetched file they carry their provenance here.
@@ -49,7 +49,7 @@ makes it unambiguous.
 
 `vectors(name)` hands them to [`kat.check`](../../../testing/kat.py), which owns
 the published-verdict pass, the tampering pass and the replicate-and-tamper batch
-axis. None of those is Falcon's to re-derive: `conventions.md` puts the batch-axis
+axis. None of those is Falcon's to re-derive: `testing.md` puts the batch-axis
 gate in the harness precisely "because the gap is a property of how the vectors
 are published, not of any one scheme — a per-scheme fix would be written once per
 scheme for one cause."

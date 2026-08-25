@@ -9,7 +9,7 @@ computation over a batch. Each of those is a change made for the compiler, and i
 is the only thing about `arith.py`, `sampling.py` and `ml_dsa.py` a reader has to
 take on trust — so this file takes it back, looping one coefficient at a time over
 Python integers, and the tests require the two to agree
-([`conventions.md`](../../../../docs/reference/conventions.md)).
+([`testing.md`](../../../../docs/reference/testing.md)).
 
 The scheme's own three algorithms are here for the same reason and one more: the
 signing loop's trip count is not observable from the outside, so the only way to
