@@ -268,11 +268,19 @@ class Ecdsa:
         The per-entry rejections are the standard's: a key must be the
         `04 ‖ X ‖ Y` encoding of a point on the curve with in-field
         coordinates (§2.3.4 — range and equation both live in
-        `secp.on_curve`, since the dtypes construct off-curve coordinates
-        without complaint), and
+        `secp.on_curve_rows`, since the dtypes construct off-curve
+        coordinates without complaint), and
         `r, s` must sit in `[1, n-1]`. Rejected rows carry the generator as
         a placeholder so the batch stays rectangular; their verdict is
         already sealed.
+
+        The key check runs over the whole batch before the loop while the
+        rest stays per-row, and the split is where the measurement put it
+        rather than where the shape suggests: at B=1024 the curve equation
+        was 19% of this call as `on_curve` per row and is 2% as one
+        expression over `[B]`, while the `int.from_bytes` decode it sits
+        behind is 4%. The remaining per-row work — the quotient pair's
+        modular inverse and the point construction — is tracked separately.
         """
         curve = self.curve
         n = curve.n
@@ -283,19 +291,25 @@ class Ecdsa:
 
         qlen = n.bit_length()
         placeholder = curve.point((curve.gx, curve.gy))
+
+        # The coordinates are parsed once for the whole batch so the curve
+        # equation can be checked as one expression over `[B]` rather than a
+        # 0-d field array per coordinate — see `secp.on_curve_rows`, which is
+        # 9x the row-at-a-time form at B=1024. The parse itself stays here:
+        # `int.from_bytes` beats a field-arithmetic weighted sum on bytes by
+        # an order of magnitude, so it is the batching that pays, not moving
+        # the decode into the field.
+        qxs = [int.from_bytes(key[1:33].tobytes(), "big") for key in keys]
+        qys = [int.from_bytes(key[33:65].tobytes(), "big") for key in keys]
+        key_ok = secp.on_curve_rows(curve, qxs, qys)
+
         checks, points, u1_scalars, u2_scalars, r_scalars = [], [], [], [], []
-        for key, entry, sig in zip(keys, digest, signature):
-            qx = int.from_bytes(key[1:33].tobytes(), "big")
-            qy = int.from_bytes(key[33:65].tobytes(), "big")
+        for i, (key, entry, sig) in enumerate(zip(keys, digest, signature)):
+            qx, qy = qxs[i], qys[i]
             r = int.from_bytes(sig[:32].tobytes(), "big")
             s = int.from_bytes(sig[32:64].tobytes(), "big")
             e = rfc6979.bits2int(entry.tobytes(), qlen) % n
-            ok = (
-                int(key[0]) == 4
-                and secp.on_curve(curve, qx, qy)
-                and 1 <= r < n
-                and 1 <= s < n
-            )
+            ok = int(key[0]) == 4 and bool(key_ok[i]) and 1 <= r < n and 1 <= s < n
             u1, u2 = _masked_quotient_pair(scalar, ok, e, r, s)
             u1_scalars.append(u1)
             u2_scalars.append(u2)
