@@ -29,20 +29,22 @@ Constructible through `Signature` today:
 
 | family | schemes |
 |---|---|
-| Hash-based | SLH-DSA (FIPS 205), XMSS and XMSS-MT (RFC 8391); SHRINCS **verification only** |
+| Hash-based | SLH-DSA (FIPS 205), XMSS and XMSS-MT (RFC 8391), SHRINCS |
 | Lattice | ML-DSA (FIPS 204); Falcon (FN-DSA) **verification only** |
 | Classical | ECDSA over secp256k1 and P-256, with the Ethereum and Bitcoin variants; BIP-340 Schnorr; Ed25519 |
 | Threshold | FROST (RFC 9591), Ed25519 and secp256k1 ciphersuites |
 
-**SHRINCS verifies but does not sign, and will not on the seam.** Both of its
-paths verify — the stateful FXMSS tree of WOTS+C leaves and the stateless SLH-DSA
-fallback, told apart by the signature's first byte — and `keygen` raises, because
-a SHRINCS key pair cannot be made without building the tree whose root is a third
-of the public key. Signing is stateful: a leaf that signs twice reveals its
-secret, so a signer hands back the advanced key beside the signature, which is
-the shape [`signature.py`](sig_frx/signature.py) gives a stateful scheme and not
-the seam's. It is also the one scheme here gated on a *reference implementation*
-rather than on published vectors, because SHRINCS has none yet — see
+**SHRINCS signs and verifies, and its `sign` is not the seam's.** Both paths work
+in both directions — the stateful FXMSS tree of WOTS+C leaves and the stateless
+SLH-DSA fallback, told apart by the signature's first byte. Signing is stateful: a
+leaf that signs twice reveals its secret, so `sign` takes the leaf counter and
+hands back the one the caller must store, which is two values where the seam has
+one. That is the shape [`signature.py`](sig_frx/signature.py) gives a stateful
+scheme, as `Xmss` already has it. `keygen` needs the tree's shape, which the
+verifier is agnostic to, so it is what the instance is constructed with:
+`Shrincs(sf_structure)` generates keys and `Shrincs()` verifies. SHRINCS is also
+the one scheme here gated on a *reference implementation* rather than on published
+vectors, because it has none yet — see
 [`docs/schemes/shrincs.md`](docs/schemes/shrincs.md).
 
 **Falcon verifies but does not yet sign.** `falcon.named("Falcon-512")` is

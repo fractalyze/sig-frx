@@ -57,14 +57,38 @@ checksum chains, and the FXMSS walk.
 where `tree.root_from_path` takes a lane-wide column, and the depth varies per
 entry where that one is a fixed height.
 
-**Verification only.** A SHRINCS key pair cannot be generated without building
-the FXMSS tree whose root is the public key's third part, and signing is
-stateful — a leaf that signs twice reveals its WOTS+C secret, so a signer returns
-the advanced key alongside the signature, which is two values where the seam has
-one. `Shrincs` therefore implements the seam's `verify`, raises from `keygen`,
-has no `sign`, and carries no conformance pin — the shape
+**Signing is stateful, so `sign` is not the seam's.** A leaf that signs twice
+reveals its WOTS+C secret, so `sign` takes the leaf counter and returns the one
+the caller must store beside the signature — two values where the seam has one.
+`Shrincs` therefore implements the seam's `keygen` and `verify` and carries no
+conformance pin, which is the shape
 [`signature.py`](../../sig_frx/signature.py) describes for a stateful scheme and
 that `Xmss` already has.
+
+Where the two differ is where the counter lives. RFC 8391's secret key *is*
+`idx ‖ SK.seed ‖ …`, so `Xmss` returns an advanced key; SHRINCS's 82 bytes are
+`sk_seed ‖ sk_prf ‖ pk_seed ‖ sl_root ‖ structure ‖ sf_root` with no room for
+one, and its reference passes `state_ctr` alongside. Widening the key here would
+mean a serialization no reference produces, to gain nothing the returned counter
+does not already give. **A counter past the tree's last leaf raises** rather than
+falling back to the stateless path the way the reference does: falling back is
+something a caller asks for here by passing no counter, and answering a lost
+count with a five-times-longer signature hides it.
+
+**Key generation is where the tree's shape is used, and the only place.** It
+builds every WOTS+C leaf the shape names and reduces them to `sf_root`, which is
+why the structure bytes ride in the secret key — a signer has to know afterwards
+what tree it built. The verifier never sees them, so the shape is a parameter of
+the *instance* rather than an argument to `keygen`: `Shrincs(sf_structure)`
+generates keys, `Shrincs()` verifies. The two prescribed shapes are different
+trees rather than one parameterized tree — a balanced one is an ordinary Merkle
+forest and reuses [`tree.py`](../../sig_frx/hash/tree.py), an unbalanced one is a
+left spine of nodes each combined with a single right-hand leaf — so they climb
+separately.
+
+An untrusted `sf_structure` is a denial of service, since a balanced depth is an
+exponent; the specification warns about it and its reference implementation
+hangs. `fxmss.Structure.parse` refuses instead, above a million leaves.
 
 ## Where the batch axis is
 
@@ -113,7 +137,18 @@ this reason. Falling back to the stateless path is visible too — the signature
 five times longer.
 
 Signing carries no side-channel claim in this repo
-([`../reference/security.md`](../reference/security.md)), and none is implemented
-here anyway. Were it, the grinding loop would be the operation to look at: it
-runs a data-dependent number of times, and the counter it lands on ships in the
-signature.
+([`../reference/security.md`](../reference/security.md)). The grinding loop is
+the operation that would have to change first if it ever did: it runs a
+data-dependent number of times and the counter it lands on ships in the
+signature, and it is the one loop here that reads a value back to decide whether
+to keep going. It searches a block of counters per pass rather than stepping —
+about one counter in sixty-five lands in the constant-sum subset, so a block of
+256 almost always finishes in one batched dispatch — which is a cost decision,
+not a timing one.
+
+**The gate is the reference's own bytes, both ways.** Every stateful case
+reproduces from its recorded `seed`, `shape`, `depth` and `state_counter` alone,
+because `PRF_msg_sf` derives the randomizer rather than drawing it. The stateless
+path salts with an `opt_rand` the caller supplies, so its cases record the salt
+they were made under — without it a case can be verified and cannot be signed,
+which is a gate a self-consistently wrong signer would pass.

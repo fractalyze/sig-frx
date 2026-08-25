@@ -14,13 +14,13 @@ py_library(
     ],
 )
 
-# `medium` on the executor rather than on this measurement. The CPU leg here is
-# 10.0 s — every verification shares one batch shape, so the suite pays one
-# compile of the verification program and not one per distinct `B` — and bazel
-# reports the size as oversized on that basis. It stays `medium` until CI says
-# otherwise: this package measures 2.1-2.7x slower on the executor and the GPU
-# leg is the one that compiles worst, which together put the worst run near
-# `small`'s 60 s. Sized from the slowest leg's worst run, per
+# `medium` on the executor rather than on this measurement. 26.7 s on CPU and
+# 32.2 s on GPU since signing landed, up from 10.0 s CPU: one stateless signature
+# is 5776 bytes of FORS and hypertree, which is why `SigningTest` makes one and
+# not one per case. Every verification still shares one batch shape, so the suite
+# pays one compile of the verification program and not one per distinct `B`. At
+# the 2.1-2.7x this package measures slower on the executor that puts the worst
+# run past `small`'s 60 s. Sized from the slowest leg's worst run, per
 # ../../../../docs/reference/conventions.md.
 py_test(
     name = "stateless_test",
@@ -85,10 +85,13 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
-# `medium` on the GPU leg's worst run, 110.4 s against 63.1 s on a quiet one
-# (28.3 s on CPU) — 37% of its 300 s at the top, which clears the
-# half-a-budget rule. Every entry of every call runs both signing paths, so
-# the seam's test is the package's dearest by construction.
+# `medium` on the GPU leg's worst run, 110.4 s against 84.2 s on a quiet one
+# (60.0 s on CPU, up from 28.3 s) — 37% of its 300 s at the top, which clears the
+# half-a-budget rule. Every entry of every call runs both signing paths, so the
+# seam's test is the package's dearest by construction, and the signer adds a
+# whole FXMSS tree per case on top. The tests that only need a secret key build
+# the 82 bytes from what a case records rather than calling `keygen` for them,
+# which is a tree each.
 py_test(
     name = "shrincs_test",
     size = "medium",

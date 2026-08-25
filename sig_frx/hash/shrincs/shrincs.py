@@ -36,10 +36,34 @@ its indicator's, cannot be expressed once padded.
 
 **Not on the seam's `sign`, and no conformance pin.** The signer is stateful: a
 leaf that signs twice reveals its WOTS+C secret, so signing has to hand back the
-key advanced past what it used, which is two return values where the seam has
-one. `sig_frx/signature.py` names this shape, and RFC 8391's `Xmss` already has
-it. `keygen` is a signer's too — it builds the FXMSS tree the public key's third
-part is the root of — and raises until that lands.
+counter advanced past the leaf it used, which is two return values where the seam
+has one. `sig_frx/signature.py` names that shape, and RFC 8391's `Xmss` already
+has it.
+
+**Where `Xmss` carries its index inside the secret key, this carries it beside
+one.** The two make the same demand of a caller — the spent value has to be
+passed back visibly, so signing twice at one position is something written down
+rather than something a method quietly failed to do — and they differ because
+the formats do: RFC 8391's secret key *is* `idx ‖ SK.seed ‖ …`, while SHRINCS's
+82 bytes have no room for a counter and its reference passes `state_ctr`
+alongside. Widening the key here would mean a serialization no reference produces
+and a `SECRET_KEY_SIZE` that disagrees with the specification's, to gain nothing
+the returned counter does not already give.
+
+**A counter the tree cannot hold raises**, where the reference falls back to the
+stateless path without comment. Signing statelessly is something a caller asks
+for here, by passing no counter; arriving with a spent one is a signer that has
+lost count, and answering it with a five-times-longer signature it did not choose
+hides that.
+
+**The tree's shape is `keygen`'s alone, and it is the instance's rather than an
+argument.** A key pair cannot be made without one and the seam's `keygen` takes a
+seed and nothing else, so it is what a key-generating `Shrincs` is constructed
+with. Everything after key generation reads the shape out of the *secret key*,
+which carries those two bytes for exactly this reason — so `sign` needs no
+instance structure, and neither does `verify`, which never learns the shape at
+all. `Shrincs()` is therefore the right thing to build for any consumer that
+holds keys rather than makes them.
 """
 
 from __future__ import annotations
@@ -48,11 +72,13 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
+from hash_frx import Hmac
+from hash_frx import block_size as block_size_of
 
 from sig_frx import context as ctx
 from sig_frx import hashes
 from sig_frx.hash import bytestring
-from sig_frx.hash.shrincs import fxmss, stateless
+from sig_frx.hash.shrincs import fxmss, stateless, wots_c
 
 _N = stateless.PARAMS.n
 
@@ -74,15 +100,35 @@ _INDEX_FIELD_START = _INDICATOR_BYTES + _RANDOMIZER_BYTES  # 17
 # does.
 _PURE_DOMAIN = 0
 
+# The secret key's layout, `sk_seed ‖ sk_prf ‖ pk_seed ‖ sl_root ‖ structure ‖
+# sf_root` — the reference's serialization, which is why the counter is not in it.
+_SK_SEED = slice(0, _N)
+_SK_PRF = slice(_N, 2 * _N)
+_SK_PK_SEED = slice(2 * _N, 3 * _N)
+_SK_SL_ROOT = slice(3 * _N, 4 * _N)
+_SK_STRUCTURE = slice(4 * _N, 4 * _N + wots_c.STRUCTURE_BYTES)
+_SK_SF_ROOT = slice(4 * _N + wots_c.STRUCTURE_BYTES, SECRET_KEY_SIZE)
+# `slh_dsa.sign` takes `SK.seed ‖ SK.prf ‖ PK.seed ‖ PK.root`, which is this
+# key's first four values — the stateless half, contiguous and in order.
+_SK_SLH_DSA = slice(0, 4 * _N)
+
 
 class Shrincs:
-    """SHRINCS over hash-frx's SHA-256, verification-side.
+    """SHRINCS over hash-frx's SHA-256.
 
     Batch-first: `verify` takes a leading `[B]` axis on every argument and
     returns `bool[B]`.
+
+    `sf_structure` is the tree a key pair will be built over — two bytes, a shape
+    and a depth. Only `keygen` needs it: `sign` reads the shape out of the secret
+    key and `verify` never learns it, so an instance that holds keys rather than
+    making them is built without one.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, sf_structure: ArrayLike | None = None) -> None:
+        self.structure = (
+            None if sf_structure is None else fxmss.Structure.parse(sf_structure)
+        )
         self.public_key_size = stateless.PUBLIC_KEY_SIZE
         self.secret_key_size = SECRET_KEY_SIZE
         self.signature_max_size = stateless.SIGNATURE_SIZE
@@ -101,18 +147,178 @@ class Shrincs:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Shrincs):
             return NotImplemented
-        return self.stateless == other.stateless
+        return self.stateless == other.stateless and self.structure == other.structure
 
     def __hash__(self) -> int:
-        return hash((type(self), self.stateless))
+        return hash((type(self), self.stateless, self.structure))
 
     def keygen(self, seed: ArrayLike) -> tuple[Array, Array]:
-        """Not yet: a SHRINCS key pair is a signer's, and the signer is stateful."""
-        raise NotImplementedError(
-            "SHRINCS key generation builds the FXMSS tree whose root is the "
-            "public key's third part, which is signer-side work this module does "
-            "not carry; it verifies both paths and generates neither key"
+        """`shrincs_keygen` — `pk_seed ‖ sl_root ‖ sf_root`, and the 82 bytes behind it.
+
+        `seed` is `SK.seed ‖ SK.prf ‖ PK.seed`, which is SLH-DSA's own seed at this
+        parameter set — so the stateless half of the key is `slh_dsa.keygen`
+        unchanged and what is added is the FXMSS root. That root is the one value
+        the tree's shape reaches, and the reason the structure bytes are in the
+        secret key at all: a signer has to know afterwards what tree it built.
+        """
+        structure = self._signing_structure()
+        values = fnp.asarray(seed, dtype=fnp.uint8)
+        if values.shape != (stateless.PARAMS.seed_size,):
+            raise ValueError(
+                f"keygen takes SK.seed, SK.prf and PK.seed — {_N} bytes each, "
+                f"{stateless.PARAMS.seed_size} in all — got shape "
+                f"{tuple(values.shape)}"
+            )
+        slh_dsa_public, _ = self.stateless.slh_dsa.keygen(values)
+        sl_root = slh_dsa_public[_N:]
+        sf_root = fxmss.root(
+            self._tweak, values[_SK_PK_SEED], values[_SK_SEED], structure
         )
+        return (
+            fnp.concatenate([values[_SK_PK_SEED], sl_root, sf_root]),
+            fnp.concatenate(
+                [
+                    values,
+                    sl_root,
+                    fnp.asarray(structure.encoded, dtype=fnp.uint8),
+                    sf_root,
+                ]
+            ),
+        )
+
+    # -- signing -----------------------------------------------------------
+
+    def sign(
+        self,
+        secret_key: ArrayLike,
+        message: ArrayLike,
+        state_counter: int | None,
+        *,
+        randomness: ArrayLike | None = None,
+        context: ArrayLike | None = None,
+    ) -> tuple[Array, int | None]:
+        """One signature, and the counter to store before releasing it.
+
+        `state_counter` names the WOTS+C leaf to sign with and `None` asks for the
+        stateless path instead. The second return value is what the caller must
+        persist: the counter advanced past the leaf just spent, or `None` when no
+        leaf was. Signing twice at one counter reveals that leaf's secret — not a
+        degradation, a total break — so it is handed back rather than hidden in a
+        mutable object, which is `Xmss`'s discipline under this scheme's format.
+
+        `randomness` is SLH-DSA's `opt_rand`, and it belongs to the stateless path
+        alone: the stateful one derives its randomizer from `sk_prf` and the
+        leaf's position, so a stateful signature is a function of the key, the
+        leaf and the message and needs nothing drawn. Supplying it with a counter
+        is refused rather than ignored — a caller passing a salt believes it is
+        salting something, and here it would reach nothing.
+
+        The result is zero-padded to `signature_max_size`, which is the seam's
+        rule and is unambiguous here because the indicator byte fixes the length.
+        """
+        key = fnp.asarray(secret_key, dtype=fnp.uint8)
+        if key.shape != (SECRET_KEY_SIZE,):
+            raise ValueError(
+                f"a secret key is [{SECRET_KEY_SIZE}], got shape {tuple(key.shape)}"
+            )
+        messages = fnp.asarray(message, dtype=fnp.uint8)
+        if messages.ndim != 1:
+            raise ValueError(
+                f"sign takes one message as [L]; the batch axis is verification's, "
+                f"got shape {tuple(messages.shape)}"
+            )
+        if state_counter is None:
+            signature = self.stateless.sign(
+                key[_SK_SLH_DSA],
+                key[_SK_SF_ROOT],
+                messages,
+                randomness=randomness,
+                context=context,
+            )
+            return self._padded(signature), None
+        if randomness is not None:
+            raise ValueError(
+                "the stateful path derives its randomizer from `sk_prf` and the "
+                "leaf's position and has nowhere to put `randomness`; pass no "
+                "counter to sign statelessly, where it is the salt"
+            )
+        return (
+            self._padded(self._sign_stateful(key, messages, state_counter, context)),
+            state_counter + 1,
+        )
+
+    def _sign_stateful(
+        self,
+        key: Array,
+        messages: Array,
+        state_counter: int,
+        context: ArrayLike | None,
+    ) -> Array:
+        """`shrincs_sign`'s stateful half: the indicator, `R`, the index, the tree.
+
+        The leaf is chosen first because its position tweaks the digest being
+        signed, so there is no digest until there is a leaf.
+        """
+        structure = fxmss.Structure.parse(key[_SK_STRUCTURE])
+        leaf_index, leaf_height = structure.leaf(state_counter)
+        pk_seed, sl_root = key[_SK_PK_SEED], key[_SK_SL_ROOT]
+        # The address's first nine bytes — the leaf's height and its index — which
+        # bind both the randomizer and the digest to where the signature was made.
+        index = fxmss.index_bytes(np.array([leaf_index], dtype=np.uint64))
+        positions = np.concatenate([np.array([leaf_height], dtype=np.uint8), index[0]])
+        bound = bound_message(sl_root, messages, context)
+        random = randomizer(key[_SK_PRF], pk_seed, positions, bound)
+        digest = message_digest(
+            random[None, :],
+            pk_seed[None, :],
+            sl_root[None, :],
+            key[_SK_SF_ROOT][None, :],
+            positions[None, :],
+            messages[None, :],
+            context,
+        )[0]
+        return fnp.concatenate(
+            [
+                fnp.asarray(np.array([leaf_height], dtype=np.uint8), dtype=fnp.uint8),
+                random,
+                # The field is as many whole bytes as the leaf's depth needs, and
+                # a verifier derives that width back from the indicator byte.
+                fnp.asarray(
+                    index[0][-fxmss.index_field_bytes(fxmss.HEIGHT - leaf_height) :],
+                    dtype=fnp.uint8,
+                ),
+                fxmss.sign(
+                    self._tweak,
+                    pk_seed,
+                    key[_SK_SEED],
+                    structure,
+                    digest,
+                    leaf_height,
+                    leaf_index,
+                ),
+            ]
+        )
+
+    def _padded(self, signature: Array) -> Array:
+        """Zero-filled up to `signature_max_size` — the seam's variable-length rule."""
+        return fnp.concatenate(
+            [
+                signature,
+                fnp.zeros(
+                    self.signature_max_size - signature.shape[0], dtype=fnp.uint8
+                ),
+            ]
+        )
+
+    def _signing_structure(self) -> fxmss.Structure:
+        """The tree this instance builds keys over, or why it cannot build one."""
+        if self.structure is None:
+            raise ValueError(
+                "this instance carries no tree structure, which a verifier does "
+                "not need and a key pair cannot be made without: build "
+                "`Shrincs(sf_structure)` with the shape and depth to generate one"
+            )
+        return self.structure
 
     def verify(
         self,
@@ -279,16 +485,7 @@ def message_digest(
     randoms = fnp.asarray(randomizers, dtype=fnp.uint8)
     seeds = fnp.asarray(pk_seeds, dtype=fnp.uint8)
     places = fnp.asarray(positions, dtype=fnp.uint8)
-    bound = ctx.prepend(
-        ctx.prefix(_PURE_DOMAIN, context),
-        fnp.concatenate(
-            [
-                fnp.asarray(sl_roots, dtype=fnp.uint8),
-                fnp.asarray(messages, dtype=fnp.uint8),
-            ],
-            axis=-1,
-        ),
-    )
+    bound = bound_message(sl_roots, messages, context)
     inner = fnp.asarray(
         hashes.sha256(bound).digest(
             fnp.concatenate(
@@ -310,3 +507,65 @@ def message_digest(
         ),
         dtype=fnp.uint8,
     )
+
+
+def bound_message(
+    sl_roots: ArrayLike, messages: ArrayLike, context: ArrayLike | None = None
+) -> Array:
+    """`toByte(0,1) ‖ toByte(|ctx|,1) ‖ ctx ‖ sl_root ‖ M` — the stateful path's.
+
+    One function because two hashes are taken over exactly these bytes — the
+    randomizer's and the digest's — and a binding that two callers each build for
+    themselves is a binding that can come apart in one of them. Prepending
+    `sl_root` is what keeps a stateful signature from carrying to a key that
+    shares only the stateful half, the mirror of the `sf_root` the stateless path
+    prepends.
+    """
+    return ctx.prepend(
+        ctx.prefix(_PURE_DOMAIN, context),
+        fnp.concatenate(
+            [
+                fnp.asarray(sl_roots, dtype=fnp.uint8),
+                fnp.asarray(messages, dtype=fnp.uint8),
+            ],
+            axis=-1,
+        ),
+    )
+
+
+def randomizer(
+    sk_prf: ArrayLike, pk_seed: ArrayLike, positions: ArrayLike, bound: ArrayLike
+) -> Array:
+    """`PRF_msg_sf` — the stateful path's per-signature randomizer. `[16]`.
+
+    HMAC-SHA256 under `sk_prf` filled out to a whole block with `0xFF` bytes, over
+    the seed, the leaf's nine position bytes and the bound message. `bound` is
+    `bound_message`'s output, which is also what the digest is taken over.
+
+    **Derived, never drawn**, which is what separates this from `PRF_msg_sl`: the
+    stateless path salts with an `opt_rand` the caller supplies, and the stateful
+    path has none, so a stateful signature is a function of the key, the leaf and
+    the message. That is what lets one reproduce from a seed and a counter with no
+    third value recorded beside them.
+
+    A module function for `message_digest`'s reason: it is a construction SHRINCS
+    does not share with FIPS 205, so the vectors reach it directly rather than
+    only through a signature that came out wrong somewhere.
+    """
+    message = fnp.concatenate(
+        [
+            fnp.asarray(pk_seed, dtype=fnp.uint8),
+            fnp.asarray(positions, dtype=fnp.uint8),
+            fnp.asarray(bound, dtype=fnp.uint8),
+        ]
+    )
+    byte_hash = hashes.sha256(message)
+    block = block_size_of(byte_hash)
+    key = fnp.concatenate(
+        [
+            fnp.asarray(sk_prf, dtype=fnp.uint8),
+            fnp.full(block - _N, 0xFF, dtype=fnp.uint8),
+        ]
+    )
+    mac = Hmac(byte_hash, block).mac(key, message[None, :])
+    return fnp.asarray(mac, dtype=fnp.uint8)[0][:_N]

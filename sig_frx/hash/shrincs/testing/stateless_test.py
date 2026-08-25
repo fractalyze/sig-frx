@@ -126,6 +126,51 @@ class ReferenceTest(absltest.TestCase):
                 self.assertEqual(list(np.asarray(got)), [True] * _BATCH)
 
 
+class SigningTest(absltest.TestCase):
+    """The other half of the wrapper: the two bindings applied rather than undone.
+
+    One case rather than every one. A stateless signature is 5776 bytes of FORS
+    and hypertree, so signing is the dearest operation in this package by a wide
+    margin, and what this has to show is the wrapper — the indicator byte, the
+    `sf_root` binding and the salt reaching `PRF_msg_sl`. None of that varies case
+    to case; what does is the context, and `RejectionTest` already shows the
+    context reaching the digest.
+    """
+
+    def test_a_reference_signature_is_reproduced(self) -> None:
+        """Byte for byte, at the recorded salt — a round trip would show less.
+
+        The salt is why `opt_rand` is a recorded field: without the value a case
+        was made under there is nothing here a signer could be held to, only a
+        signature it could verify for itself.
+        """
+        case = vectors.REFERENCE[1]
+        made = stateless.Stateless().sign(
+            np.frombuffer(case.seed + case.sl_root, dtype=np.uint8),
+            np.frombuffer(case.sf_root, dtype=np.uint8),
+            np.frombuffer(case.message, dtype=np.uint8),
+            randomness=np.frombuffer(case.opt_rand, dtype=np.uint8),
+            context=_ctx(case.context),
+        )
+        self.assertEqual(bytes(np.asarray(made)), case.signature)
+
+    def test_a_hedged_signer_will_not_quietly_go_deterministic(self) -> None:
+        """`opt_rand` omitted would substitute `PK.seed` and still verify.
+
+        Which is exactly why it raises: the signature would be a valid one over
+        the right message, so nothing downstream could notice that the salt the
+        caller meant to supply never arrived.
+        """
+        case = vectors.REFERENCE[0]
+        with self.assertRaisesRegex(ValueError, "addrnd"):
+            stateless.Stateless().sign(
+                np.frombuffer(case.seed + case.sl_root, dtype=np.uint8),
+                np.frombuffer(case.sf_root, dtype=np.uint8),
+                np.frombuffer(case.message, dtype=np.uint8),
+                context=_ctx(case.context),
+            )
+
+
 class RejectionTest(absltest.TestCase):
     """Each of these is a thing the component claims to check."""
 

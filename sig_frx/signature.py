@@ -62,14 +62,21 @@ that drifts from the seam rather than the consumer that calls it::
 
 **A stateful scheme implements `verify` and not `sign`, and carries no pin.** A
 one-time key signs once — signing twice at one index reveals the WOTS+ secret — so
-the signer has to hand back the key advanced past what it just used, which is two
-return values where this seam has one. Widening `sign` to return the next key
+the signer has to hand back the position advanced past what it just used, which is
+two return values where this seam has one. Widening `sign` to return that value
 would put a value on every stateless scheme that none of them can produce, and the
 alternative of a seam-shaped `sign` that quietly leaves the state where it was is
 the exact failure the discipline exists to prevent. So `XMSS` (RFC 8391) exposes
 `sign(secret_key, message) -> (signature, next_secret_key)` under its own name and
 implements the rest of the seam unchanged. That is the expected shape for a
 stateful scheme rather than a scheme that has not finished.
+
+What that second value *is* follows the scheme's own format rather than this rule.
+RFC 8391 puts the index inside the secret key, so `XMSS` returns an advanced key;
+SHRINCS's secret key has no room for a counter and its specification passes one
+alongside, so `Shrincs` returns the advanced counter. Both make the same demand of
+a caller — the spent value comes back visibly and has to be stored before the
+signature is released — which is what the rule is for.
 """
 
 from __future__ import annotations
