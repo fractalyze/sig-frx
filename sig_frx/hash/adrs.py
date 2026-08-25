@@ -99,7 +99,13 @@ class Adrs:
 
     layer: Field
     tree: Field
-    type: AdrsType
+    # `int` rather than `AdrsType`, because the slot layout outlived the seven
+    # types that named it: SHRINCS's stateful path tweaks with this same
+    # 1 ‖ 8 ‖ 1 ‖ 12 arrangement under type values of its own, and calls the two
+    # leading fields a node's height and index rather than a layer and a tree
+    # (`shrincs/adrs.py`). What is FIPS 205 about this class is the slots, and a
+    # type value is what a family chooses within them.
+    type: int
     trailing: tuple[Field, Field, Field]
 
 

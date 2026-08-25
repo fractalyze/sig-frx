@@ -33,3 +33,54 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+py_library(
+    name = "stateful_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "stateful_vectors.py",
+    ],
+)
+
+py_test(
+    name = "wots_c_test",
+    size = "small",
+    srcs = ["wots_c_test.py"],
+    deps = [
+        ":stateful_vectors",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash/shrincs:wots_c",
+        "@hash_frx//hash_frx",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
+    name = "fxmss_test",
+    size = "medium",
+    srcs = ["fxmss_test.py"],
+    deps = [
+        ":stateful_vectors",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash/shrincs:fxmss",
+        "@hash_frx//hash_frx",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
+    name = "shrincs_test",
+    size = "medium",
+    srcs = ["shrincs_test.py"],
+    deps = [
+        ":stateful_vectors",
+        ":vectors",
+        "//sig_frx/hash/shrincs",
+        "//sig_frx/hash/shrincs:fxmss",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
