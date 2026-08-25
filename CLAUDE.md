@@ -39,6 +39,12 @@ this file is the map plus the rules every change must respect.
   `DEDICATED` on one leg and `GENERIC` on the other, so a change to how a
   primitive is routed, fused or emitted has been validated for half the wire
   surface until both legs are green.
+- **Never bump the hash-frx pin by hand.** The `hash-frx Update` workflow moves
+  it together with every pip pin both hubs resolve, because hash-frx resolves its
+  own lock — a lone bump puts two copies of a package in one test's runfiles and
+  fails as a dtype error rather than a version conflict. After an upstream merge,
+  wait for that PR (or dispatch the workflow); to test against unreleased
+  hash-frx meanwhile, use the `.bazelrc.user` override the README documents.
 - **Merge commits must be titled `Merge branch 'X' into Y`.**
   fractal-commit-lint exempts only that form (and `Merge pull request #N`);
   git's default `Merge remote-tracking branch 'origin/X'` wording fails the
