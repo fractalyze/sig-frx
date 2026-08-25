@@ -202,6 +202,21 @@ batch assembles by vmapping a one-signature body would compute the same
 transform once per batch row over identical data. Callers hoist and stay in the
 transform domain; `intt` is applied once at the end.
 
+**Which is why every operand of one expression has to be in the same domain, and
+nothing says so when it is not.** Hoisting makes the caller responsible for
+domain bookkeeping, and neither the type system nor the field dtype can help: a
+transform-domain value and a coefficient-domain one are the same dtype. Worse,
+`intt` is *linear*, so `intt(A − B)` where only `B` was transformed evaluates
+cleanly and returns a different polynomial — right shape, right dtype,
+residues in range. It surfaces as a downstream predicate failing (a norm
+bound, a hash comparison), which points at the wrong stage.
+
+`c − s2·h` is the shape to remember: transform the product, subtract in the
+coefficient domain. Reaching for the symmetric-looking
+`intt(c − base_mul(...))` costs a transform *and* is wrong. What catches it is
+comparing stages against the naive transcription rather than comparing the final
+verdict, which is worth writing the transcription first for.
+
 There is no shared name for a reduction because neither file performs one — that
 is the field dtype's job, and a wrapper named for it would be a function that
 exists only to be matched across repos.
@@ -514,6 +529,16 @@ by present load.
 This is the quantitative half of [a target excluded from a leg has never had its
 budget validated there](#the-per-pr-gates-cost-is-distinct-shapes-not-vectors).
 Together: the budget covers the worst run of the slowest leg the target runs on.
+
+**Which leg that is inverts, and what predicts it is the target's shape.** A
+target whose cost is arithmetic is usually slowest on the CPU leg, and sizing
+from that leg is the habit. A target whose cost is *compiles* is slowest on
+the GPU leg, often by a wide margin — and a vector-driven test is exactly
+that, since a published set varies its message length per case and nearly
+every case then traces its own program. So a known-answer target and the
+component test beside it can disagree about which leg decides, and reading the
+familiar one is how a budget gets set from the wrong number. Read both legs
+before choosing a bucket.
 
 ### A local measurement does not decide it
 
