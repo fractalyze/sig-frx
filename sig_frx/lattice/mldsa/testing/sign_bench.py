@@ -223,10 +223,13 @@ def _shapes(params: ml_dsa.MlDsaParams, message_size: int) -> list[_Shape]:
     is a second chance to mistype it, and a bench that hashes a shape the scheme
     does not is measuring nothing.
     """
-    # §7.3's budgets, as the samplers compute them.
-    ntt_blocks = sampling.budget(N, (Q, 1 << 23), SHAKE128_RATE // 3)
+    # §7.3's budgets, on the samplers' own parameterisations rather than a
+    # second copy of them: a rejection rule that changes in `sampling` has to
+    # change the shape measured here, and a transcription would keep reporting
+    # the old one in numbers that still look plausible.
+    ntt_blocks = sampling.budget(N, sampling._NTT_ACCEPT, sampling._NTT_PER_BLOCK)
     bounded_blocks = sampling.budget(
-        N, (sampling._BOUNDED_THRESHOLD[params.eta], 16), 2 * SHAKE256_RATE
+        N, sampling._BOUNDED_ACCEPT[params.eta], sampling._BOUNDED_PER_BLOCK
     )
     ball_allowance = sampling.budget(params.tau, (N - params.tau + 1, N), 1)
     # The mask is squeezed to exactly what the unpacking consumes, and `w1` is
