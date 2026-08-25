@@ -157,6 +157,28 @@ class VerifyTest(absltest.TestCase):
         got = np.asarray(scheme.verify(keys, messages, signatures, context=None))
         self.assertEqual(list(got), [True, False, False, False, False, False, True])
 
+    def test_a_rejected_row_does_not_taint_the_valid_rows_beside_it(self) -> None:
+        # Verification takes one inverse for the whole batch (Montgomery's
+        # trick in `group.batch_inverse`), so the rows are no longer
+        # independent the way a per-row inverse made them. A zero denominator
+        # anywhere sends the entire product chain to zero, and the dtype's
+        # division by zero answers zero rather than raising — so dropping the
+        # substitution that keeps a rejected row's `s` out of the chain would
+        # reject every valid signature beside it, silently.
+        #
+        # `test_rejections_and_malleation_in_one_batch` above would also catch
+        # that, but only as one entry flipping inside a list of expected
+        # rejections. This states the property, so the next reader of a
+        # failure knows what broke rather than which case moved.
+        scheme = _p256()
+        good = _signature(b"sample")
+        zero_s = good[:32] + b"\x00" * 32
+        keys, messages, signatures = _rows(b"sample", good, zero_s, good, zero_s, good)
+
+        got = np.asarray(scheme.verify(keys, messages, signatures, context=None))
+
+        self.assertEqual(list(got), [True, False, True, False, True])
+
     def test_rejects_a_malformed_key_encoding(self) -> None:
         # The harness's tampering pass moves a bit; the header byte and an
         # off-curve coordinate are this scheme's own encoding refusals.
