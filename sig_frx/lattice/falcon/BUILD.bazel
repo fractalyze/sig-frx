@@ -32,21 +32,25 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":arith",
+        "//sig_frx:arrays",
         requirement("frx"),
         requirement("numpy"),
     ],
 )
 
-# §3.10 — verification, over the two libraries above. The `Signature` seam and
+# §3.10 — verification, over the two libraries above. Named for the scheme
+# rather than for the operation: it carries `FalconParams`, `PARAMETER_SETS`,
+# the seam class and `named`, so #26 and #27 add bodies here rather than a
+# `sign.py` that would have to import the checking operation. The `Signature` seam and
 # the shared context rule are the only dependencies that are not Falcon's own;
 # `HashToPoint` reaches its SHAKE through `//sig_frx:hashes` rather than by
 # naming a sponge, so no hash-frx dependency appears here beyond the rate
 # constant its budget is counted in.
 py_library(
-    name = "verify",
+    name = "falcon",
     srcs = [
         "__init__.py",
-        "verify.py",
+        "falcon.py",
     ],
     visibility = ["//visibility:public"],
     deps = [

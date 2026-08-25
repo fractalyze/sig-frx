@@ -60,14 +60,23 @@ parallel walks of eight rather than one walk of `slen`.
 It is written that way because the bit-level scan made decompression the single
 most expensive stage of verification. Measured on a workstation CPU at
 Falcon-1024, `B = 256`: the scan over bits spent 33.5 ms inside a 51.8 ms
-`verify`, or 65% of it; over bytes it spends 11.3 ms inside 30.0 ms, which is
-**3.0x on the stage and 1.7x on the whole operation**. At Falcon-512 the same
-pair is 13.7 ms of 23.9 against 6.2 of 14.7.
+`verify`, or 65% of it; over bytes, with the table itself kept in `uint8` — nine
+states fit in a byte, and this table is what every combine step moves — it
+spends 5.8 ms inside 21.7 ms. **5.8x on the stage, 2.4x on the operation**, and
+the stage is no longer the pole: `HashToPoint` is, at 68%.
 
 That is the opposite of the answer ML-DSA's `hint_bit_unpack` reaches, which
 declines a 1.6x faster form because the stage it would speed up is 0.8% of a
 verify. Same question, different number, other conclusion — which is why the
 number is here rather than a preference for one shape.
+
+**What is left on the table, deliberately.** The ranking after the walk still
+runs at bit granularity — a `cumsum` over `slen` and `n` binary searches into
+it — where the scan above runs at byte granularity. Folding the terminator count
+into the eight-step walk and resolving inside the byte afterwards measures
+another 2.3 ms at this shape. It is not taken here because it buys ~10% of a
+verify in exchange for a second index space in the one function whose rejections
+are a malleability defence, and because the pole is elsewhere.
 
 Two things this does **not** claim. The numbers compare two implementations,
 which is what a local measurement is good for, and they size no budget
@@ -114,6 +123,7 @@ import numpy as np
 from frx import lax
 from frx.typing import ArrayLike
 
+from sig_frx.arrays import namespace
 from sig_frx.lattice.falcon.arith import Q
 
 # §3.11.3's salt, between the header byte and the compressed coefficients.
@@ -125,12 +135,22 @@ _HEADER_BITS = 8
 # `bitlen(q − 1)` — §3.11.4 packs each public key coefficient at this width.
 PK_BITS = (Q - 1).bit_length()
 
+# §3.11.5's `f` and `g` widths by degree; `F` is eight bits at every degree and
+# `G` is not encoded at all. Here rather than in the scheme module because every
+# other §3.11 width is, and #26's `sk_decode` reads them from here.
+SK_FG_BITS = {512: 6, 1024: 5}
+SK_F_BITS = 8
+
 # The nine states of Algorithm 18's cursor, as the image of each state under a
 # `0` bit and under a `1` bit. They differ only at state 8, which is the whole
 # of the encoding: everywhere else the cursor advances regardless of the bit,
 # and in the unary run a `1` is what ends the coefficient.
-_ON_ZERO = np.array([1, 2, 3, 4, 5, 6, 7, 8, 8], dtype=np.int32)
-_ON_ONE = np.array([1, 2, 3, 4, 5, 6, 7, 8, 0], dtype=np.int32)
+# uint8 rather than a lane-width integer: nine states fit in a byte, and this
+# table is what the scan below moves on every combine step, so the width is the
+# scan's bandwidth. Measured at Falcon-1024 B=256 it is 4.04 ms as int32 against
+# 1.33 as uint8, for bit-identical output.
+_ON_ZERO = np.array([1, 2, 3, 4, 5, 6, 7, 8, 8], dtype=np.uint8)
+_ON_ONE = np.array([1, 2, 3, 4, 5, 6, 7, 8, 0], dtype=np.uint8)
 _UNARY_STATE = 8
 
 
@@ -142,7 +162,7 @@ def _byte_transitions() -> np.ndarray:
     The scan below is over this instead of over single bits, which is what makes
     it a factor of eight shorter.
     """
-    table = np.empty((256, _ON_ZERO.shape[0]), dtype=np.int32)
+    table = np.empty((256, _ON_ZERO.shape[0]), dtype=np.uint8)
     for value in range(256):
         for start in range(_ON_ZERO.shape[0]):
             state = start
@@ -159,9 +179,17 @@ _BYTE_STEP = _byte_transitions()
 def bytes_to_bits_high_first(values: ArrayLike) -> Any:
     """§3.11.1 — each byte most significant bit first, over the trailing axis.
 
-    The mirror image of [`mldsa.encoding.bytes_to_bits`](../mldsa/encoding.py).
+    The mirror image of [`mldsa.encoding.bytes_to_bits`](../mldsa/encoding.py),
+    including its namespace rule: a host value stays on numpy, so the key
+    encoder #26 brings does not drag key generation onto a device
+    ([`conventions.md`](../../../docs/reference/conventions.md)).
+
+    `decompress` is the one function here that cannot follow the rule — its
+    scan is an frx primitive with no host form — which is the case the rule
+    itself grants an exception to.
     """
-    data = fnp.asarray(values, dtype=np.uint8)
+    xnp = namespace(values)
+    data = xnp.asarray(values, dtype=np.uint8)
     bits = (data[..., None] >> np.arange(7, -1, -1, dtype=np.uint8)) & np.uint8(1)
     return bits.reshape(*data.shape[:-1], -1)
 
@@ -205,7 +233,7 @@ def pk_decode(pk: ArrayLike, n: int) -> tuple[Any, Any]:
     implementation does with one is refuse it. Reducing instead would accept two
     distinct encodings of one key.
     """
-    data = fnp.asarray(pk, dtype=np.uint8)
+    data = namespace(pk).asarray(pk, dtype=np.uint8)
     header = data[..., 0] == np.uint8(degree_header(n, 0b0000))
     coefficients = unpack_fields_high_first(data[..., 1:], PK_BITS)
     return coefficients, header & (coefficients < np.uint32(Q)).all(axis=-1)
@@ -229,28 +257,32 @@ def decompress(data: ArrayLike, n: int) -> tuple[Any, Any]:
     # one of `slen`. The scan is inclusive, so shifting by one gives the state
     # each byte is *entered* in.
     reached = lax.associative_scan(
-        lambda first, second: fnp.take_along_axis(second, first, axis=-1),
+        lambda first, second: fnp.take_along_axis(
+            second, first.astype(np.int32), axis=-1
+        ),
         fnp.take(_BYTE_STEP, body.astype(np.int32), axis=0),
         axis=0,
     )[:, 0]
-    entered = fnp.concatenate([fnp.zeros(1, dtype=np.int32), reached[:-1]])
+    entered = fnp.concatenate([fnp.zeros(1, dtype=np.uint8), reached[:-1]])
 
+    # The seven transitions inside a byte, not eight: the state after the last
+    # bit is the next byte's `entered`, which the scan already produced.
     within = stream.reshape(-1, 8)
-    walked = []
-    cursor = entered
-    for offset in range(8):
-        walked.append(cursor)
-        cursor = fnp.where(
-            within[:, offset] != 0,
-            fnp.take(_ON_ONE, cursor),
-            fnp.take(_ON_ZERO, cursor),
+    walked = [entered]
+    for offset in range(7):
+        walked.append(
+            fnp.where(
+                within[:, offset] != 0,
+                fnp.take(_ON_ONE, walked[-1].astype(np.int32)),
+                fnp.take(_ON_ZERO, walked[-1].astype(np.int32)),
+            )
         )
     state = fnp.stack(walked, axis=-1).reshape(-1)
 
     # A `1` read in the unary state closes a coefficient. Ranking those by a
     # running count makes "where the i-th one is" a `searchsorted`, the same
     # mechanism `rejection.first_accepted` takes a sampler's survivors with.
-    closes = (state == np.int32(_UNARY_STATE)) & (stream != 0)
+    closes = (state == np.uint8(_UNARY_STATE)) & (stream != 0)
     ranks = fnp.cumsum(closes, axis=-1, dtype=np.int32)
     wanted = fnp.arange(1, n + 1, dtype=np.int32)
     ends = fnp.searchsorted(ranks, wanted)
@@ -285,20 +317,32 @@ def decompress(data: ArrayLike, n: int) -> tuple[Any, Any]:
     return coefficients, terminated & canonical & padded
 
 
+def slen(sbytelen: int) -> int:
+    """Algorithm 16 line 2's `8·sbytelen − 328`, as the bits it actually names.
+
+    The 328 is the header byte and the 40-byte salt, so the standard's constant
+    and `8·(sbytelen − 1 − SALT_SIZE)` are the same expression — which is why
+    only one of them is written here and nothing checks them against each other.
+    A guard on that identity would compare `SALT_SIZE` against itself.
+    """
+    return 8 * (sbytelen - 1 - SALT_SIZE)
+
+
 def sig_decode(sigma: ArrayLike, n: int, sbytelen: int) -> tuple[Any, Any, Any]:
     """§3.11.3 — `(salt, s, ok)` from a padded signature of `sbytelen` bytes.
 
     The header byte and the salt are fixed-width; everything after them is the
     compressed `s`, and `slen = 8·sbytelen − 328` is Algorithm 16 line 2's own
     expression for its bit length — 328 being the header byte and the 40-byte
-    salt. Written as the standard writes it and then checked against the bytes
-    that are actually there, so a `sbytelen` that did not come from Table 3.3
-    fails here rather than silently decoding a prefix.
+    salt — which is to say `slen` is exactly the bits left over, and `decompress`
+    reads that off the array rather than being told.
     """
     data = fnp.asarray(sigma, dtype=np.uint8)
-    slen = 8 * sbytelen - 328
-    if slen != 8 * (sbytelen - 1 - SALT_SIZE):
-        raise ValueError(f"sbytelen {sbytelen} does not frame a Falcon signature")
+    if data.shape[-1] != sbytelen:
+        raise ValueError(
+            f"a signature is {sbytelen} bytes, got {data.shape[-1]} — a batch of "
+            f"the wrong length is `verify`'s verdict to return, not this decoder's"
+        )
     header = data[..., 0] == np.uint8(degree_header(n, 0b0011))
     salt = data[..., 1 : 1 + SALT_SIZE]
     coefficients, ok = decompress(data[..., 1 + SALT_SIZE :], n)

@@ -56,16 +56,18 @@ comparison the standard writes.
 ## Where the time goes
 
 Measured on a workstation CPU at Falcon-1024, `B = 256`, warm: `verify` is
-30.0 ms, of which `HashToPoint` is 14.0 (47%), decompression 11.3 (38%) and the
-decode-plus-product 11.9 (40%) — the three overlap because each was timed as
-the program it would be on its own, so they sum past 100%.
+21.7 ms, of which `HashToPoint` is 14.7 (68%), decompression 5.8 (27%) and the
+decode-plus-product 6.2 (28%) — the three overlap because each was timed as the
+program it would be on its own, so they sum past 100%. Falcon-512 is 11.2 ms at
+the same shape, with the same ranking.
 
 The shape worth carrying forward is that **the challenge hash is the pole, not
 the transform**. Falcon's `s1` recovery is one forward NTT and one inverse over
 a single polynomial, where a SHAKE has to absorb the message and squeeze
 `⌊2^16/q⌋`-rejected draws until `n` survive — 2720 bytes at Falcon-1024 against
 `2n` bytes of useful output. Anything spent making the ring arithmetic cheaper
-here is spent on 40% of the wrong stage.
+here is spent on a quarter of the wrong stage — and the same now goes for the
+decoder, which is why `encoding.py` records the further optimization it declines.
 
 These numbers compare implementations and size no budget, and they are CPU
 only — a CUDA-less box refuses `FRX_PLATFORMS=cuda` rather than falling back,
@@ -107,6 +109,11 @@ _DRAW_BITS = 16
 _HASH_ACCEPT = ((1 << _DRAW_BITS) // Q * Q, 1 << _DRAW_BITS)
 _HASH_PER_BLOCK = SHAKE256_RATE // (_DRAW_BITS // 8)
 
+# How many squared coefficients `_within_bound` folds before comparing. Any
+# divisor of `2n` under `2^32 / (⌊√⌊β²⌋⌋ + 1)²` works — that ceiling is 61 at
+# Falcon-1024 and 126 at Falcon-512 — and 32 divides both degrees' `2n`.
+_NORM_BLOCK = 32
+
 
 @dataclass(frozen=True)
 class FalconParams:
@@ -126,14 +133,18 @@ class FalconParams:
     def __post_init__(self) -> None:
         if self.n not in arith.DEGREES:
             raise ValueError(f"degree {self.n} is not a Falcon parameter set")
-        # §3.11.3: the compressed coefficients get what the header byte and the
-        # salt leave, and Algorithm 16 line 2 names that length as
-        # `8·sbytelen − 328`. A set whose two numbers disagree would decode a
-        # prefix of its own signatures.
-        if 8 * self.signature_size - 328 != 8 * (
-            self.signature_size - 1 - encoding.SALT_SIZE
-        ):
-            raise ValueError(f"sbytelen {self.signature_size} does not frame `s`")
+        # §3.11.3 gives the compressed coefficients whatever the header byte and
+        # the salt leave, and `n` of them need nine bits each at minimum. A set
+        # whose `sbytelen` cannot hold that would decode a prefix of its own
+        # signatures — which is a falsifiable claim about the two numbers, where
+        # comparing Algorithm 16 line 2's `328` against `8·(1 + SALT_SIZE)` is
+        # the same constant twice (see `encoding.slen`).
+        if encoding.slen(self.signature_size) < 9 * self.n:
+            raise ValueError(
+                f"sbytelen {self.signature_size} leaves "
+                f"{encoding.slen(self.signature_size)} bits, under the {9 * self.n} "
+                f"a degree-{self.n} signature needs at minimum"
+            )
 
     @property
     def public_key_size(self) -> int:
@@ -143,8 +154,7 @@ class FalconParams:
     @property
     def secret_key_size(self) -> int:
         """`1 + n·(2·w + 8)/8` — §3.11.5's `f`, `g` at `w` bits and `F` at 8."""
-        width = {512: 6, 1024: 5}[self.n]
-        return 1 + self.n * (2 * width + 8) // 8
+        return 1 + self.n * (2 * encoding.SK_FG_BITS[self.n] + encoding.SK_F_BITS) // 8
 
 
 # Table 3.3's two columns. The names are the standard's own, `Falcon-n` after the
@@ -202,7 +212,23 @@ def _within_bound(values: ArrayLike, bound: int) -> Any:
     magnitude = fnp.minimum(
         fnp.abs(fnp.asarray(values, dtype=np.int32)), np.int32(cap)
     ).astype(np.uint32)
-    running = fnp.cumsum(magnitude * magnitude, axis=-1, dtype=np.uint32)
+    # Zero-padded to a whole number of blocks. A zero square adds nothing to a
+    # sum of squares, so this is an identity rather than a case to reason about,
+    # and it keeps the helper independent of `2n` — `verify` always arrives at a
+    # multiple, a test asking about five coefficients does not.
+    squares = magnitude * magnitude
+    tail = -squares.shape[-1] % _NORM_BLOCK
+    if tail:
+        squares = fnp.pad(squares, [(0, 0)] * (squares.ndim - 1) + [(0, tail)])
+    # A plain reduction inside each block, and the running comparison only
+    # across blocks: `2^32 / cap²` is 61 at Falcon-1024, so any 32 squares sum
+    # without wrapping, and the first *block* prefix to pass `bound` is at most
+    # `bound + 32·cap²`, still far under 2^32. Same guarantee as comparing every
+    # element's prefix, at 0.12 ms against 0.41 for the full-length scan.
+    blocked = squares.reshape(*squares.shape[:-1], -1, _NORM_BLOCK).sum(
+        axis=-1, dtype=np.uint32
+    )
+    running = fnp.cumsum(blocked, axis=-1, dtype=np.uint32)
     return (running <= np.uint32(bound)).all(axis=-1)
 
 

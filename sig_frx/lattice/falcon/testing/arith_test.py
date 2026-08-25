@@ -19,23 +19,7 @@ import numpy as np
 from absl.testing import absltest, parameterized
 
 from sig_frx.lattice.falcon import arith
-
-
-def _negacyclic_reference(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """`(a · b) mod (x^n + 1) mod q`, in exact integers.
-
-    The wrap is a subtraction rather than an addition — that sign is the whole
-    difference between this ring and the cyclic one.
-
-    `int64` holds it exactly rather than nearly: a coefficient is under
-    `q = 12289`, so a product is under `1.6e8` and a length-1024 sum under
-    `1.6e11`, against `int64`'s `9.2e18`.
-    """
-    n = len(a)
-    full = np.convolve(a.astype(np.int64), b.astype(np.int64))
-    wrapped = full[:n].copy()
-    wrapped[: n - 1] -= full[n:]
-    return wrapped % arith.Q
+from sig_frx.lattice.falcon.testing import falcon_reference as ref
 
 
 def _random(shape: int | tuple[int, ...], seed: int) -> np.ndarray:
@@ -59,7 +43,7 @@ class TransformTest(parameterized.TestCase):
         """The gate: the transform implements the ring's multiplication."""
         a, b = _random(n, seed=1), _random(n, seed=2)
         np.testing.assert_array_equal(
-            _ring_mul(a, b) % arith.Q, _negacyclic_reference(a, b)
+            _ring_mul(a, b) % arith.Q, ref.negacyclic_mul(a, b)
         )
 
     @parameterized.parameters(*arith.DEGREES)
@@ -79,7 +63,7 @@ class TransformTest(parameterized.TestCase):
         for row, (a_row, b_row) in enumerate(zip(a, b)):
             np.testing.assert_array_equal(
                 got[row] % arith.Q,
-                _negacyclic_reference(a_row, b_row),
+                ref.negacyclic_mul(a_row, b_row),
                 err_msg=f"batch row {row}",
             )
 

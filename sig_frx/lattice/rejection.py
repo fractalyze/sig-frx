@@ -31,8 +31,11 @@ parameterisation on the host, and it means the bound-exhausted path is
 unreachable rather than merely unlikely (see `require_enough` for what happens if
 it is reached anyway).
 
-Which loop shape a rejection gets is the scheme's decision to record, and each
-scheme's page records its own alongside the loops that went the other way.
+Which loop shape a rejection gets is the scheme's decision to record. ML-DSA's
+is on [`ml-dsa.md`](../../docs/schemes/ml-dsa.md) alongside the signing loop that
+went the other way; Falcon's `HashToPoint` is recorded in its own module until
+that scheme has a page, which it gets when signing lands and there is a whole
+scheme to describe.
 
 ## Collection is a gather, and a running count is the schedule
 

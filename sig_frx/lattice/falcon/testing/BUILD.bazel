@@ -15,6 +15,7 @@ py_test(
     size = "small",
     srcs = ["arith_test.py"],
     deps = [
+        ":falcon_reference",
         "//sig_frx/lattice/falcon:arith",
         requirement("absl_py"),
         requirement("numpy"),
@@ -35,7 +36,8 @@ py_library(
 
 # Transcribed constants rather than a fetched file: Falcon publishes no ACVP set,
 # so the authority is the reference implementation's own KAT and the provenance
-# lives in the module. #28 replaces this with the pinned whole set.
+# lives in the module. #28 replaces this with the pinned whole set. Depends on
+# the harness because it hands its cases over as `kat.KatVector`.
 py_library(
     name = "falcon_vectors",
     testonly = True,
@@ -43,6 +45,25 @@ py_library(
         "__init__.py",
         "falcon_vectors.py",
     ],
+    deps = ["//sig_frx/testing:kat"],
+)
+
+# The published verdicts and everything the shared harness derives from them.
+# Separate from `falcon_test` the way `ml_dsa_kat_test` is from `ml_dsa_test`:
+# this one is the vectors, that one is the scheme's own structure.
+py_test(
+    name = "falcon_kat_test",
+    size = "medium",
+    srcs = ["falcon_kat_test.py"],
+    deps = [
+        ":falcon_reference",
+        ":falcon_vectors",
+        "//sig_frx/lattice/falcon",
+        "//sig_frx/testing:kat",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
 )
 
 # Sized from the executor: 17.7 s on the CPU leg against 11.5 s on the GPU one,
@@ -74,14 +95,14 @@ py_test(
 # — a target that passes on a workstation at 48.6 s and flakes where it counts,
 # which is the whole of why a local number does not size a budget.
 py_test(
-    name = "verify_test",
+    name = "falcon_test",
     size = "large",
-    srcs = ["verify_test.py"],
+    srcs = ["falcon_test.py"],
     deps = [
         ":falcon_reference",
         ":falcon_vectors",
         "//sig_frx:signature",
-        "//sig_frx/lattice/falcon:verify",
+        "//sig_frx/lattice/falcon",
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),

@@ -45,15 +45,24 @@ upstream's, and which field each lands in is what the two sections state. The
 padding is the only thing added, and Algorithm 18's trailing-zero rule is what
 makes it unambiguous.
 
-## Two cases per degree, and why the batch axis is not gated here
+## Two cases per degree, driven through the shared harness
 
-The generator varies `mlen` per case, so no two published cases share a message
-length and grouping them yields nothing but `B = 1` groups — the gap
-[`conventions.md`](../../../../docs/reference/conventions.md) records for both
-FIPS validation programs, arriving here for the same reason. What gates the
-batch axis is `verify_test`'s replicate-and-tamper, built from an accepted case,
-and what these two per degree buy is that a fluke cannot carry a degree on its
-own.
+`vectors(name)` hands them to [`kat.check`](../../../testing/kat.py), which owns
+the published-verdict pass, the tampering pass and the replicate-and-tamper batch
+axis. None of those is Falcon's to re-derive: `conventions.md` puts the batch-axis
+gate in the harness precisely "because the gap is a property of how the vectors
+are published, not of any one scheme — a per-scheme fix would be written once per
+scheme for one cause."
+
+`seed` and `secret_key` are absent, which is what makes a verification-only
+scheme drivable: `_check_keygen` skips a vector with no seed and `_check_sign`
+one with no secret key, so neither reaches the `NotImplementedError` that
+`keygen` and `sign` are until #26 and #27. `eddsa_test` is the precedent for
+inline records rather than a loaded file.
+
+What these two per degree buy over one is that a fluke cannot carry a degree on
+its own; the batch axis is not gated by them, since the generator varies `mlen`
+per case and grouping published cases yields only `B = 1`.
 
 **[#28](https://github.com/fractalyze/sig-frx/issues/28) replaces this file**
 with the whole set fetched and sha256-pinned as an `http_file`, which is what
@@ -65,6 +74,8 @@ assembly.
 from __future__ import annotations
 
 from typing import NamedTuple
+
+from sig_frx.testing import kat
 
 
 class Vector(NamedTuple):
@@ -386,3 +397,23 @@ VECTORS: dict[str, tuple[Vector, ...]] = {
         ),
     ),
 }
+
+
+def vectors(name: str) -> list[kat.KatVector]:
+    """One parameter set's cases as the shared harness's record.
+
+    `valid=True` throughout: every case here is one the reference implementation
+    accepts, which is what the harness's derived passes need as their starting
+    point — a moved bit is evidence only against something that verified before
+    it moved.
+    """
+    return [
+        kat.KatVector(
+            case_id=f"falcon-round3 KAT {name} count={vector.case}",
+            parameter_set=name,
+            public_key=bytes.fromhex(vector.public_key),
+            message=bytes.fromhex(vector.message),
+            signature=bytes.fromhex(vector.signature),
+        )
+        for vector in VECTORS[name]
+    ]

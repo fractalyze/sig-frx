@@ -6,7 +6,7 @@ becomes an associative scan over a nine-state machine, Algorithm 3's `while`
 becomes a fixed candidate budget with a compaction, the ring product becomes an
 NTT round trip, and Algorithm 16 becomes one `vmap`ped computation over a batch.
 Each is a change made for the compiler, and it is the only thing about
-`encoding.py` and `verify.py` a reader has to take on trust — so this file takes
+`encoding.py` and `falcon.py` a reader has to take on trust — so this file takes
 it back, looping one coefficient and one bit at a time over Python integers, and
 the tests require the two to agree
 ([`conventions.md`](../../../../docs/reference/conventions.md)).
@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import hashlib
 from typing import Any
+
+import numpy as np
 
 Q = 12289
 
@@ -161,16 +163,28 @@ def pk_decode(pk: bytes, n: int) -> list[int] | None:
     return out
 
 
-def negacyclic_mul(a: list[int], b: list[int], n: int) -> list[int]:
-    """Multiplication in `Z_q[x]/(x^n + 1)`, one coefficient pair at a time."""
-    out = [0] * n
-    for i, ai in enumerate(a):
-        for j, bj in enumerate(b):
-            if i + j < n:
-                out[i + j] = (out[i + j] + ai * bj) % Q
-            else:
-                out[i + j - n] = (out[i + j - n] - ai * bj) % Q
-    return out
+def negacyclic_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """`(a · b) mod (x^n + 1) mod q`, in exact integers.
+
+    The wrap is a subtraction rather than an addition — that sign is the whole
+    difference between this ring and the cyclic one.
+
+    `int64` holds it exactly rather than nearly: a coefficient is under
+    `q = 12289`, so a product is under `1.6e8` and a length-1024 sum under
+    `1.6e11`, against `int64`'s `9.2e18`. That exactness is what makes this an
+    oracle; the convolution is numpy's because nothing about *how* the exact
+    integers are added is the property under test, and a `n²` Python loop would
+    put a minute onto `arith_test`.
+
+    Shared with [`arith_test`](arith_test.py), which is where this form comes
+    from: two oracles for one ring is one edit away from gating the transform
+    and the scheme against different rings.
+    """
+    n = len(a)
+    full = np.convolve(a.astype(np.int64), b.astype(np.int64))
+    wrapped = full[:n].copy()
+    wrapped[: n - 1] -= full[n:]
+    return wrapped % Q
 
 
 def centered(w: list[int]) -> list[int]:
@@ -193,7 +207,7 @@ def verify(pk: bytes, message: bytes, signature: bytes, name: str) -> bool:
     if s2 is None:
         return False
     c = hash_to_point(signature[1:41] + message, n)
-    product = negacyclic_mul([x % Q for x in s2], h, n)
+    product = negacyclic_mul(np.array(s2) % Q, np.array(h))
     s1 = centered([(ci - pi) % Q for ci, pi in zip(c, product)])
     norm = sum(x * x for x in s1) + sum(x * x for x in s2)
     return norm <= params["squared_norm_bound"]

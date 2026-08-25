@@ -1,31 +1,28 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""Falcon verification against the round-3 vectors, and against tampering.
+"""What Falcon's own structure makes rejectable, and the seam's shape.
 
-A scheme that accepts every published signature has proven nothing about
-rejection — a verifier returning `True` unconditionally passes all of it — so the
-negative cases are half of this file
-([`conventions.md`](../../../../docs/reference/conventions.md)). Every one of
-them is a mutation of a case the reference implementation accepts, and the
-accepted case is asserted alongside, because a rejection that would also reject
-the genuine signature proves nothing either.
+The published verdicts, the generic tampering pass and the batch axis are
+[`falcon_kat_test`](falcon_kat_test.py)'s, through the shared harness. What is
+here is the half `conventions.md` asks a scheme to add on top: "every rejection
+its own structure makes possible that a generic bit flip would not reach."
 
-The mutations are chosen to reach each stage of Algorithm 16 separately: the
-message and the salt reach `HashToPoint`, a byte inside `enc_s` reaches the norm
-through a decoded-but-different `s2`, the header byte and the padding reach the
-decoder's own rejections, and a byte of the public key reaches the product. A
-single generic bit flip would land in whichever stage happened to be first.
+For Falcon that is the encoding. The harness moves a bit in each of the three
+inputs; it does not know that byte 0 of a signature is a format nibble over a
+degree, that the tail past the last terminator is padding whose non-zero
+spelling is a second encoding of the same `s`, or that fourteen bits can hold a
+public key coefficient the modulus cannot. Each of those is malleability — same
+message, same key, different bytes, still valid — and each gets a case here,
+with the unmutated control asserted alongside, because a rejection that would
+also reject the genuine signature proves nothing.
 
-**The batch axis is gated on a batch this file builds.** The generator varies the
-message length per case, so no two published cases share a static `L` and
-grouping them yields only `B = 1` — the gap `conventions.md` records for the FIPS
-validation programs, arriving here for the same reason. So an accepted case is
-replicated and some entries are corrupted, which fails a `verify` that reduced
-over the batch and equally one that ignored its input.
+The rest is the seam rather than the standard: the derived sizes against Table
+3.3, a wrong rank raising where a wrong length is a verdict, the refusal of an
+application context Falcon does not define, and the two operations #26 and #27
+fill in.
 
-Falcon has no `sign` here ([#27](https://github.com/fractalyze/sig-frx/issues/27)),
-so there is no round trip to lean on — which is the right way round: a scheme
-verifying its own signatures is the self-consistency the same page says is not
-evidence.
+Falcon has no `sign` here, so there is no round trip to lean on — which is the
+right way round: a scheme verifying its own signatures is the self-consistency
+`conventions.md` says is not evidence.
 """
 
 from __future__ import annotations
@@ -36,27 +33,41 @@ import frx
 import numpy as np
 from absl.testing import absltest, parameterized
 
-from sig_frx.lattice.falcon import verify as falcon
+from sig_frx.lattice.falcon import falcon
 from sig_frx.lattice.falcon.testing import falcon_reference as ref
-from sig_frx.lattice.falcon.testing.falcon_vectors import VECTORS, Vector
+from sig_frx.lattice.falcon.testing.falcon_vectors import VECTORS
 from sig_frx.signature import Signature
 
 _PARAMETER_SETS = ref.parameter_cases()
-_CASES = tuple(
-    {"name": name, "case": vector.case, "vector": vector}
-    for name, vectors in VECTORS.items()
-    for vector in vectors
-)
 
 
 def _bytes(blob: str) -> np.ndarray:
     return np.frombuffer(bytes.fromhex(blob), dtype=np.uint8)
 
 
-def _flip(blob: np.ndarray, index: int) -> np.ndarray:
-    mutated = blob.copy()
-    mutated[index] ^= 1
-    return mutated
+def _verdict(
+    name: str,
+    *,
+    public_key: np.ndarray | None = None,
+    signature: np.ndarray | None = None,
+) -> bool:
+    """The first published case of `name`, with the named input replaced.
+
+    Every case below varies exactly one of the three inputs, so spelling the
+    other two at each site is what the overrides remove.
+    """
+    vector = VECTORS[name][0]
+    verdict = falcon.named(name).verify(
+        (_bytes(vector.public_key) if public_key is None else public_key)[None, :],
+        _bytes(vector.message)[None, :],
+        (_bytes(vector.signature) if signature is None else signature)[None, :],
+    )
+    return bool(np.asarray(verdict)[0])
+
+
+def _signature(name: str) -> np.ndarray:
+    """A writable copy — `frombuffer` hands back a read-only view."""
+    return _bytes(VECTORS[name][0].signature).copy()
 
 
 class Sizes(parameterized.TestCase):
@@ -68,6 +79,10 @@ class Sizes(parameterized.TestCase):
         self.assertEqual(scheme.public_key_size, params["public_key_size"])
         self.assertEqual(scheme.secret_key_size, params["secret_key_size"])
         self.assertEqual(scheme.signature_max_size, params["signature_size"])
+        # Transcribed rather than derived, so it is the one value a typo can
+        # reach — and a bound mistyped upward widens what Falcon accepts without
+        # failing a single published vector.
+        self.assertEqual(scheme.params.squared_norm_bound, params["squared_norm_bound"])
 
     def test_an_unknown_parameter_set_is_refused(self) -> None:
         with self.assertRaises(ValueError):
@@ -145,175 +160,86 @@ class Bound(parameterized.TestCase):
         self.assertTrue(bool(falcon._within_bound(-values, bound)))
 
 
-class Vectors(parameterized.TestCase):
-    """Every transcribed case, accepted; every mutation of it, refused."""
+class Encoding(parameterized.TestCase):
+    """The rejections Falcon's own encoding makes possible.
 
-    def _verify(
-        self, name: str, pk: np.ndarray, message: np.ndarray, signature: np.ndarray
-    ) -> bool:
-        verdict = falcon.named(name).verify(
-            pk[None, :], message[None, :], signature[None, :]
-        )
-        return bool(np.asarray(verdict)[0])
+    A generic bit flip — which the shared harness already does across all three
+    inputs — lands wherever it lands. These reach the format nibble, the padding
+    tail, and a coefficient the modulus cannot hold, none of which it knows to
+    aim at.
+    """
 
-    @parameterized.parameters(*_CASES)
-    def test_the_published_signature_is_accepted(
-        self, name: str, case: int, vector: Vector
-    ) -> None:
-        del case
-        self.assertTrue(
-            self._verify(
-                name,
-                _bytes(vector.public_key),
-                _bytes(vector.message),
-                _bytes(vector.signature),
-            )
-        )
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_the_unmutated_case_is_accepted(self, name: str, **params: Any) -> None:
+        """The control every rejection below is measured against."""
+        del params
+        self.assertTrue(_verdict(name))
 
-    @parameterized.parameters(*_CASES)
-    def test_the_reference_agrees_that_it_is_accepted(
-        self, name: str, case: int, vector: Vector
-    ) -> None:
-        """The transcription is only evidence if it reproduces upstream's verdict."""
-        del case
-        self.assertTrue(
-            ref.verify(
-                bytes.fromhex(vector.public_key),
-                bytes.fromhex(vector.message),
-                bytes.fromhex(vector.signature),
-                name,
-            )
-        )
-
-    @parameterized.parameters(*_CASES)
-    def test_a_moved_bit_in_the_message_is_refused(
-        self, name: str, case: int, vector: Vector
-    ) -> None:
-        del case
-        self.assertFalse(
-            self._verify(
-                name,
-                _bytes(vector.public_key),
-                _flip(_bytes(vector.message), 0),
-                _bytes(vector.signature),
-            )
-        )
-
-    @parameterized.parameters(*_CASES)
-    def test_a_moved_bit_in_the_salt_is_refused(
-        self, name: str, case: int, vector: Vector
-    ) -> None:
-        """Reaches `HashToPoint` without touching what the decoder reads."""
-        del case
-        self.assertFalse(
-            self._verify(
-                name,
-                _bytes(vector.public_key),
-                _bytes(vector.message),
-                _flip(_bytes(vector.signature), 1),
-            )
-        )
-
-    @parameterized.parameters(*_CASES)
-    def test_a_moved_bit_in_the_coefficients_is_refused(
-        self, name: str, case: int, vector: Vector
-    ) -> None:
-        """Decodes to a different `s2`, so the norm is what has to catch it."""
-        del case
-        self.assertFalse(
-            self._verify(
-                name,
-                _bytes(vector.public_key),
-                _bytes(vector.message),
-                _flip(_bytes(vector.signature), 60),
-            )
-        )
-
-    @parameterized.parameters(*_CASES)
-    def test_a_moved_bit_in_the_public_key_is_refused(
-        self, name: str, case: int, vector: Vector
-    ) -> None:
-        del case
-        self.assertFalse(
-            self._verify(
-                name,
-                _flip(_bytes(vector.public_key), 3),
-                _bytes(vector.message),
-                _bytes(vector.signature),
-            )
-        )
-
-    @parameterized.parameters(*_CASES)
-    def test_the_uncompressed_header_is_refused(
-        self, name: str, case: int, vector: Vector
-    ) -> None:
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_the_uncompressed_header_is_refused(self, name: str, **params: Any) -> None:
         """§3.11.3's `cc = 10` is a different length; this decoder takes `01`."""
-        del case
-        signature = _bytes(vector.signature).copy()
+        del params
+        signature = _signature(name)
         signature[0] = (signature[0] & 0x0F) | 0x50
-        self.assertFalse(
-            self._verify(
-                name, _bytes(vector.public_key), _bytes(vector.message), signature
-            )
-        )
+        self.assertFalse(_verdict(name, signature=signature))
 
-    @parameterized.parameters(*_CASES)
-    def test_a_nonzero_padding_byte_is_refused(
-        self, name: str, case: int, vector: Vector
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_a_wrong_degree_in_the_header_is_refused(
+        self, name: str, **params: Any
     ) -> None:
+        """The nibble names `log2(n)`; the other set's signature is not this one's."""
+        del params
+        signature = _signature(name)
+        signature[0] ^= 0x01
+        self.assertFalse(_verdict(name, signature=signature))
+
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_a_nonzero_padding_byte_is_refused(self, name: str, **params: Any) -> None:
         """Malleability: the same `s` with a different tail would verify."""
-        del case
-        signature = _bytes(vector.signature).copy()
+        del params
+        signature = _signature(name)
         self.assertEqual(int(signature[-1]), 0)
         signature[-1] = 1
-        self.assertFalse(
-            self._verify(
-                name, _bytes(vector.public_key), _bytes(vector.message), signature
-            )
-        )
-
-
-class Batch(parameterized.TestCase):
-    """The property the seam exists for, on a batch built here."""
+        self.assertFalse(_verdict(name, signature=signature))
 
     @parameterized.parameters(*_PARAMETER_SETS)
-    def test_each_entry_gets_its_own_verdict(self, name: str, **params: Any) -> None:
+    def test_a_public_key_coefficient_at_or_above_q_is_refused(
+        self, name: str, **params: Any
+    ) -> None:
+        """Fourteen bits hold 16383 against `q = 12289`, so this is representable."""
+        n = params["n"]
+        bits: list[int] = [0] * 8
+        bits[4:8] = [(n.bit_length() - 1) >> shift & 1 for shift in range(3, -1, -1)]
+        for index in range(n):
+            value = ref.Q if index == 0 else 0
+            bits.extend((value >> shift) & 1 for shift in range(13, -1, -1))
+        forged = np.frombuffer(ref.bytes_of(bits), dtype=np.uint8)
+        self.assertLen(forged, params["public_key_size"])
+        self.assertFalse(_verdict(name, public_key=forged))
+
+
+class CompilationUnit(parameterized.TestCase):
+    """`jit` belongs around the batch, which is a claim only this file can make.
+
+    The shared harness calls `verify` eagerly, so nothing it derives would notice
+    a body that only traces one entry at a time.
+    """
+
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_the_whole_batch_traces_as_one_computation(
+        self, name: str, **params: Any
+    ) -> None:
         del params
         vector = VECTORS[name][0]
-        pk, message = _bytes(vector.public_key), _bytes(vector.message)
         good = _bytes(vector.signature)
-        bad = _flip(good, 60)
-        signatures = np.stack([good, bad, good, bad, bad])
-        verdict = np.asarray(
-            falcon.named(name).verify(
-                np.stack([pk] * 5), np.stack([message] * 5), signatures
-            )
+        broken = good.copy()
+        broken[60] ^= 1
+        verdict = frx.jit(falcon.named(name).verify)(
+            np.stack([_bytes(vector.public_key)] * 3),
+            np.stack([_bytes(vector.message)] * 3),
+            np.stack([good, broken, good]),
         )
-        np.testing.assert_array_equal(verdict, [True, False, True, False, False])
-
-    @parameterized.parameters(*_PARAMETER_SETS)
-    def test_one_entry_is_a_batch_of_one(self, name: str, **params: Any) -> None:
-        del params
-        vector = VECTORS[name][0]
-        verdict = falcon.named(name).verify(
-            _bytes(vector.public_key)[None, :],
-            _bytes(vector.message)[None, :],
-            _bytes(vector.signature)[None, :],
-        )
-        self.assertEqual(np.asarray(verdict).shape, (1,))
-
-    @parameterized.parameters(*_PARAMETER_SETS)
-    def test_it_traces_as_one_computation(self, name: str, **params: Any) -> None:
-        """`jit` around the batch is the compilation unit `conventions.md` names."""
-        del params
-        vector = VECTORS[name][0]
-        scheme = falcon.named(name)
-        verdict = frx.jit(scheme.verify)(
-            _bytes(vector.public_key)[None, :],
-            _bytes(vector.message)[None, :],
-            _bytes(vector.signature)[None, :],
-        )
-        self.assertTrue(bool(np.asarray(verdict)[0]))
+        np.testing.assert_array_equal(np.asarray(verdict), [True, False, True])
 
 
 class Malformed(parameterized.TestCase):
@@ -392,7 +318,7 @@ class NotYetImplemented(parameterized.TestCase):
                 scheme.keygen(np.zeros(48, dtype=np.uint8))
             else:
                 scheme.sign(np.zeros(1281, dtype=np.uint8), np.zeros(4, np.uint8))
-        self.assertIn("#178", str(raised.exception))
+        self.assertIn("sig-frx#", str(raised.exception))
 
 
 if __name__ == "__main__":
