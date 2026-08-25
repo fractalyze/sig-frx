@@ -149,7 +149,9 @@ def encode_batch(
     Every field becomes its own big-endian bytes and the address is one gather out
     of them, so an address costs no Python of its own. Fields that are single
     values broadcast across the batch, which is the common shape: a fixed layer and
-    type against a column of node indices.
+    type against a column of node indices. A byte field broadcasts on the same
+    rule, from one row rather than from a scalar, since its trailing axis is the
+    slot's width rather than a second address.
 
     **One gather, never a scatter.** The obvious shape — write each field into its
     slot of a zeroed buffer — is an in-place assignment on the host and a scatter
@@ -215,7 +217,9 @@ def _field_bytes(
 ) -> list[np.ndarray | Array]:
     """Each field as `[count, width]` big-endian bytes, in the order given.
 
-    A byte field is already those bytes. The integer fields are taken **together**
+    A byte field is already those bytes, broadcast to the batch the way an integer
+    field is — a caller holding one value for every row passes one row, which is
+    what `rows` already counts it as. The integer fields are taken **together**
     — stacked into one table and shifted apart in one expression — rather than a
     field at a time. Six fields done separately is six times the array calls for
     the same bytes, and this is the module that exists so an address costs no
@@ -228,7 +232,9 @@ def _field_bytes(
         index for index, value in enumerate(values) if not bytestring.is_bytes(value)
     ]
     blocks: dict[int, np.ndarray | Array] = {
-        index: xnp.asarray(values[index], dtype=xnp.uint8)
+        index: xnp.broadcast_to(
+            xnp.asarray(value, dtype=xnp.uint8), (count, np.shape(value)[1])
+        )
         for index, value in enumerate(values)
         if bytestring.is_bytes(value)
     }

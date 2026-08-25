@@ -89,7 +89,6 @@ py_library(
     deps = [
         ":fxmss",
         ":stateless",
-        ":wots_c",
         "//sig_frx:context",
         "//sig_frx:hashes",
         "//sig_frx/hash:tweakable",

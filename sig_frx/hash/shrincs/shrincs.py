@@ -72,13 +72,12 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx import Hmac
 from hash_frx import block_size as block_size_of
 
 from sig_frx import context as ctx
 from sig_frx import hashes
-from sig_frx.hash import bytestring
-from sig_frx.hash.shrincs import fxmss, stateless, wots_c
+from sig_frx.hash import bytestring, tweakable
+from sig_frx.hash.shrincs import fxmss, stateless
 
 _N = stateless.PARAMS.n
 
@@ -106,8 +105,8 @@ _SK_SEED = slice(0, _N)
 _SK_PRF = slice(_N, 2 * _N)
 _SK_PK_SEED = slice(2 * _N, 3 * _N)
 _SK_SL_ROOT = slice(3 * _N, 4 * _N)
-_SK_STRUCTURE = slice(4 * _N, 4 * _N + wots_c.STRUCTURE_BYTES)
-_SK_SF_ROOT = slice(4 * _N + wots_c.STRUCTURE_BYTES, SECRET_KEY_SIZE)
+_SK_STRUCTURE = slice(4 * _N, 4 * _N + fxmss.STRUCTURE_BYTES)
+_SK_SF_ROOT = slice(4 * _N + fxmss.STRUCTURE_BYTES, SECRET_KEY_SIZE)
 # `slh_dsa.sign` takes `SK.seed ‖ SK.prf ‖ PK.seed ‖ PK.root`, which is this
 # key's first four values — the stateless half, contiguous and in order.
 _SK_SLH_DSA = slice(0, 4 * _N)
@@ -266,16 +265,16 @@ class Shrincs:
         # bind both the randomizer and the digest to where the signature was made.
         index = fxmss.index_bytes(np.array([leaf_index], dtype=np.uint64))
         positions = np.concatenate([np.array([leaf_height], dtype=np.uint8), index[0]])
+        # Built once: the randomizer is taken over these bytes and the digest over
+        # the same ones, and `_digest_over` is what lets the second reuse them.
         bound = bound_message(sl_root, messages, context)
         random = randomizer(key[_SK_PRF], pk_seed, positions, bound)
-        digest = message_digest(
+        digest = _digest_over(
             random[None, :],
             pk_seed[None, :],
-            sl_root[None, :],
             key[_SK_SF_ROOT][None, :],
             positions[None, :],
-            messages[None, :],
-            context,
+            bound[None, :],
         )[0]
         return fnp.concatenate(
             [
@@ -482,10 +481,31 @@ def message_digest(
     stateless path's is bound to the stateful half. Neither signature carries to
     a key sharing only the other half.
     """
+    return _digest_over(
+        randomizers,
+        pk_seeds,
+        sf_roots,
+        positions,
+        bound_message(sl_roots, messages, context),
+    )
+
+
+def _digest_over(
+    randomizers: ArrayLike,
+    pk_seeds: ArrayLike,
+    sf_roots: ArrayLike,
+    positions: ArrayLike,
+    bound: ArrayLike,
+) -> Array:
+    """`H_msg_sf`'s two hashes, over a message already bound by `bound_message`.
+
+    Split out so the signer does not build that binding twice: it needs the bound
+    message itself, for the randomizer, before there is a digest to take over it.
+    """
     randoms = fnp.asarray(randomizers, dtype=fnp.uint8)
     seeds = fnp.asarray(pk_seeds, dtype=fnp.uint8)
     places = fnp.asarray(positions, dtype=fnp.uint8)
-    bound = bound_message(sl_roots, messages, context)
+    bound = fnp.asarray(bound, dtype=fnp.uint8)
     inner = fnp.asarray(
         hashes.sha256(bound).digest(
             fnp.concatenate(
@@ -567,5 +587,4 @@ def randomizer(
             fnp.full(block - _N, 0xFF, dtype=fnp.uint8),
         ]
     )
-    mac = Hmac(byte_hash, block).mac(key, message[None, :])
-    return fnp.asarray(mac, dtype=fnp.uint8)[0][:_N]
+    return tweakable.hmac(byte_hash, block, key, message)[:_N]

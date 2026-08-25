@@ -45,7 +45,7 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hash import adrs, adrs_encoding, wots
+from sig_frx.hash import adrs_encoding, wots
 from sig_frx.hash.shrincs import adrs as sf_adrs
 from sig_frx.hash.tweakable import TweakableHash, repeat_per_entry
 
@@ -58,11 +58,6 @@ _MAX_INDEX = 2**CHAIN_BITS - 1
 # `ceil(count · (w − 1) / 2)` — the most likely sum, which is what makes grinding
 # terminate quickly: it is the mode of the distribution the map draws from.
 CONSTANT_SUM = -(-(CHAIN_COUNT * _MAX_INDEX) // 2)  # 240
-
-# The tree's shape and depth, which only the signer's PRF address carries. They
-# sit in the high half of a payload word, so the rest of it is zero padding.
-STRUCTURE_BYTES = 2
-_STRUCTURE_PADDING = adrs.WORD_SIZE - STRUCTURE_BYTES
 
 # The counter is two bytes at the front of the signature, then the chain tips.
 COUNTER_BYTES = 2
@@ -236,8 +231,9 @@ def secret_values(
     """Each leaf's `CHAIN_COUNT` chain starting points — `[B · 32, 16]`.
 
     Chain-major within each entry, the layout `_chain_addresses` builds and
-    `wots.chain` walks. `sf_structure` is the two structure bytes, which ride in
-    the address for the reason `adrs.wots_c_prf` gives.
+    `wots.chain` walks. `sf_structure` is the tree's two structure bytes, which
+    ride in the address for the reason `adrs.wots_c_prf` gives and are placed in
+    their word by that builder.
 
     `pk_seed` is `[n]` when one key owns the whole batch — which is what key
     generation is — or `[B, n]` when it does not, the same rule `pk_from_sig`
@@ -245,12 +241,6 @@ def secret_values(
     """
     indices = fnp.asarray(node_indices, dtype=fnp.uint8)
     batch = indices.shape[0]
-    structure = np.asarray(sf_structure, dtype=np.uint8).reshape(-1)
-    if structure.shape != (STRUCTURE_BYTES,):
-        raise ValueError(
-            f"a tree structure is {STRUCTURE_BYTES} bytes — a shape and a depth — "
-            f"got shape {tuple(structure.shape)}"
-        )
     return tweak.prf(
         # One leaf is `CHAIN_COUNT` chains, the same widening `pk_from_sig` does.
         repeat_per_entry(pk_seed, CHAIN_COUNT),
@@ -259,14 +249,7 @@ def secret_values(
             sf_adrs.wots_c_prf(
                 adrs_encoding.repeat_rows(node_heights, CHAIN_COUNT),
                 adrs_encoding.repeat_rows(indices, CHAIN_COUNT),
-                # Right-padded into the four-byte word the slot gives it, and
-                # spread over the rows by hand: `adrs_encoding` broadcasts an
-                # integer field across a batch but takes a byte field as the rows
-                # it already is.
-                np.broadcast_to(
-                    np.concatenate([structure, np.zeros(_STRUCTURE_PADDING, np.uint8)]),
-                    (batch * CHAIN_COUNT, _STRUCTURE_PADDING + STRUCTURE_BYTES),
-                ),
+                sf_structure,
                 np.tile(np.arange(CHAIN_COUNT, dtype=np.uint32), batch),
             )
         ),
@@ -327,15 +310,11 @@ def grind(
         fnp.asarray(node_height, dtype=fnp.uint32).reshape(1), (_GRIND_BLOCK,)
     )
     for base in range(0, _GRIND_LIMIT, _GRIND_BLOCK):
-        # Big-endian in `COUNTER_BYTES`, reinterpreted rather than shifted apart:
-        # the counter is a number while the search enumerates it and bytes from
-        # the moment it reaches a hash, and this is the one place it crosses.
-        counters = np.arange(base, base + _GRIND_BLOCK, dtype=np.uint16)
         indexes, accepted = map_digest(
             tweak,
             pk_seed,
             digests,
-            counters.astype(">u2").view(np.uint8).reshape(-1, COUNTER_BYTES),
+            _counter_bytes(np.arange(base, base + _GRIND_BLOCK)),
             heights,
             indices,
         )
@@ -378,10 +357,26 @@ def sign(
     )
     return fnp.concatenate(
         [
-            fnp.asarray(
-                np.frombuffer(counter.to_bytes(COUNTER_BYTES, "big"), dtype=np.uint8),
-                dtype=fnp.uint8,
-            ),
+            fnp.asarray(_counter_bytes([counter])[0], dtype=fnp.uint8),
             ends.reshape(CHAINS_SIZE),
         ]
+    )
+
+
+def _counter_bytes(counters: ArrayLike) -> np.ndarray:
+    """Counters as `[rows, COUNTER_BYTES]` big-endian.
+
+    One place, because a counter is a number while the grind enumerates it and
+    bytes from the moment it reaches a hash — and they are the same bytes the
+    signature carries. Reinterpreted rather than shifted apart, which is what
+    `adrs_encoding` does to an address field for the same reason.
+
+    Host-only and unbounded on purpose: every counter here comes from below
+    `_GRIND_LIMIT`, which is what the width holds by construction.
+    """
+    return (
+        np.asarray(counters)
+        .astype(f">u{COUNTER_BYTES}")
+        .view(np.uint8)
+        .reshape(-1, COUNTER_BYTES)
     )

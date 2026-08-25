@@ -117,6 +117,20 @@ def _batched(value: ArrayLike, batch: int) -> Array:
     return array
 
 
+def hmac(byte_hash: ByteHash, block_size: int, key: ArrayLike, message: Array) -> Array:
+    """HMAC over `byte_hash` — FIPS 198-1, on one message.
+
+    A module function because the second caller is not a family. `PRF_msg` is one
+    of these keyed by `SK.prf` and `Sha2TweakableHash` owns it; SHRINCS's stateful
+    path keys the same construction with `sk_prf` filled out to a whole block,
+    which is that scheme's own construction and not a tweakable hash's. Sharing
+    the wrapper is what keeps the block-size handling in one place.
+    """
+    return fnp.asarray(
+        Hmac(byte_hash, block_size).mac(key, message[None, :]), dtype=fnp.uint8
+    )[0]
+
+
 def repeat_per_entry(value: ArrayLike, times: int) -> Array:
     """Line a per-entry operand up with an entry-major batch of `times` rows each.
 
@@ -258,9 +272,8 @@ class Sha2TweakableHash:
         return fnp.asarray(Mgf1(self._byte_hash, length).digest(seed), dtype=fnp.uint8)
 
     def _hmac(self, key: ArrayLike, message: Array) -> Array:
-        """HMAC over the injected hash — FIPS 198-1, on one message."""
-        mac = Hmac(self._byte_hash, self._block_size).mac(key, message[None, :])
-        return fnp.asarray(mac, dtype=fnp.uint8)[0]
+        """This family's own block size, over `hmac`."""
+        return hmac(self._byte_hash, self._block_size, key, message)
 
     def _digest(self, messages: Array) -> Array:
         return fnp.asarray(self._byte_hash.digest(messages), dtype=fnp.uint8)

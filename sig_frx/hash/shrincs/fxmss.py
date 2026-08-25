@@ -72,6 +72,11 @@ SIGNATURE_SIZE_MAX = wots_c.SIGNATURE_SIZE + HEIGHT * _N
 SHAPE_UNBALANCED = 0
 SHAPE_BALANCED = 1
 
+# A shape and a depth, one byte each. This module owns the width for the reason it
+# owns `INDEX_BYTES`: it owns the format those bytes are in. `wots_c` only carries
+# them into an address and never reads them.
+STRUCTURE_BYTES = 2
+
 # Key generation builds every leaf the shape names, and a balanced tree of depth
 # `d` names `2^d` of them — so a structure from an untrusted source is a denial of
 # service. The specification warns about exactly that and its reference
@@ -102,10 +107,10 @@ class Structure:
         stateless path with a five-times-longer signature and no complaint.
         """
         values = np.asarray(sf_structure, dtype=np.uint8).reshape(-1)
-        if values.shape != (wots_c.STRUCTURE_BYTES,):
+        if values.shape != (STRUCTURE_BYTES,):
             raise ValueError(
-                f"a tree structure is {wots_c.STRUCTURE_BYTES} bytes — a shape and "
-                f"a depth — got shape {tuple(values.shape)}"
+                f"a tree structure is {STRUCTURE_BYTES} bytes — a shape and a "
+                f"depth — got shape {tuple(values.shape)}"
             )
         structure = cls(shape=int(values[0]), depth=int(values[1]))
         if structure.shape not in (SHAPE_UNBALANCED, SHAPE_BALANCED):
@@ -298,7 +303,7 @@ def root(
     leaves = _leaves(tweak, pk_seed, sk_seed, structure)
     if structure.shape == SHAPE_BALANCED:
         return tree.root(tweak, pk_seed, leaves, _node_addresses(structure.bottom))
-    return _spine(tweak, pk_seed, leaves, structure)[-1]
+    return _spine(tweak, pk_seed, leaves, structure, structure.depth)[0]
 
 
 def sign(
@@ -400,25 +405,34 @@ def _node_addresses(leaf_height: int) -> tree.NodeAddresses:
 
 
 def _spine(
-    tweak: TweakableHash, pk_seed: ArrayLike, leaves: Array, structure: Structure
+    tweak: TweakableHash,
+    pk_seed: ArrayLike,
+    leaves: Array,
+    structure: Structure,
+    levels: int,
 ) -> Array:
-    """An unbalanced tree's left-hand nodes, bottom to top. `[depth + 1, 16]`.
+    """An unbalanced tree's left-hand node `levels` steps up. `[1, 16]`.
 
-    Row `j` is the node at index zero and height `bottom + j`: row zero is the one
-    left-hand leaf and the last row is the root. Each is the row below combined
-    with the right-hand leaf at that lower height, which is the whole of the
-    shape — every level adds one leaf rather than doubling.
+    The node at index zero and height `bottom + levels`: at zero steps it is the
+    one left-hand leaf, and at `depth` steps it is the root. Each step combines the
+    node below with the right-hand leaf at that lower height, which is the whole of
+    the shape — every level adds one leaf rather than doubling.
+
+    Bounded rather than built whole because the two callers want different nodes
+    of it and neither wants them all: a root is the top one and an authentication
+    path is the single node below the leaf that signed. A signature made at
+    counter `c` sits `depth - 1 - c` steps up, so walking to the top every time
+    would spend more of the climb on nodes nothing reads than on nodes something
+    does.
     """
     node = leaves[:1]
-    nodes = [node]
-    for step in range(structure.depth):
+    for step in range(levels):
         node = tweak.h(
             pk_seed,
             sf_adrs.encode_batch(sf_adrs.fxmss_tree(structure.bottom + step + 1, 0)),
             fnp.concatenate([node, leaves[1 + step : 2 + step]], axis=-1),
         )
-        nodes.append(node)
-    return fnp.concatenate(nodes, axis=0)
+    return node
 
 
 def _auth_path(
@@ -445,7 +459,7 @@ def _auth_path(
     rights = leaves[1:]
     row = leaf_height - structure.bottom
     below = (
-        _spine(tweak, pk_seed, leaves, structure)[row]
+        _spine(tweak, pk_seed, leaves, structure, row)[0]
         if leaf_index == 1
         else rights[row]
     )
