@@ -39,6 +39,13 @@ this file is the map plus the rules every change must respect.
   `DEDICATED` on one leg and `GENERIC` on the other, so a change to how a
   primitive is routed, fused or emitted has been validated for half the wire
   surface until both legs are green.
+- **A PR based on anything but `main` gets no test run at all.** `ci.yml` is
+  `pull_request: branches: ["main"]`, so a PR stacked on another branch shows
+  only Commit Lint — the absence of a red check is not evidence the suite ran.
+  Nor does the auto-retarget when the base merges start one: that raises a
+  `pull_request` `edited` event, which is not in the default trigger types. The
+  branch needs a **push** (a rebase onto `main` is the natural one) before CI
+  runs, so budget for that rather than reading a quiet checks list as green.
 - **Never bump the hash-frx pin by hand.** The `hash-frx Update` workflow moves
   it together with every pip pin both hubs resolve, because hash-frx resolves its
   own lock — a lone bump puts two copies of a package in one test's runfiles and
