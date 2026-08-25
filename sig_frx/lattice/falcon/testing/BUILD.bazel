@@ -38,6 +38,12 @@ py_library(
 # so the authority is the reference implementation's own KAT and the provenance
 # lives in the module. #28 replaces this with the pinned whole set. Depends on
 # the harness because it hands its cases over as `kat.KatVector`.
+#
+# Visible to the rest of the lattice tree, not just to this package: Falcon
+# cannot sign here yet, so these vectors are the only published signature a
+# lattice-wide measurement can drive `verify` with, and
+# `//sig_frx/lattice/testing:compaction_bench` is one. Scoped to `lattice` and
+# not to `sig_frx` because no other family has a reason to read Falcon's KAT.
 py_library(
     name = "falcon_vectors",
     testonly = True,
@@ -45,6 +51,7 @@ py_library(
         "__init__.py",
         "falcon_vectors.py",
     ],
+    visibility = ["//sig_frx/lattice:__subpackages__"],
     deps = ["//sig_frx/testing:kat"],
 )
 

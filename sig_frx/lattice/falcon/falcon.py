@@ -61,18 +61,27 @@ as the program it would be on its own: `verify` is 21.0 ms, and it divides into
 the ring product at 0.8 (4%). Falcon-512 is 10.9 ms at the same shape, with the
 same ranking.
 
-The shape worth carrying forward is that **the challenge hash is the pole, not
-the transform**. Falcon's `s1` recovery is one forward NTT and one inverse over
-a single polynomial, where a SHAKE has to absorb the message and squeeze
+The shape worth carrying forward is that **on CPU the challenge hash is the pole,
+not the transform**. Falcon's `s1` recovery is one forward NTT and one inverse
+over a single polynomial, where a SHAKE has to absorb the message and squeeze
 `⌊2^16/q⌋`-rejected draws until `n` survive — 2720 bytes at Falcon-1024 against
 `2n` bytes of useful output. That is why the arithmetic is the 4% and not the
-pole, and anything spent making it cheaper is spent there. The decoder is the
-other stage worth reading, and `encoding.py` records what its walk and its
-ranking cost at each granularity.
+pole. The decoder is the other stage worth reading, and `encoding.py` records
+what its walk and its ranking cost at each granularity.
 
-These numbers compare implementations and size no budget, and they are CPU
-only — a CUDA-less box refuses `FRX_PLATFORMS=cuda` rather than falling back,
-so the GPU leg's ranking waits for CI.
+**The GPU leg does not rank them the same way, and that inversion is the more
+useful half of the measurement.** On an RTX 5090 at Falcon-1024, `B` = 1024,
+warm, each stage timed as the program it would be on its own and taken in the
+same session as the `verify` it divides: `verify` is 0.95 ms, of which
+`HashToPoint` is 0.30 (31%) and the decoder 0.66 (69%). The same harness on the
+workstation CPU at that batch puts `verify` at 72.9 ms, `HashToPoint` at 51.1
+(70%) and the decoder at 14.4 (20%). So the challenge hash is what a CPU
+verification spends its time on and the decoder is what a GPU one does, and
+work aimed at either is work aimed at one leg. The batch is 1024 in both, rather
+than the 256 the table above uses, because a share and its total have to come
+from one session and this pair was taken in one.
+
+These numbers compare implementations and size no budget.
 
 ## What leaks
 
