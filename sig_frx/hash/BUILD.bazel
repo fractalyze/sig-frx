@@ -1,0 +1,100 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# The substrate both scheme families are built from. What lands here is what has
+# a second consumer: `wots` and `tree` are shared between FIPS 205 and RFC 8391
+# outright, and `adrs`, `adrs_encoding` and `tweakable` because those two reach
+# for them. A component with one consumer lives with that consumer instead —
+# `//sig_frx/hash/slhdsa` and `//sig_frx/hash/xmss`.
+
+# Addresses are structural and hash-free: every component builds them before any
+# hashing starts, so these depend on no hash. They do depend on frx, because the
+# fields they pack are host integers on the signing path and traced values on the
+# verification path, and the packing runs where the fields already live.
+py_library(
+    name = "adrs_encoding",
+    srcs = [
+        "__init__.py",
+        "adrs_encoding.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":bytestring",
+        "//sig_frx:arrays",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "bytestring",
+    srcs = [
+        "__init__.py",
+        "bytestring.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//sig_frx:arrays",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "adrs",
+    srcs = [
+        "__init__.py",
+        "adrs.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs_encoding",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "tweakable",
+    srcs = [
+        "__init__.py",
+        "tweakable.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@hash_frx//hash_frx",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "wots",
+    srcs = [
+        "__init__.py",
+        "wots.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs",
+        ":tweakable",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "tree",
+    srcs = [
+        "__init__.py",
+        "tree.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs",
+        ":bytestring",
+        ":tweakable",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

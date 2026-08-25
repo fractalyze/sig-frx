@@ -1,0 +1,103 @@
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+load("//:defs.bzl", "GPU_PLUGIN_DEPS")
+
+# RFC 8391 publishes no vectors, so the gate is the reference implementation §7
+# points at, digested the way its own `test/vectors.c` prints. The values are
+# committed constants with their provenance in the module docstring rather than a
+# fetched file — there is no published file to fetch.
+py_library(
+    name = "vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "vectors.py",
+    ],
+    deps = [requirement("numpy")],
+)
+
+py_test(
+    name = "adrs_test",
+    size = "small",
+    srcs = ["adrs_test.py"],
+    deps = [
+        ":vectors",
+        "//sig_frx/hash/xmss:adrs",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ],
+)
+
+py_test(
+    name = "hashes_test",
+    size = "small",
+    srcs = ["hashes_test.py"],
+    deps = [
+        ":vectors",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash/xmss:adrs",
+        "//sig_frx/hash/xmss:hashes",
+        "//sig_frx/hash/xmss:params",
+        "@hash_frx//hash_frx",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The gate the substrate is finished against: a WOTS+ public key, a signature and
+# an L-tree leaf reproducing the reference's digests at both runnable OIDs.
+py_test(
+    name = "wots_test",
+    size = "medium",
+    srcs = ["wots_test.py"],
+    deps = [
+        ":vectors",
+        "//sig_frx/hash/xmss:adrs",
+        "//sig_frx/hash/xmss:hashes",
+        "//sig_frx/hash/xmss:params",
+        "//sig_frx/hash/xmss:wots",
+        "@hash_frx//hash_frx",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The scheme gate: the reference's XMSS public key and signature digests, made at
+# a non-zero index, plus the rejection cases a round trip cannot show.
+py_test(
+    name = "xmss_test",
+    size = "large",
+    srcs = ["xmss_test.py"],
+    deps = [
+        ":vectors",
+        "//sig_frx/hash:tree",
+        "//sig_frx/hash/xmss",
+        "//sig_frx/hash/xmss:adrs",
+        "//sig_frx/hash/xmss:hashes",
+        "//sig_frx/hash/xmss:params",
+        "//sig_frx/hash/xmss:wots",
+        "@hash_frx//hash_frx",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The multi-tree half: the per-layer index split, keygen over the top tree only,
+# and the wider signature. Single-tree is the `d = 1` case of the same class and
+# is gated by `xmss_test`.
+#
+# `large` because the CPU leg measures 105.4 s to 268.5 s across runs of
+# unchanged commits, and the top of that range leaves no margin under `medium`'s
+# 300 s. See ../../../../docs/reference/conventions.md.
+py_test(
+    name = "xmssmt_test",
+    size = "large",
+    srcs = ["xmssmt_test.py"],
+    deps = [
+        ":vectors",
+        "//sig_frx/hash/xmss",
+        "//sig_frx/hash/xmss:params",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)

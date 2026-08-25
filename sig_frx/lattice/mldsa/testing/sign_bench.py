@@ -27,7 +27,7 @@ is not a choice — a host hash cannot be called on a tracer at all, which is wh
 
 The numbers belong on the issue that acts on them, not here. This is committed so
 that a re-measurement compares against the same harness rather than a fresh one,
-which is the reason [`verify_bench`](../../../hashbased/testing/verify_bench.py)
+which is the reason [`verify_bench`](../../../hash/slhdsa/testing/verify_bench.py)
 is committed too.
 
     bazel run //sig_frx/lattice/mldsa/testing:sign_bench -- --parameter_sets=ML-DSA-65
@@ -102,7 +102,7 @@ class _Timed:
     `hashes.shake128` / `shake256` are the one place ML-DSA reaches a sponge
     through, so replacing them counts every hash the scheme takes and attributes
     nothing else to hashing — the exactness a dependency-injected seam buys, which
-    is what [`verify_bench`](../../../hashbased/testing/verify_bench.py) wraps for
+    is what [`verify_bench`](../../../hash/slhdsa/testing/verify_bench.py) wraps for
     the same purpose. Before those helpers existed there was no such point: the
     modules named `Shake256` directly.
     """

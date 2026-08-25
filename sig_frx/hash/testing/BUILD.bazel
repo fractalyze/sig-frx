@@ -1,0 +1,94 @@
+load("@rules_python//python:defs.bzl", "py_test")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+load("//:defs.bzl", "GPU_PLUGIN_DEPS")
+
+py_test(
+    name = "bytestring_test",
+    size = "small",
+    srcs = ["bytestring_test.py"],
+    deps = [
+        "//sig_frx/hash:bytestring",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
+    name = "adrs_test",
+    size = "small",
+    srcs = ["adrs_test.py"],
+    deps = [
+        "//sig_frx/hash:adrs",
+        "//sig_frx/hash:adrs_encoding",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
+    name = "tweakable_test",
+    size = "small",
+    srcs = ["tweakable_test.py"],
+    deps = [
+        "//sig_frx/hash:adrs",
+        "//sig_frx/hash:tweakable",
+        "@hash_frx//hash_frx",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# `medium` for the same reason as `//sig_frx/hash/slhdsa/testing:xmss_test`:
+# 12.2 s to 31.4 s on the CPU leg across unchanged commits, which is half of
+# `small`'s 60 s at the top of that range and one contended run from a timeout.
+py_test(
+    name = "wots_test",
+    size = "medium",
+    srcs = ["wots_test.py"],
+    deps = [
+        "//sig_frx/hash:adrs",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash:wots",
+        "//sig_frx/hash/slhdsa:slh_dsa",
+        "@hash_frx//hash_frx",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
+    name = "tree_test",
+    size = "small",
+    srcs = ["tree_test.py"],
+    deps = [
+        "//sig_frx/hash:adrs",
+        "//sig_frx/hash:tree",
+        "//sig_frx/hash:tweakable",
+        "@hash_frx//hash_frx",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The one property that spans every address-building component: each tweaks with
+# the encoding its family names. The known-answer tests reach it only where they
+# run, and the sets that would reach all of it are `slow_kat`, so this is the fast
+# guard. It reaches into `//sig_frx/hash/slhdsa` for real address builders — the
+# property is about the shared encoding, so the test lives with the encoding.
+py_test(
+    name = "address_encoding_test",
+    size = "small",
+    srcs = ["address_encoding_test.py"],
+    deps = [
+        "//sig_frx/hash:adrs",
+        "//sig_frx/hash:tree",
+        "//sig_frx/hash:wots",
+        "//sig_frx/hash/slhdsa:fors",
+        "//sig_frx/hash/slhdsa:xmss",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)

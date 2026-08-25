@@ -30,7 +30,7 @@ this file is the map plus the rules every change must respect.
   `uint32` and a wider value truncates *without raising* — silently addressing the
   wrong subtree. Anything that can exceed 2^32 is carried as bytes, which is what
   the standards call it anyway (`toInt`/`toByte` pairs): see
-  [`bytestring.py`](sig_frx/hashbased/bytestring.py). Host code hides this,
+  [`bytestring.py`](sig_frx/hash/bytestring.py). Host code hides this,
   because Python integers have no width — so a value that only ever lived on the
   host is exactly where this bites when it is first traced. The operational rule
   that keeps a value out of the wrong lane is

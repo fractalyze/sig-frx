@@ -1,0 +1,96 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# SLH-DSA — FIPS 205. The layers below `slh_dsa` are here rather than in
+# `//sig_frx/hash` because each has exactly one consumer: `fors` and `hypertree`
+# are reached only by `slh_dsa`, and `xmss` only through `hypertree`. They move
+# up when a second scheme asks for them, not before.
+#
+# That move is not symmetric, and the asymmetry is worth knowing before relying
+# on it: `fors` and `hypertree` can take their own names one level up, and
+# `xmss` cannot. `sig_frx/hash/xmss/` is RFC 8391's package, so
+# `sig_frx/hash/xmss.py` is a file that cannot exist beside it. A second
+# consumer of this FIPS 205 §6 layer promotes it under a name that says which
+# XMSS it is — the promotion is available, the name is not.
+
+py_library(
+    name = "fors",
+    srcs = [
+        "__init__.py",
+        "fors.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//sig_frx:arrays",
+        "//sig_frx/hash:adrs",
+        "//sig_frx/hash:adrs_encoding",
+        "//sig_frx/hash:bytestring",
+        "//sig_frx/hash:tree",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash:wots",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "xmss",
+    srcs = [
+        "__init__.py",
+        "xmss.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//sig_frx:arrays",
+        "//sig_frx/hash:adrs",
+        "//sig_frx/hash:bytestring",
+        "//sig_frx/hash:tree",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash:wots",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "hypertree",
+    srcs = [
+        "__init__.py",
+        "hypertree.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":xmss",
+        "//sig_frx:arrays",
+        "//sig_frx/hash:bytestring",
+        "//sig_frx/hash:tree",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash:wots",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "slh_dsa",
+    srcs = [
+        "__init__.py",
+        "slh_dsa.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":fors",
+        ":hypertree",
+        ":xmss",
+        "//sig_frx:context",
+        "//sig_frx:prehash",
+        "//sig_frx:signature",
+        "//sig_frx/hash:bytestring",
+        "//sig_frx/hash:tree",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash:wots",
+        "@hash_frx//hash_frx",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

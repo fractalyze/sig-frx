@@ -6,7 +6,7 @@ Everything is a call to the keyed-and-masked hash family, so the whole scheme is
 symmetric-hash work — the same as SLH-DSA, over a substrate that is not.
 
 Implementation:
-[`sig_frx/hashbased/rfc8391_xmss.py`](../../sig_frx/hashbased/rfc8391_xmss.py),
+[`sig_frx/hash/xmss/xmss.py`](../../sig_frx/hash/xmss/xmss.py),
 over the RFC 8391 substrate in the same package — the address encoding, the hash
 family, the parameter sets, WOTS+ and its L-tree compression.
 
