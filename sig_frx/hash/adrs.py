@@ -64,6 +64,11 @@ COMPRESSED_HEADER_SIZE = (
 )
 COMPRESSED_ADRS_SIZE = COMPRESSED_HEADER_SIZE + 3 * _WORD_BYTES
 
+# One trailing word's slot. Exported for the same reason the header size is: a
+# caller whose field arrives as bytes has to pad it to the slot's width, and
+# restating that width is a second place for it to be wrong.
+WORD_SIZE = _WORD_BYTES
+
 
 Field = adrs_encoding.Field
 

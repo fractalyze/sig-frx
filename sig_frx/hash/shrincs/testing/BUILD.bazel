@@ -44,8 +44,9 @@ py_library(
 )
 
 # `medium`, decided by the GPU leg: 9.4 s to 26.4 s there across runs against
-# 4.4 s on CPU, and the top of that range is 44% of `small`'s 60 s before any
-# further spread. Sized from the worst run. This workstation's GPU
+# 5.8 s on CPU (7.8 s GPU and 4.4 s CPU before the signer's tests, which add one
+# leaf per case and cost little), and the top of that range is 44% of `small`'s
+# 60 s before any further spread. Sized from the worst run. This workstation's GPU
 # measures within a few percent of CI's for the targets whose numbers are
 # recorded — `slh_dsa_traced_test` is 182.2 s here against 177.7 s there — so the
 # 2.1-2.7x executor factor in this repo's other comments is the CPU leg's and
@@ -65,10 +66,11 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
-# `medium` on the GPU leg's worst run, 53.7 s against 23.1 s on a quiet one
-# (9.7 s on CPU) — 18% of its 300 s. The walk
-# runs to the format's full 255 steps for every entry, so this is a floor rather
-# than a function of the cases.
+# `medium` on the GPU leg's worst run, 53.7 s against 26.7 s on a quiet one
+# (19.9 s on CPU, up from 9.7 s) — 18% of its 300 s. The verify walk runs to the
+# format's full 255 steps for every entry, so that half is a floor rather than a
+# function of the cases; the signer's half is not, and it is why `SignerTest`
+# builds every case's root but signs one case per shape.
 py_test(
     name = "fxmss_test",
     size = "medium",
