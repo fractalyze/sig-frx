@@ -108,12 +108,58 @@ At Falcon-1024 and `B` = 1024, taken in one session against the `verify` it
 divides, this decoder is **69%** of a GPU verification against 20% of a CPU one —
 the reverse of the CPU ordering above, where `HashToPoint` is the pole
 ([`falcon.py`](falcon.py) carries both halves of that pair). So the byte-granular
-ranking is the right shape for the leg it was chosen on, and the stage a GPU
-verification actually waits for. Whether *this* `searchsorted` wants a different
-formulation there is open, and it is a question about this decoder rather than
-about the shared compaction: `first_accepted`'s own direction was measured over
-both legs and moves neither operation
-([`rejection.py`](../rejection.py)).
+ranking is the right shape for the leg it was chosen on, and it is also the stage
+a GPU verification actually waits for.
+
+**Inside it, the ranking is not what that time is.**
+[`decoder_bench`](testing/decoder_bench.py) divides this function into the steps
+it runs, each timed as the whole decoder *stopped* after that step, so that a
+step is priced inside everything that precedes it rather than beside it. At
+`B` = 1024, as a share of the decoder on each leg:
+
+| step | GPU | CPU |
+|---|---|---|
+| the bit expansion | 2% | 22% |
+| the `associative_scan` over bytes | 21% | 34% |
+| the seven within-byte steps | **48%** | 13% |
+| the `cumsum` that ranks the terminators | 1% | 8% |
+| the `n` searches | 15% | 51% |
+| the `[n]` gather and the offset table | 0% | −16% |
+| the bit reads and the rejections | 6% | −10% |
+
+The `searchsorted` is a sixth of the decoder on the leg the decoder is the pole
+for, and the within-byte chain is half of it. The CPU column is the noisier one —
+its negative marginals are a step that lets the compiler fuse a chain it was
+materializing before — and it is the leg where none of this is the pole anyway.
+
+**The chain's half was reformulated, and it buys nothing.** The eight positions a
+byte closes at are a function of that byte and the state it is entered in, which
+is the closure `_BYTE_STEP` already relies on, so the seven dependent steps
+collapse to one `[256, 9]` host lookup. Byte-identical, interleaved against the
+shipped form, and measured on both:
+
+| leg | `B` | the step | `sig_decode` | `verify` |
+|---|---|---|---|---|
+| RTX 5090 | 256 | 2.54x | 1.00x | 1.00x |
+| RTX 5090 | 1024 | 1.84x | 1.00x | 0.99x |
+| workstation CPU | 256 | 1.21x | 0.96x | 0.99x |
+| workstation CPU | 1024 | 1.20x | 0.88x | 0.98x |
+
+So the step nearly halves and the operation does not move, which is why the chain
+is still what is written below. **A step measured inside the whole prefix that
+precedes it is still an upper bound rather than an estimate** — the sharper form
+of what [`rejection.py`](../rejection.py)'s compaction found from isolated
+stages, since every rung here is already fused with everything above it and the
+over-attribution survived that. Seven dependent steps are latency, not
+throughput, and in situ the decoder around them has enough independent work to
+cover it; a rung ends in a reduction, and that is the one thing the real function
+never does.
+
+That also settles the shape of the question. It is about *this* decoder rather
+than about the shared compaction — `first_accepted`'s own direction was measured
+over both legs and moves neither operation ([`rejection.py`](../rejection.py)) —
+and what is left on the GPU leg after the chain is the scan, at a fifth, which is
+a smaller target than the half that just failed to pay.
 
 ## The rejections are the point of this module
 

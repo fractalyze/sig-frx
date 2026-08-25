@@ -1,4 +1,4 @@
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
@@ -116,6 +116,25 @@ py_test(
         ":falcon_vectors",
         "//sig_frx:signature",
         "//sig_frx/lattice/falcon",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# What the decoder's GPU share is made of. Beside Falcon rather than beside the
+# shared compaction's harness in //sig_frx/lattice/testing: that one is there
+# because it reaches both schemes, and this reaches one. It takes the vectors
+# for the reason that one does — Falcon cannot sign here yet, so a published
+# signature is the only thing a `verify` measurement can be driven with.
+py_binary(
+    name = "decoder_bench",
+    testonly = True,
+    srcs = ["decoder_bench.py"],
+    deps = [
+        ":falcon_vectors",
+        "//sig_frx/lattice/falcon",
+        "//sig_frx/lattice/falcon:encoding",
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),
