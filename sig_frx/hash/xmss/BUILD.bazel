@@ -1,0 +1,83 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# XMSS and XMSS-MT — RFC 8391. It shares `wots.chain` and the tree walk with
+# FIPS 205 and nothing else: the addresses, the hash family and the public-key
+# compression all differ, which is what these targets carry.
+
+py_library(
+    name = "adrs",
+    srcs = [
+        "__init__.py",
+        "adrs.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//sig_frx/hash:adrs_encoding",
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "params",
+    srcs = [
+        "__init__.py",
+        "params.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = ["//sig_frx/hash:wots"],
+)
+
+py_library(
+    name = "hashes",
+    srcs = [
+        "__init__.py",
+        "hashes.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs",
+        ":params",
+        "@hash_frx//hash_frx",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "wots",
+    srcs = [
+        "__init__.py",
+        "wots.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs",
+        ":hashes",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash:wots",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "xmss",
+    srcs = [
+        "__init__.py",
+        "xmss.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":adrs",
+        ":hashes",
+        ":params",
+        ":wots",
+        "//sig_frx:context",
+        "//sig_frx/hash:tree",
+        "//sig_frx/hash:wots",
+        "@hash_frx//hash_frx",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

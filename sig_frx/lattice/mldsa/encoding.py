@@ -90,7 +90,7 @@ def unpack_fields(v: ArrayLike, width: int) -> Any:
     in for the other: FIPS 205 numbers a digit's bits from the high end of the
     stream, FIPS 204 from the low end, so they agree only at whole-byte widths
     and disagree at every width either scheme uses. That is the near-miss
-    [`bytestring.low_bits`](../../hashbased/bytestring.py) already records
+    [`bytestring.low_bits`](../../hash/bytestring.py) already records
     against `base_2b`, one level further out — and a "unification" of the two
     round-trips forever while being wrong.
 

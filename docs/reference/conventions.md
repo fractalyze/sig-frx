@@ -40,7 +40,7 @@ Host values stay on numpy, traced values stay on frx, and a function does not
 decide for its caller. `namespace` in
 [`arrays.py`](../../sig_frx/arrays.py) is that rule as code — it reads the
 namespace off the arguments instead of naming one — and `index_column` in
-[`bytestring.py`](../../sig_frx/hashbased/bytestring.py) is the same question
+[`bytestring.py`](../../sig_frx/hash/bytestring.py) is the same question
 asked of the values that most invite a conversion, tree and leaf indices. Every
 boundary between key generation, signing and verification is one of its call
 sites.
@@ -310,7 +310,7 @@ finds it is a second implementation, and what it produces then is wrong output
 rather than an error — a key built against an encoding the family does not use.
 
 `TweakableHash.compressed_address`
-([`tweakable.py`](../../sig_frx/hashbased/tweakable.py)) is where this comes
+([`tweakable.py`](../../sig_frx/hash/tweakable.py)) is where this comes
 from. The SHA-2 sets compress an address to 22 bytes and the SHAKE sets keep the
 full 32; the field said so from the start, and every caller passed `compressed`
 by hand regardless until the SHAKE sets made the two disagree.

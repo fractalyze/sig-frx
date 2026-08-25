@@ -4,7 +4,7 @@ Stateless hash-based signatures: a hypertree of XMSS trees over WOTS+ one-time
 keys, certifying a FORS few-time signature over the message digest. Everything is
 a call to the tweakable hash family, so the whole scheme is symmetric-hash work.
 
-Implementation: [`sig_frx/hashbased/slh_dsa.py`](../../sig_frx/hashbased/slh_dsa.py),
+Implementation: [`sig_frx/hash/slhdsa/slh_dsa.py`](../../sig_frx/hash/slhdsa/slh_dsa.py),
 over the shared components in the same package — the address structure, the
 tweakable hash family, WOTS+, the Merkle hash tree, FORS and the hypertree.
 
@@ -94,7 +94,7 @@ The whole of `verify` traces, so `frx.jit(verify)` is one program rather than on
 dispatch per level. Getting there meant taking every value the path carries off the
 host. The hypertree index rides as bytes, because it reaches 64 bits and an integer
 array lane is 32 — see
-[`sig_frx/hashbased/bytestring.py`](../../sig_frx/hashbased/bytestring.py). An
+[`sig_frx/hash/bytestring.py`](../../sig_frx/hash/bytestring.py). An
 address is packed wherever its fields already live, so the same expression builds
 one from host integers and from traced columns. And the digest is left where
 `H_msg` produced it, since the tree and leaf indices are slices of it.
