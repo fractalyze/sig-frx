@@ -19,6 +19,39 @@ this file is the map plus the rules every change must respect.
   never auto-imported, so the bare `bazel test //...` in the README additionally
   runs the `slow_kat` sweeps — which are the scheduled gate, not the merge one,
   and which starve a shared machine into TIMEOUTs that are not failures.
+  **A green bazel run is not the whole gate.** `mypy` and `black` run only at
+  commit time through pre-commit — `mypy` with `pass_filenames: false`, so it
+  type-checks the tree rather than the diff — and CI runs pre-commit as its own
+  job. A change can pass every test and still fail on a type error or a
+  reformat, so run `pre-commit run --all-files` before claiming a change is
+  clean rather than discovering it in the commit hook.
+- **`bazel test` is one leg, not both.** `.bazelrc` pins
+  `test --test_env=FRX_PLATFORMS=cpu`, so every command above runs the **CPU leg
+  only**. The GPU leg is a second command, and `--local_test_jobs=1` is required
+  rather than tuning — concurrent jobs each reserve a large share of free VRAM
+  and the losers fail during device init, naming the wrong cause:
+
+  ```sh
+  bazel test --test_env=FRX_PLATFORMS=cuda --local_test_jobs=1 //...
+  ```
+
+  The two are different programs where routing is involved: a marker routes
+  `DEDICATED` on one leg and `GENERIC` on the other, so a change to how a
+  primitive is routed, fused or emitted has been validated for half the wire
+  surface until both legs are green.
+- **A PR based on anything but `main` gets no test run at all.** `ci.yml` is
+  `pull_request: branches: ["main"]`, so a PR stacked on another branch shows
+  only Commit Lint — the absence of a red check is not evidence the suite ran.
+  Nor does the auto-retarget when the base merges start one: that raises a
+  `pull_request` `edited` event, which is not in the default trigger types. The
+  branch needs a **push** (a rebase onto `main` is the natural one) before CI
+  runs, so budget for that rather than reading a quiet checks list as green.
+- **Never bump the hash-frx pin by hand.** The `hash-frx Update` workflow moves
+  it together with every pip pin both hubs resolve, because hash-frx resolves its
+  own lock — a lone bump puts two copies of a package in one test's runfiles and
+  fails as a dtype error rather than a version conflict. After an upstream merge,
+  wait for that PR (or dispatch the workflow); to test against unreleased
+  hash-frx meanwhile, use the `.bazelrc.user` override the README documents.
 - **Merge commits must be titled `Merge branch 'X' into Y`.**
   fractal-commit-lint exempts only that form (and `Merge pull request #N`);
   git's default `Merge remote-tracking branch 'origin/X'` wording fails the
