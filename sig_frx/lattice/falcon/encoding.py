@@ -50,36 +50,57 @@ positions plus arithmetic, and those come off a `cumsum` and a `searchsorted`
 the way [`rejection.first_accepted`](../rejection.py) takes the survivors of a
 sampler. Nothing here scatters, and nothing here is indexed by a traced cursor.
 
-**The scan is over bytes rather than over bits, and that is a measurement
-rather than a preference.** The transition composed across a whole byte is a
-`[256, 9]` host constant — 256 values times nine start states, built by running
-the per-bit machine — so the scan runs over `slen/8` elements and the states
-*inside* each byte are recovered by eight further steps, which is `slen/8`
-parallel walks of eight rather than one walk of `slen`.
+**The walk is over bytes rather than over bits, and so is the ranking that
+follows it. Both are measurements rather than preferences.** The transition
+composed across a whole byte is a `[256, 9]` host constant — 256 values times
+nine start states, built by running the per-bit machine — so the scan runs over
+`slen/8` elements and the states *inside* each byte are recovered by eight
+further steps, which is `slen/8` parallel walks of eight rather than one walk of
+`slen`. Those same eight positions are where the terminators are counted, so the
+prefix sum and the `n` searches see `slen/8` elements too. What makes that an
+equivalent parse rather than a coarser one is that a coefficient is at least
+nine bits, so **a byte closes at most one of them** and a `[256]` host table
+takes the byte back to the bit — `_terminator_offsets` establishes that by
+running the machine rather than by asserting it here.
 
-It is written that way because the bit-level scan made decompression the single
+It is written that way because the bit-level form made decompression the single
 most expensive stage of verification. Measured on a workstation CPU at
-Falcon-1024, `B = 256`: the scan over bits spent 33.5 ms inside a 51.8 ms
-`verify`, or 65% of it; over bytes, with the table itself kept in `uint8` — nine
-states fit in a byte, and this table is what every combine step moves — it
-spends 5.8 ms inside 21.7 ms. **5.8x on the stage, 2.4x on the operation**, and
-the stage is no longer the pole: `HashToPoint` is, at 68%.
+Falcon-1024, `B = 256`, warm, over a published signature, with `verify` timed
+around each form and the transition table kept in `uint8` throughout — nine
+states fit in a byte, and this table is what every combine step moves, which
+`_ON_ZERO` prices on its own:
+
+| walk | ranking | `decompress` | share | `verify` |
+|---|---|---|---|---|
+| bits | bits | 15.2 ms | 46% | 33.0 ms |
+| bytes | bits | 7.3 ms | 31% | 23.4 ms |
+| bytes | bytes | 4.9 ms | 23% | 21.0 ms |
+
+**3.1x on the stage and 1.6x on the operation**, and the stage is no longer the
+pole: `HashToPoint` is, at 69%. The two steps are not the same size — the walk
+is worth 2.1x on the stage and the ranking 1.5x — and the second is taken
+because it costs one host table and no second walk, not because it is large.
+
+Every figure there comes from one session, which is the only way a share is a
+share: this stage's number has moved by a quarter between sessions on unchanged
+code, so one spliced in from another would compare two machines and call the
+difference a speedup.
 
 That is the opposite of the answer ML-DSA's `hint_bit_unpack` reaches, which
 declines a 1.6x faster form because the stage it would speed up is 0.8% of a
 verify. Same question, different number, other conclusion — which is why the
 number is here rather than a preference for one shape.
 
-**What is left on the table, deliberately.** The ranking after the walk still
-runs at bit granularity — a `cumsum` over `slen` and `n` binary searches into
-it — where the scan above runs at byte granularity. Folding the terminator count
-into the eight-step walk and resolving inside the byte afterwards measures
-another 2.3 ms at this shape. It is not taken here because it buys ~10% of a
-verify in exchange for a second index space in the one function whose rejections
-are a malleability defence, and because the pole is elsewhere.
+**What the second index space costs.** The ranking counts in bytes where the
+rest of the function reads in bits, so there is a seam: `holders` indexes bytes,
+`ends` indexes bits, and everything below it — `starts`, `read`, the padding
+check — stays in bits. That is a real cost in the one function whose rejections
+are a malleability defence, and what makes it payable is that the terminators
+were already being found eight positions at a time; only the prefix sum over
+them was not.
 
-Two things this does **not** claim. The numbers compare two implementations,
-which is what a local measurement is good for, and they size no budget
+Two things this does **not** claim. The numbers compare implementations, which
+is what a local measurement is good for, and they size no budget
 ([`conventions.md`](../../../docs/reference/conventions.md)). And they are CPU
 only: a CUDA-less box refuses `FRX_PLATFORMS=cuda` rather than falling back, so
 whether the GPU leg ranks the stages the same way is unmeasured here — a
@@ -174,6 +195,43 @@ def _byte_transitions() -> np.ndarray:
 
 
 _BYTE_STEP = _byte_transitions()
+
+
+def _terminator_offsets() -> np.ndarray:
+    """The bit a byte closes a coefficient at, indexed by that byte's mask.
+
+    The table at the other end of the walk from the one above, and it is one
+    entry wide because **a byte closes at most one coefficient**: a close
+    returns the cursor to state 0, state 8 is eight transitions away, so no two
+    terminators are closer than the nine bits a coefficient occupies. That is a
+    property of the transition tables rather than an assumption about them, so
+    it is taken by running the machine over every entry state and byte value —
+    the rule `_byte_transitions` follows, for the reason it follows it.
+
+    The mask packs the byte's terminator most significant bit first to match
+    §3.11.1's order, so the table is the position of its single set bit. Index
+    0 is the byte that closes nothing, which is only ever selected by a string
+    that has already failed `terminated`.
+    """
+    for value in range(256):
+        for start in range(_ON_ZERO.shape[0]):
+            state, closes = start, 0
+            for shift in range(7, -1, -1):
+                bit = (value >> shift) & 1
+                closes += int(state == _UNARY_STATE and bit)
+                state = int((_ON_ONE if bit else _ON_ZERO)[state])
+            if closes > 1:
+                raise AssertionError(
+                    f"byte {value:#04x} entered in state {start} closes {closes} "
+                    "coefficients, so a byte no longer ranks one terminator"
+                )
+    table = np.zeros(256, dtype=np.uint8)
+    for offset in range(8):
+        table[1 << (7 - offset)] = offset
+    return table
+
+
+_TERMINATOR_OFFSET = _terminator_offsets()
 
 
 def bytes_to_bits_high_first(values: ArrayLike) -> Any:
@@ -277,18 +335,37 @@ def decompress(data: ArrayLike, n: int) -> tuple[Any, Any]:
                 fnp.take(_ON_ZERO, walked[-1].astype(np.int32)),
             )
         )
-    state = fnp.stack(walked, axis=-1).reshape(-1)
 
     # A `1` read in the unary state closes a coefficient. Ranking those by a
     # running count makes "where the i-th one is" a `searchsorted`, the same
     # mechanism `rejection.first_accepted` takes a sampler's survivors with.
-    closes = (state == np.uint8(_UNARY_STATE)) & (stream != 0)
-    ranks = fnp.cumsum(closes, axis=-1, dtype=np.int32)
+    # The count is over bytes rather than bits, so the ranking runs at the
+    # granularity the walk above it does: the eight walked positions are packed
+    # where they stand — a byte closes at most one coefficient, so the mask
+    # names it — and the prefix sum and the `n` searches see `slen/8` elements
+    # rather than `slen`.
+    closes = [
+        (walked[offset] == np.uint8(_UNARY_STATE)) & (within[:, offset] != 0)
+        for offset in range(8)
+    ]
+    mask = sum(
+        closes[offset].astype(np.uint8) << np.uint8(7 - offset) for offset in range(8)
+    )
+    ranks = fnp.cumsum(mask != np.uint8(0), axis=-1, dtype=np.int32)
     wanted = fnp.arange(1, n + 1, dtype=np.int32)
-    ends = fnp.searchsorted(ranks, wanted)
+    holders = fnp.searchsorted(ranks, wanted)
     # Lines 1-2 and 6: `n` coefficients have to close inside `slen` bits. A
     # string that runs out mid-run or mid-header closes fewer.
     terminated = ranks[..., -1] >= np.int32(n)
+
+    # The byte the `i`-th terminator falls in, then the bit inside it: one `[n]`
+    # gather and a table lookup, where the bit-level form read the position
+    # straight off a `[slen]` prefix. `clip` for the reason `read` below takes
+    # it — a string that ran out has already failed `terminated`, and a pinned
+    # wrong answer is one every backend agrees on.
+    holding = fnp.take(mask, holders, mode="clip").astype(np.int32)
+    offsets = fnp.take(_TERMINATOR_OFFSET, holding).astype(np.int32)
+    ends = holders * np.int32(8) + offsets
 
     # Line 11: the next coefficient starts one bit past this one's terminator.
     starts = fnp.concatenate([fnp.zeros(1, dtype=np.int32), ends[:-1] + np.int32(1)])

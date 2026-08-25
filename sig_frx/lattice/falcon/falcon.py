@@ -55,19 +55,20 @@ comparison the standard writes.
 
 ## Where the time goes
 
-Measured on a workstation CPU at Falcon-1024, `B = 256`, warm: `verify` is
-21.7 ms, of which `HashToPoint` is 14.7 (68%), decompression 5.8 (27%) and the
-decode-plus-product 6.2 (28%) — the three overlap because each was timed as the
-program it would be on its own, so they sum past 100%. Falcon-512 is 11.2 ms at
-the same shape, with the same ranking.
+Measured on a workstation CPU at Falcon-1024, `B = 256`, warm, each stage timed
+as the program it would be on its own: `verify` is 21.0 ms, and it divides into
+`HashToPoint` at 14.5 (69%), decompression at 4.9 (23%), and the key decode plus
+the ring product at 0.8 (4%). Falcon-512 is 10.9 ms at the same shape, with the
+same ranking.
 
 The shape worth carrying forward is that **the challenge hash is the pole, not
 the transform**. Falcon's `s1` recovery is one forward NTT and one inverse over
 a single polynomial, where a SHAKE has to absorb the message and squeeze
 `⌊2^16/q⌋`-rejected draws until `n` survive — 2720 bytes at Falcon-1024 against
-`2n` bytes of useful output. Anything spent making the ring arithmetic cheaper
-here is spent on a quarter of the wrong stage — and the same now goes for the
-decoder, which is why `encoding.py` records the further optimization it declines.
+`2n` bytes of useful output. That is why the arithmetic is the 4% and not the
+pole, and anything spent making it cheaper is spent there. The decoder is the
+other stage worth reading, and `encoding.py` records what its walk and its
+ranking cost at each granularity.
 
 These numbers compare implementations and size no budget, and they are CPU
 only — a CUDA-less box refuses `FRX_PLATFORMS=cuda` rather than falling back,
