@@ -40,9 +40,29 @@ longer the same as saying nothing traces — a batch at or above
 `mult` and the `lift` buckets of every secp lane are a device cost at the
 larger batch sizes and a host cost below it. The split is therefore visible
 in the numbers rather than in the columns: watch each share collapse as `B`
-crosses the threshold. What stays host at every size is the per-row codec and
-the readback, which is why those buckets are the ones that now dominate —
-`readback` first in all three secp lanes.
+crosses the threshold.
+
+## Two totals, because a placed seam does not finish when it returns
+
+`wall` is the lane's latency: run it, stop the clock, and let the device queue
+overlap whatever it can. `work` is the same lane with every metered seam
+waiting for what it queued, so each bucket is charged the arithmetic it
+started. The bucket shares are against `work`.
+
+Both columns are needed because a single one of them lies. Without the wait,
+a placed seam is timed for its *enqueue* and its arithmetic is billed to
+whichever later seam first reads the array — on every secp lane that is
+`affine_ints`, inside `readback`. Measured at B=1024, `secp.double_multiple`
+returns in ~2.2 ms and the multiplication it queued runs a further ~10.0 ms:
+timed without the wait, that reads as a 2% `mult` and a 45% `readback`, and
+the ranking it produces is the dispatch order rather than the profile. With
+the wait, `mult` is a third of these lanes and `readback` is the smallest
+bucket in all three. Below `DEVICE_MIN_BATCH` nothing is placed and the two
+columns agree, which is the check that the wait is not itself the cost.
+
+`work` is the larger of the two by 10-20% at B=1024, and that gap is real
+rather than overhead: it is the overlap the queue buys back, which `wall`
+keeps and `work` gives up in exchange for honest attribution.
 
 Every batch size is run once before it is timed, so what this reports is
 steady state. That makes it blind by construction to any change that moves
@@ -96,6 +116,32 @@ _REPS = flags.DEFINE_integer(
 _MESSAGE = np.frombuffer(bytes(range(32)), dtype=np.uint8)
 
 
+def _settle(value: Any) -> None:
+    """Wait for `value`, so a seam is charged the work it started.
+
+    A placed seam returns a traced array that is still being computed: the call
+    enqueues and returns. Timing the call alone therefore measures the enqueue,
+    and the arithmetic is charged instead to whichever *later* seam first reads
+    the array — which on every secp lane is the readback.
+
+    That is not a small distortion. Measured at B=1024 on an RTX 5090,
+    `secp.double_multiple` returns in ~2.2 ms and the multiplication it queued
+    takes a further ~10.0 ms; without this wait the first reads `mult` and the
+    second reads `readback`. The ranking that comes out is not the profile,
+    it is the dispatch order.
+
+    Host paths are unaffected — a numpy array has no wait to do — so the two
+    sides of every placement threshold stay comparable.
+    """
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            _settle(item)
+        return
+    ready = getattr(value, "block_until_ready", None)
+    if ready is not None:
+        ready()
+
+
 class _Meter:
     """Wall-clock accumulator, one bucket per substrate seam.
 
@@ -106,6 +152,11 @@ class _Meter:
 
     def __init__(self) -> None:
         self.seconds: dict[str, float] = {}
+        # Whether a seam waits for the work it queued before stopping its
+        # clock. Off measures the lane's real latency, because the queue is
+        # what the overlap is made of; on measures where the work is. The two
+        # answer different questions and `_measure` runs a pass of each.
+        self.settle = False
 
     def reset(self) -> None:
         self.seconds.clear()
@@ -114,6 +165,8 @@ class _Meter:
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             start = time.perf_counter()
             out = fn(*args, **kwargs)
+            if self.settle:
+                _settle(out)
             elapsed = time.perf_counter() - start
             self.seconds[bucket] = self.seconds.get(bucket, 0.0) + elapsed
             return out
@@ -318,7 +371,7 @@ def _measure(lane: _Lane, batches: Sequence[int], reps: int, meter: _Meter) -> N
 
     print(f"\n=== {lane.title}")
     print(
-        f"{'B':>5} {'total ms':>10} {'per sig ms':>11}"
+        f"{'B':>5} {'wall ms':>9} {'work ms':>9} {'per sig ms':>11}"
         + "".join(f"{name + ' %':>11}" for name in lane.buckets)
         + f"{'host %':>9}"
     )
@@ -326,24 +379,34 @@ def _measure(lane: _Lane, batches: Sequence[int], reps: int, meter: _Meter) -> N
     for batch in batches:
         arrays = _batch_of(rows, batch)
         verify(*arrays)  # warm the lazy dtype and curve-constant mints
-        best: float | None = None
-        split: dict[str, float] = {}
-        for _ in range(reps):
-            meter.reset()
-            start = time.perf_counter()
-            verify(*arrays)
-            elapsed = time.perf_counter() - start
-            if best is None or elapsed < best:
-                best, split = elapsed, dict(meter.seconds)
-        assert best is not None
-        per_signature[batch] = best / batch
+
+        def best_of(settle: bool) -> tuple[float, dict[str, float]]:
+            meter.settle = settle
+            best: float | None = None
+            split: dict[str, float] = {}
+            for _ in range(reps):
+                meter.reset()
+                start = time.perf_counter()
+                verify(*arrays)
+                elapsed = time.perf_counter() - start
+                if best is None or elapsed < best:
+                    best, split = elapsed, dict(meter.seconds)
+            assert best is not None
+            return best, split
+
+        wall, _ = best_of(settle=False)
+        work, split = best_of(settle=True)
+        meter.settle = False
+
+        per_signature[batch] = wall / batch
         metered = sum(split.get(name, 0.0) for name in lane.buckets)
         print(
-            f"{batch:>5} {best * 1e3:>10.1f} {per_signature[batch] * 1e3:>11.2f}"
+            f"{batch:>5} {wall * 1e3:>9.1f} {work * 1e3:>9.1f}"
+            f" {per_signature[batch] * 1e3:>11.2f}"
             + "".join(
-                f"{100 * split.get(name, 0.0) / best:>11.1f}" for name in lane.buckets
+                f"{100 * split.get(name, 0.0) / work:>11.1f}" for name in lane.buckets
             )
-            + f"{100 * (best - metered) / best:>9.1f}"
+            + f"{100 * (work - metered) / work:>9.1f}"
         )
     first, last = per_signature[batches[0]], per_signature[batches[-1]]
     print(
