@@ -7,9 +7,10 @@ with no batch axis — so everything here is Python integers and `bytes`, the
 representation the RFC itself speaks.
 
 HMAC is the standard library's, over a `hashlib`-style constructor the caller
-injects. hash-frx ships no HMAC, and its host rows wrap `hashlib` anyway, so
-the stdlib construction *is* the host implementation this path would otherwise
-reach through one more layer. The injection matters beyond taste: RFC 6979
+injects. hash-frx's `Hmac` is the array construction — it takes a `ByteHash` and
+a `[B, L]` batch — and there is no batch here to give it; its host rows wrap
+`hashlib` besides, so the stdlib construction *is* what this path would reach
+through one more layer. The injection matters beyond taste: RFC 6979
 §3.2 requires the HMAC hash to be the same `H` that hashed the message, and a
 chain variant that swaps the message hash swaps this one with it. The pairing
 cannot drift silently — the known-answer `k` values bind the two together.

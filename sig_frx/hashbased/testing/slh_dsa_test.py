@@ -539,7 +539,9 @@ class VerifyTest(absltest.TestCase):
         # with `B`. It does not: `B` only widens the rows each call carries.
         counted = _CountingHash()
         scheme = slh_dsa.SlhDsa(
-            Sha2TweakableHash(counted, n=_PARAMS.n, m=_PARAMS.m),
+            # `block_size` is explicit because hash-frx's table is keyed on the
+            # row's type name, and this stands in for `Sha256` under its own.
+            Sha2TweakableHash(counted, n=_PARAMS.n, m=_PARAMS.m, block_size=64),
             _PARAMS,
             deterministic=True,
         )

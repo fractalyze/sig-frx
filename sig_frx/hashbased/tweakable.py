@@ -38,10 +38,10 @@ from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 import frx.numpy as fnp
-import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx import ByteHash
+from hash_frx import ByteHash, Hmac, Mgf1
+from hash_frx import block_size as block_size_of
 
 
 @runtime_checkable
@@ -159,7 +159,7 @@ class Sha2TweakableHash:
         *,
         n: int,
         m: int,
-        block_size: int = 64,
+        block_size: int | None = None,
     ) -> None:
         if byte_hash.digest_size < n:
             raise ValueError(
@@ -167,9 +167,13 @@ class Sha2TweakableHash:
             )
         self._byte_hash = byte_hash
         # The hash's compression-block size, which HMAC and the seed padding both
-        # need. `ByteHash` carries the digest size but not this, so it is stated
-        # by the parameter set rather than read off the hash.
-        self._block_size = block_size
+        # need. `ByteHash` does not carry it, so it comes from hash-frx's table —
+        # which answers 64 for SHA-256 and 128 for SHA-512, the pair §11.2.2's
+        # categories 3 and 5 need. Pass it only for a hash that table cannot name,
+        # such as a test double wrapping a row.
+        self._block_size = (
+            block_size if block_size is not None else block_size_of(byte_hash)
+        )
         self.n = n
         self.m = m
         self.compressed_address = True
@@ -250,38 +254,13 @@ class Sha2TweakableHash:
         )[:, : self.n]
 
     def _mgf1(self, seed: Array, length: int) -> Array:
-        """MGF1 over the injected hash — RFC 8017 §B.2.1.
-
-        `T = H(seed ‖ toByte(0, 4)) ‖ H(seed ‖ toByte(1, 4)) ‖ ...`, truncated.
-        """
-        batch = seed.shape[0]
-        blocks = -(-length // self._byte_hash.digest_size)
-        counters = [
-            fnp.broadcast_to(
-                fnp.asarray(np.frombuffer(c.to_bytes(4, "big"), dtype=np.uint8)),
-                (batch, 4),
-            )
-            for c in range(blocks)
-        ]
-        return fnp.concatenate(
-            [self._digest(fnp.concatenate([seed, c], axis=-1)) for c in counters],
-            axis=-1,
-        )[:, :length]
+        """MGF1 over the injected hash — RFC 8017 §B.2.1, as a `ByteHash`."""
+        return fnp.asarray(Mgf1(self._byte_hash, length).digest(seed), dtype=fnp.uint8)
 
     def _hmac(self, key: ArrayLike, message: Array) -> Array:
-        """HMAC over the injected hash — RFC 2104."""
-        key_bytes = fnp.asarray(key, dtype=fnp.uint8)
-        if key_bytes.shape[0] > self._block_size:
-            key_bytes = self._digest(key_bytes[None, :])[0]
-        padded = (
-            fnp.zeros(self._block_size, dtype=fnp.uint8)
-            .at[: key_bytes.shape[0]]
-            .set(key_bytes)
-        )
-        inner = self._digest(
-            fnp.concatenate([padded ^ 0x36, message])[None, :],
-        )[0]
-        return self._digest(fnp.concatenate([padded ^ 0x5C, inner])[None, :])[0]
+        """HMAC over the injected hash — FIPS 198-1, on one message."""
+        mac = Hmac(self._byte_hash, self._block_size).mac(key, message[None, :])
+        return fnp.asarray(mac, dtype=fnp.uint8)[0]
 
     def _digest(self, messages: Array) -> Array:
         return fnp.asarray(self._byte_hash.digest(messages), dtype=fnp.uint8)
