@@ -99,12 +99,21 @@ are a malleability defence, and what makes it payable is that the terminators
 were already being found eight positions at a time; only the prefix sum over
 them was not.
 
-Two things this does **not** claim. The numbers compare implementations, which
-is what a local measurement is good for, and they size no budget
-([`conventions.md`](../../../docs/reference/conventions.md)). And they are CPU
-only: a CUDA-less box refuses `FRX_PLATFORMS=cuda` rather than falling back, so
-whether the GPU leg ranks the stages the same way is unmeasured here — a
-compaction's cost is exactly the kind that has inverted by backend before.
+One thing this does **not** claim. The numbers compare implementations, which is
+what a local measurement is good for, and they size no budget
+([`conventions.md`](../../../docs/reference/conventions.md)).
+
+**The GPU leg has since been measured, and it does rank the stages differently.**
+At Falcon-1024 and `B` = 1024, taken in one session against the `verify` it
+divides, this decoder is **69%** of a GPU verification against 20% of a CPU one —
+the reverse of the CPU ordering above, where `HashToPoint` is the pole
+([`falcon.py`](falcon.py) carries both halves of that pair). So the byte-granular
+ranking is the right shape for the leg it was chosen on, and the stage a GPU
+verification actually waits for. Whether *this* `searchsorted` wants a different
+formulation there is open, and it is a question about this decoder rather than
+about the shared compaction: `first_accepted`'s own direction was measured over
+both legs and moves neither operation
+([`rejection.py`](../rejection.py)).
 
 ## The rejections are the point of this module
 

@@ -40,14 +40,42 @@ scheme to describe.
 ## Collection is a gather, and a running count is the schedule
 
 Keeping the accepted candidates and closing the gaps is a data-dependent
-permutation however it is written, and the direction it is written in matters:
-a gather vectorises where the same permutation as a scatter serialises on a GPU.
-So it is a gather — but of the two ways to reach one, the cheap one is a
+permutation however it is written, and there are two directions to write it in:
+gather the source of each output, or scatter each survivor to the slot its rank
+names. This is a gather — but of the two ways to reach one, the cheap one is a
 `cumsum`. Ranking the survivors by a running count and looking up where each
 rank first appears answers the question about the outputs actually wanted;
 sorting the whole budget on a one-bit key answers it by computing a permutation
 of everything else as well, and measured 5-11x the cost of the scan at the shapes
 here.
+
+**Which of the two directions it is does not measurably change either
+operation**, and that is the reason it is left alone rather than a claim that it
+is the better one. Measured on a workstation CPU and on an RTX 5090, both forms
+byte-identical, the A/B interleaved and `verify` timed around each:
+
+| operation, `B` = 1 … 1024 | CPU | GPU |
+|---|---|---|
+| ML-DSA-65 `verify` | 0.99-1.04x | 0.98-1.02x |
+| Falcon-1024 `verify` | 0.96-1.01x | 1.00-1.01x |
+
+The compaction measured *on its own* says something else entirely — there the
+scatter is 1.3-6.3x faster on CPU and 1.0-4.6x on GPU, so the direction is not
+free, it just is not free where it is spent. It does not reach the operation
+because a sampler's compaction is fused with the SHAKE that produced its
+candidates and the arithmetic that consumes its survivors, and so never pays the
+round trip a standalone measurement forces on it. **An isolated stage here is an
+upper bound on what changing it could buy, not an estimate of it**: at
+Falcon-1024 and `B` = 256 the scatter takes the stage from 3.6 ms to 0.6 ms
+inside an 18.2 ms `verify`, and `verify` does not move.
+
+So the direction carries no claim about backends — in particular not that a
+scatter serialises on one, which is what this paragraph used to say and what the
+GPU leg above refutes. It is a gather because it is already written as one and
+nothing measured argues for the churn.
+[`compaction_bench`](testing/compaction_bench.py) is what would have to say
+otherwise, and it is committed so a re-measurement compares against the same
+harness rather than a fresh one.
 """
 
 from __future__ import annotations

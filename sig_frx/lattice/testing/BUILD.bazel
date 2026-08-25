@@ -1,8 +1,12 @@
-load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
+load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
-# The shared budget's own tests. Beside the module rather than inside either
-# consumer, so deleting or re-parameterizing a scheme cannot delete them.
+# The shared module's own tests — the budget's tail, and the compaction against a
+# host reference. Beside the module rather than inside either consumer, so
+# deleting or re-parameterizing a scheme cannot delete them. Takes frx because
+# the compaction cases run in both namespaces: a sampler compacts host arrays on
+# the key path and tracers under `verify`, and those are different code.
 py_test(
     name = "rejection_test",
     size = "small",
@@ -10,5 +14,28 @@ py_test(
     deps = [
         "//sig_frx/lattice:rejection",
         requirement("absl_py"),
-    ],
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# Which form the shared compaction takes is a per-backend measurement, and this
+# is the harness that takes it. Beside `rejection.py`'s own tests rather than in
+# either consumer, for the reason those are: it reaches both schemes, and it
+# would be deleted by re-parameterizing either one of them.
+py_binary(
+    name = "compaction_bench",
+    testonly = True,
+    srcs = ["compaction_bench.py"],
+    deps = [
+        "//sig_frx/lattice:rejection",
+        "//sig_frx/lattice/falcon",
+        "//sig_frx/lattice/falcon:encoding",
+        "//sig_frx/lattice/falcon/testing:falcon_vectors",
+        "//sig_frx/lattice/mldsa:ml_dsa",
+        "//sig_frx/lattice/mldsa:sampling",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
 )
