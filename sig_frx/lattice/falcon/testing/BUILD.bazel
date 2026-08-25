@@ -1,4 +1,4 @@
-load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
@@ -15,8 +15,102 @@ py_test(
     size = "small",
     srcs = ["arith_test.py"],
     deps = [
+        ":falcon_reference",
         "//sig_frx/lattice/falcon:arith",
         requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The specification's own algorithms, transcribed. Pure Python over unbounded
+# integers, so it depends on nothing in the tree and both test targets can hold
+# their reshaped counterparts to it.
+py_library(
+    name = "falcon_reference",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "falcon_reference.py",
+    ],
+)
+
+# Transcribed constants rather than a fetched file: Falcon publishes no ACVP set,
+# so the authority is the reference implementation's own KAT and the provenance
+# lives in the module. #28 replaces this with the pinned whole set. Depends on
+# the harness because it hands its cases over as `kat.KatVector`.
+py_library(
+    name = "falcon_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "falcon_vectors.py",
+    ],
+    deps = ["//sig_frx/testing:kat"],
+)
+
+# The published verdicts and everything the shared harness derives from them.
+# Separate from `falcon_test` the way `ml_dsa_kat_test` is from `ml_dsa_test`:
+# this one is the vectors, that one is the scheme's own structure.
+#
+# Sized from the executor, and the GPU leg decides here too: 172.1 s against the
+# CPU leg's 81.3 s. `medium` would be 57% of its 300 s — past the half-a-budget
+# rule in ../../../../docs/reference/conventions.md before any spread is counted
+# — so it takes the same bucket as `falcon_test`, at 19% of 900 s. The harness
+# derives a tampering and a batch pass per vector, each its own traced shape.
+py_test(
+    name = "falcon_kat_test",
+    size = "large",
+    srcs = ["falcon_kat_test.py"],
+    deps = [
+        ":falcon_reference",
+        ":falcon_vectors",
+        "//sig_frx/lattice/falcon",
+        "//sig_frx/testing:kat",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# Sized from the executor: 31.4 s on the CPU leg against 16.1 s on the GPU one,
+# so CPU is the leg that decides — and that 31.4 is itself the CPU leg's spread
+# showing, against 17.7 s for the same content on an earlier run. `small` would
+# put the worse of those at 52% of its 60 s, past the half-a-budget rule in
+# ../../../../docs/reference/conventions.md; `medium` covers it at 10%.
+py_test(
+    name = "encoding_test",
+    size = "medium",
+    srcs = ["encoding_test.py"],
+    deps = [
+        ":falcon_reference",
+        "//sig_frx/lattice/falcon:encoding",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# Sized from the executor, and **the GPU leg is the one that decides** — 272.9 s
+# against the CPU leg's 122.5 s. That inverts the sibling `arith_test`, where CPU
+# is slower, and the cause is the cost `conventions.md` attributes to distinct
+# shapes rather than to vectors: each case carries its own message length, so
+# nearly every one traces its own program, and a compile is what the GPU leg is
+# worst at.
+#
+# `large`'s 900 s covers that worst run at 30%. `medium` would have been at 91%
+# — a target that passes on a workstation at 25 s and flakes where it counts,
+# which is the whole of why a local number does not size a budget.
+py_test(
+    name = "falcon_test",
+    size = "large",
+    srcs = ["falcon_test.py"],
+    deps = [
+        ":falcon_reference",
+        ":falcon_vectors",
+        "//sig_frx:signature",
+        "//sig_frx/lattice/falcon",
+        requirement("absl_py"),
+        requirement("frx"),
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )

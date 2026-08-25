@@ -24,7 +24,7 @@ strongly existentially unforgeable". A published standard got this wrong once.
 verdict — not a flag invented here but Algorithm 8 line 3, `if h = ⊥ then
 return false`, with the branch removed.
 
-**Why this reports where `sampling._require_enough` raises**, when both cite
+**Why this reports where `rejection.require_enough` raises**, when both cite
 the same `bool[B]`: they answer different questions. A malformed hint is a
 *verdict about the input*, and `bool[B]` is exactly where the standard puts it.
 A sampler shortfall is a claim about *our own budget* — the input is fine — so

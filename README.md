@@ -30,15 +30,18 @@ Constructible through `Signature` today:
 | family | schemes |
 |---|---|
 | Hash-based | SLH-DSA (FIPS 205), XMSS and XMSS-MT (RFC 8391) |
-| Lattice | ML-DSA (FIPS 204) |
+| Lattice | ML-DSA (FIPS 204); Falcon (FN-DSA) **verification only** |
 | Classical | ECDSA over secp256k1 and P-256, with the Ethereum and Bitcoin variants; BIP-340 Schnorr; Ed25519 |
 | Threshold | FROST (RFC 9591), Ed25519 and secp256k1 ciphersuites |
 
-**Falcon (FN-DSA) is planned, not shipped** — `sig_frx/lattice/` carries `mldsa`
-and nothing else. It is tracked by
-[#24](https://github.com/fractalyze/sig-frx/issues/24)–[#28](https://github.com/fractalyze/sig-frx/issues/28).
-A scheme is listed above only when a consumer can construct it, since that is
-what picking a scheme by construction means.
+**Falcon verifies but does not yet sign.** `falcon.named("Falcon-512")` is
+constructible and `verify` is gated on the round-3 known-answer vectors;
+`keygen` and `sign` raise, because they work over `Q[x]/(x^n + 1)` and wait on
+the FFT's precision ([#178](https://github.com/fractalyze/sig-frx/issues/178),
+then [#26](https://github.com/fractalyze/sig-frx/issues/26) and
+[#27](https://github.com/fractalyze/sig-frx/issues/27)). It is listed above
+because a consumer can construct it, which is what picking a scheme by
+construction means — and the row says which operation it gets.
 
 Remaining work is tracked on the
 [issues](https://github.com/fractalyze/sig-frx/issues).

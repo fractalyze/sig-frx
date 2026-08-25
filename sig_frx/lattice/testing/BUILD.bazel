@@ -1,0 +1,14 @@
+load("@rules_python//python:defs.bzl", "py_test")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# The shared budget's own tests. Beside the module rather than inside either
+# consumer, so deleting or re-parameterizing a scheme cannot delete them.
+py_test(
+    name = "rejection_test",
+    size = "small",
+    srcs = ["rejection_test.py"],
+    deps = [
+        "//sig_frx/lattice:rejection",
+        requirement("absl_py"),
+    ],
+)

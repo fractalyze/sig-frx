@@ -69,6 +69,7 @@ from sig_frx import context as ctx
 from sig_frx import prehash
 from sig_frx.arrays import namespace
 from sig_frx.hashes import shake256
+from sig_frx.lattice import rejection
 from sig_frx.lattice.mldsa import arith, encoding, sampling
 from sig_frx.lattice.mldsa.arith import D, Q
 from sig_frx.signature import Signature
@@ -87,14 +88,14 @@ _RANDOMIZER_SIZE = 32
 _WORST_ACCEPTANCE = (10, 51)
 
 # Appendix C leaves an iteration cap optional, and this is the argument for
-# having one: `sampling.budget` asked for a single success from one attempt per
+# having one: `rejection.budget` asked for a single success from one attempt per
 # trial is the fewest iterations whose chance of producing nothing at all falls
 # below the margin the samplers are sized against. One derivation of the tail
 # for both loops, rather than a second one to check. Reaching it means the loop
 # cannot terminate — a wrong bound or a wrong sampler — rather than an unlucky
-# seed, which is what `sampling._require_enough` says about its own budget in
+# seed, which is what `rejection.require_enough` says about its own budget in
 # the same words.
-_MAX_ITERATIONS = sampling.budget(1, _WORST_ACCEPTANCE, 1)
+_MAX_ITERATIONS = rejection.budget(1, _WORST_ACCEPTANCE, 1)
 
 
 @dataclass(frozen=True)
@@ -279,8 +280,7 @@ class MlDsa:
         xi = namespace(seed).asarray(seed, dtype=np.uint8)
         if xi.shape != (params.seed_size,):
             raise ValueError(
-                f"keygen takes ξ, {params.seed_size} bytes, got shape "
-                f"{tuple(xi.shape)}"
+                f"keygen takes ξ, {params.seed_size} bytes, got shape {tuple(xi.shape)}"
             )
         # Line 1: the domain of the expansion carries (k, ℓ), so two parameter
         # sets never expand one seed the same way.
@@ -414,7 +414,7 @@ class MlDsa:
 
         raise RuntimeError(
             f"signing rejected {_MAX_ITERATIONS} consecutive candidates, which "
-            f"Table 1 puts below 2^-{sampling.LOG2_SHORTFALL} — the bounds or "
+            f"Table 1 puts below 2^-{rejection.LOG2_SHORTFALL} — the bounds or "
             f"the samplers are wrong rather than the seed being unlucky"
         )
 

@@ -53,6 +53,7 @@ from hash_frx import (
     Shake256,
 )
 
+from sig_frx.lattice import rejection
 from sig_frx.lattice.mldsa import arith, encoding, ml_dsa, sampling
 from sig_frx.lattice.mldsa.arith import N, Q
 
@@ -226,12 +227,13 @@ def _shapes(params: ml_dsa.MlDsaParams, message_size: int) -> list[_Shape]:
     # §7.3's budgets, on the samplers' own parameterisations rather than a
     # second copy of them: a rejection rule that changes in `sampling` has to
     # change the shape measured here, and a transcription would keep reporting
-    # the old one in numbers that still look plausible.
-    ntt_blocks = sampling.budget(N, sampling._NTT_ACCEPT, sampling._NTT_PER_BLOCK)
-    bounded_blocks = sampling.budget(
+    # the old one in numbers that still look plausible. The tail that sizes them
+    # is `rejection`'s, shared with Falcon; the constants stay the samplers'.
+    ntt_blocks = rejection.budget(N, sampling._NTT_ACCEPT, sampling._NTT_PER_BLOCK)
+    bounded_blocks = rejection.budget(
         N, sampling._BOUNDED_ACCEPT[params.eta], sampling._BOUNDED_PER_BLOCK
     )
-    ball_allowance = sampling.budget(params.tau, (N - params.tau + 1, N), 1)
+    ball_allowance = rejection.budget(params.tau, (N - params.tau + 1, N), 1)
     # The mask is squeezed to exactly what the unpacking consumes, and `w1` is
     # packed at `bitlen((q−1)/(2γ2) − 1)` — Algorithms 34 and 28.
     mask_width = 1 + (params.gamma1 - 1).bit_length()
@@ -553,8 +555,7 @@ def _stages(name: str, message_size: int, reps: int) -> None:
         on_device = _fastest(lambda: call(lifted), reps)
         landed = "device" if isinstance(_first(result), Array) else "host"
         print(
-            f"  {label:<14} {on_host * 1e3:>12.2f} {on_device * 1e3:>14.2f} "
-            f"{landed:>8}"
+            f"  {label:<14} {on_host * 1e3:>12.2f} {on_device * 1e3:>14.2f} {landed:>8}"
         )
 
 

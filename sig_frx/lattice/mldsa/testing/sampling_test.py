@@ -72,58 +72,6 @@ def _ints(values: Any) -> list[Any]:
     return np.asarray(values).tolist()
 
 
-class BudgetTest(parameterized.TestCase):
-    """The candidate budget, which is the whole safety argument of the reshaping.
-
-    The standard's loop cannot run short; a fixed budget can, so the budget is
-    sized by an exact binomial tail rather than by convention. These pin the
-    sizing from both sides — it is safe, and it is the smallest safe one — so a
-    change to either the margin or the acceptance probability fails here rather
-    than silently widening the window in which a wrong polynomial comes back.
-    """
-
-    @parameterized.named_parameters(
-        ("expand_a", 256, sampling._NTT_ACCEPT, sampling._NTT_PER_BLOCK),
-        (
-            "expand_s_eta_2",
-            256,
-            sampling._BOUNDED_ACCEPT[2],
-            sampling._BOUNDED_PER_BLOCK,
-        ),
-        (
-            "expand_s_eta_4",
-            256,
-            sampling._BOUNDED_ACCEPT[4],
-            sampling._BOUNDED_PER_BLOCK,
-        ),
-        ("sample_in_ball_tau_60", 60, (256 - 60 + 1, 256), 1),
-    )
-    def test_is_the_smallest_budget_that_meets_the_margin(
-        self, needed: int, accept: tuple[int, int], per_block: int
-    ) -> None:
-        blocks = sampling.budget(needed, accept, per_block)
-        self.assertFalse(
-            sampling._shortfall_exceeds_margin(blocks * per_block, needed, accept),
-            "the chosen budget does not meet the margin",
-        )
-        self.assertTrue(
-            sampling._shortfall_exceeds_margin(
-                (blocks - 1) * per_block, needed, accept
-            ),
-            "a smaller budget would also have met it, so this one is not minimal",
-        )
-
-    def test_the_margin_is_the_strongest_parameter_set_s_strength(self) -> None:
-        """`2^-256` is `λ` at ML-DSA-87 (Table 1), not a round number."""
-        self.assertEqual(
-            sampling.LOG2_SHORTFALL, max(case["lam"] for case in _PARAMETER_SETS)
-        )
-
-    def test_a_certain_acceptance_needs_no_slack(self) -> None:
-        """The tail is exact, so `p = 1` sizes to exactly what is asked for."""
-        self.assertEqual(sampling.budget(256, (1, 1), 8), 32)
-
-
 class ExpandATest(parameterized.TestCase):
     """Algorithm 32 — the public matrix, sampled straight into `T_q`."""
 

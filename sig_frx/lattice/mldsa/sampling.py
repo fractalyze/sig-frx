@@ -5,35 +5,13 @@ Everything random in ML-DSA is squeezed out of a SHAKE and rejection-sampled. Th
 standard writes each sampler as a `while` loop that squeezes until enough
 candidates have survived, and that trip count is the data — so it is not
 available to a tracer, and the loop is reshaped into a fixed candidate budget
-plus a compaction. This module is that reshaping, and the two things it has to
-get right are how large the budget is and how the survivors are collected.
-
-## The budget is computed, not chosen
-
-A generous static bound is only as good as the argument that it is generous
-enough, and "5 blocks is what everyone uses" is not one — the implementations
-that use 5 also loop when 5 is not enough, which is the part this cannot do. So
-`budget` computes the smallest budget whose *exact* binomial shortfall
-probability is at most `2^-256`, the collision strength of the strongest
-parameter set. It is integer arithmetic over the acceptance probability the
-standard's own rejection rule defines, evaluated once per parameterisation on
-the host, and it means the bound-exhausted path is unreachable rather than
-merely unlikely (see `_require_enough` for what happens if it is reached anyway).
+plus a compaction. That reshaping is [`rejection.py`](../rejection.py)'s, shared
+with Falcon's `HashToPoint`, and what is left here is the part FIPS 204 fixes:
+which draws each sampler reads and which of them it keeps.
 
 Which loop shape a rejection gets is the scheme's decision to record, and
 [`ml-dsa.md`](../../../docs/schemes/ml-dsa.md) records this one alongside the
 signing loop that went the other way.
-
-## Collection is a gather, and a running count is the schedule
-
-Keeping the accepted candidates and closing the gaps is a data-dependent
-permutation however it is written, and the direction it is written in matters:
-a gather vectorises where the same permutation as a scatter serialises on a GPU.
-So it is a gather — but of the two ways to reach one, the cheap one is a
-`cumsum`. Ranking the survivors by a running count and looking up where each
-rank first appears answers the question about 256 outputs; sorting the whole
-budget on a one-bit key answers it by computing a permutation of everything
-else as well, and measured 5-11x the cost of the scan at the shapes here.
 
 ## One-shot SHAKE, not the incremental one
 
@@ -63,12 +41,10 @@ still round-trips and still convolves.
 
 from __future__ import annotations
 
-from functools import lru_cache, partial
-from math import comb
+from functools import partial
 from typing import Any
 
 import frx
-import frx.core
 import frx.numpy as fnp
 import numpy as np
 from frx.typing import ArrayLike
@@ -78,12 +54,7 @@ from sig_frx.arrays import namespace
 from sig_frx.hashes import shake128, shake256
 from sig_frx.lattice.mldsa.arith import FIELD, N, Q
 from sig_frx.lattice.mldsa.encoding import bytes_to_bits, unpack_fields
-
-# The shortfall probability every budget below is sized against. `2^-256` is the
-# collision strength `λ` of the strongest parameter set (Table 1), so a budget
-# that meets it is not the weakest part of any set — and the margin is cheap,
-# since the tail falls off fast enough that buying it costs one further block.
-LOG2_SHORTFALL = 256
+from sig_frx.lattice.rejection import budget, first_accepted, require_enough
 
 # CoeffFromThreeBytes reads 23 uniform bits and keeps them when they land below
 # `q` (Algorithm 14); the three bytes it reads divide `G`'s rate exactly.
@@ -100,102 +71,6 @@ _BOUNDED_ACCEPT = {
     eta: (threshold, 16) for eta, threshold in _BOUNDED_THRESHOLD.items()
 }
 _BOUNDED_PER_BLOCK = 2 * SHAKE256_RATE
-
-
-def _shortfall_exceeds_margin(
-    trials: int, needed: int, accept: tuple[int, int]
-) -> bool:
-    """Whether `trials` candidates yield fewer than `needed` more often than `2^-256`.
-
-    The exact binomial lower tail, cleared of its denominator: with acceptance
-    `num/den`, `P = Σ_{a<needed} C(trials, a)·num^a·(den−num)^(trials−a) /
-    den^trials`, and every factor is an integer. Exact rather than a Chernoff
-    bound because it is a few hundred big-integer multiplications on the host,
-    and because a safety argument that is itself approximate is one more thing a
-    reader has to check.
-    """
-    num, den = accept
-    shortfall = sum(
-        comb(trials, survivors) * num**survivors * (den - num) ** (trials - survivors)
-        for survivors in range(needed)
-    )
-    return (shortfall << LOG2_SHORTFALL) > den**trials
-
-
-@lru_cache(maxsize=None)
-def budget(needed: int, accept: tuple[int, int], per_block: int) -> int:
-    """The fewest blocks of `per_block` candidates that safely yield `needed`.
-
-    Public because the sizing is the scheme's too, not only the samplers': at
-    `needed = 1` and one candidate per block it answers how many independent
-    attempts make failing altogether unreachable, which is what `ml_dsa` bounds
-    its rejection loop by. One derivation of the tail for the whole scheme.
-
-    Cached because it is the same handful of parameterisations for the life of a
-    process, and because the tail is big-integer work that no caller should pay
-    twice.
-    """
-    blocks = -(-needed // per_block)
-    while _shortfall_exceeds_margin(blocks * per_block, needed, accept):
-        blocks += 1
-    return blocks
-
-
-def _require_enough(survivors: Any, needed: int, sampler: str) -> None:
-    """Raise if any stream produced fewer than `needed` survivors.
-
-    The check runs wherever it can be run. Key generation and signing are
-    concrete, so the count is a number there and a shortfall raises; under a
-    tracer it is not a number and no comparison on it can raise. What stands in
-    for the check on that path is `budget`: the count it sizes for cannot fall
-    short more often than `2^-256`, which is below the collision strength of the
-    scheme being sampled for.
-
-    `frx.experimental.checkify` would defer a real check into the traced path,
-    and it is deliberately not used. It functionalises the caller — `checkify`
-    turns `f` into one returning `(error, out)` — so the error has to be threaded
-    to the top of the enclosing zone and thrown there. That top is
-    `Signature.verify`, which returns `bool[B]` and nothing else, so adopting it
-    means a validity flag every caller threads and most drop: a guarantee traded
-    for a convention.
-    """
-    if isinstance(survivors, frx.core.Tracer):
-        return
-    short = np.atleast_1d(np.asarray(survivors) < needed)
-    if short.any():
-        raise RuntimeError(
-            f"{sampler}: {int(short.sum())} of {short.size} streams ran out of "
-            f"candidates before {needed} survived rejection. The budget is sized "
-            f"for a shortfall probability below 2^-{LOG2_SHORTFALL}, so this is "
-            f"a wrong budget rather than an unlucky seed."
-        )
-
-
-def _first_accepted(values: Any, accepted: Any, count: int, sampler: str) -> Any:
-    """The first `count` accepted values of each row, in stream order.
-
-    `cumsum` over the acceptance flags gives each candidate the rank it would
-    have among the survivors, and that running count is non-decreasing — so the
-    source of output `r` is where rank `r + 1` first appears, which is a
-    `searchsorted`. The survivor count falls out of the same scan as its last
-    entry, so the shortfall check costs nothing here.
-
-    **`clip` is not redundant**, even though `_require_enough` has just refused
-    the case it covers. Under a tracer that refusal cannot fire, and a shortfall
-    leaves `searchsorted` returning one past the end for every unfilled slot —
-    where `take`'s default is to fill with `INT32_MIN` rather than to clamp. The
-    mode pins the unreachable branch to the same wrong answer on every backend
-    instead of to whatever each one does at the edge, which is the property
-    enc-frx's `ml_kem.sampling._compact` states for the same reason.
-    """
-    ranks = fnp.cumsum(accepted, axis=-1, dtype=np.int32)
-    _require_enough(ranks[..., -1], count, sampler)
-    wanted = fnp.arange(1, count + 1, dtype=np.int32)
-    return frx.vmap(
-        lambda row, rank: fnp.take(
-            row, fnp.searchsorted(rank, wanted), axis=-1, mode="clip"
-        )
-    )(values, ranks)
 
 
 def _seeds(rho: ArrayLike, width: int, tails: np.ndarray) -> Any:
@@ -232,7 +107,7 @@ def _rej_ntt_poly(seeds: Any, blocks: int) -> Any:
     # dropped, and the rest is a little-endian 23-bit integer.
     z = groups[..., 0] | (groups[..., 1] << 8) | ((groups[..., 2] & 0x7F) << 16)
     accepted = z < np.uint32(Q)
-    return _first_accepted(z, accepted, N, "ExpandA").astype(FIELD)
+    return first_accepted(z, accepted, N, "ExpandA").astype(FIELD)
 
 
 def _rej_bounded_poly(seeds: Any, eta: int, blocks: int) -> Any:
@@ -249,7 +124,7 @@ def _rej_bounded_poly(seeds: Any, eta: int, blocks: int) -> Any:
         coefficients = np.int32(2) - nibbles % np.int32(5)
     else:
         coefficients = np.int32(4) - nibbles
-    return _first_accepted(coefficients, accepted, N, "ExpandS")
+    return first_accepted(coefficients, accepted, N, "ExpandS")
 
 
 def expand_a(rho: ArrayLike, k: int, ell: int) -> Any:
@@ -350,7 +225,7 @@ def sample_in_ball(rho: ArrayLike, tau: int) -> Any:
     # check: `_ball_from_stream` returns a count rather than consuming it, and a
     # count that has come back out of `jit` is a number wherever the caller is
     # not itself traced.
-    _require_enough(completed, tau, "SampleInBall")
+    require_enough(completed, tau, "SampleInBall")
     return c
 
 
