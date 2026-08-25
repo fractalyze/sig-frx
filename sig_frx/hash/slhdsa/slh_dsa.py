@@ -607,6 +607,30 @@ class SlhDsa:
         )
 
 
+def sha2_params(params: SlhDsaParams, *, deterministic: bool = False) -> SlhDsa:
+    """§11.2.1's SHA-256-only family at `params`, whether Table 2 names it or not.
+
+    `sha2` is this with a Table 2 lookup in front of it. The split exists because
+    a scheme may define a parameter set of its own — SHRINCS's stateless
+    component is the one in this repo — and the alternative is assembling
+    `SlhDsa` and a tweakable hash at the call site, which copies the one fact
+    this module should own: which hash family goes with which security category.
+    That fact is about to have a second answer, since categories 3 and 5 want
+    SHA-512, and a copy would not be found when it does.
+    """
+    if params.security_category != 1:
+        raise NotImplementedError(
+            f"security category {params.security_category} hashes H, T_l and "
+            f"PRF_msg with SHA-512 (FIPS 205 §11.2.2); this builds §11.2.1's "
+            f"SHA-256-only family"
+        )
+    return SlhDsa(
+        Sha2TweakableHash(Sha256(), n=params.n, m=params.m),
+        params,
+        deterministic=deterministic,
+    )
+
+
 def sha2(name: str, *, deterministic: bool = False) -> SlhDsa:
     """The `SLH-DSA-SHA2-*` parameter set called `name`, over hash-frx's SHA-256.
 
@@ -618,18 +642,7 @@ def sha2(name: str, *, deterministic: bool = False) -> SlhDsa:
     """
     if name not in SHA2_PARAMETER_SETS:
         raise ValueError(f"{name!r} is not one of {sorted(SHA2_PARAMETER_SETS)}")
-    params = SHA2_PARAMETER_SETS[name]
-    if params.security_category != 1:
-        raise NotImplementedError(
-            f"{name} is in security category {params.security_category}, whose "
-            f"instantiation hashes H, T_l and PRF_msg with SHA-512 (FIPS 205 "
-            f"§11.2.2); this builds §11.2.1's SHA-256-only family"
-        )
-    return SlhDsa(
-        Sha2TweakableHash(Sha256(), n=params.n, m=params.m),
-        params,
-        deterministic=deterministic,
-    )
+    return sha2_params(SHA2_PARAMETER_SETS[name], deterministic=deterministic)
 
 
 def shake(name: str, *, deterministic: bool = False) -> SlhDsa:

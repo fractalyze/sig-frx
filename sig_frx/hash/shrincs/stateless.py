@@ -17,9 +17,12 @@ than reimplemented, and what lands here is the wrapper.
 
 `SlhDsaParams` derives the whole of the specification's stateless table from the
 five values below — `h' = 9`, `m = 24`, `len = 35`, a 5776-byte signature — which
-is why the table is not restated here. The set is built by hand rather than added
-to `SHA2_PARAMETER_SETS`, because that dict is FIPS 205 Table 2 and a row SHRINCS
-invented is not in it; `SlhDsa`'s own docstring names this case.
+is why the table is not restated here. The set is not added to
+`SHA2_PARAMETER_SETS`, because that dict is FIPS 205 Table 2 and a row SHRINCS
+invented is not in it; it goes to `sha2_params` instead, which is that table's
+lookup removed and the family choice kept. Which hash goes with which security
+category stays a fact `slh_dsa.py` owns, so the day categories 3 and 5 need
+SHA-512 there is one place to change.
 
 **The wrapper is two bindings and a tag.** A SHRINCS public key is
 `pk_seed ‖ sl_root ‖ sf_root`, so the SLH-DSA key is its first two thirds. The
@@ -36,6 +39,10 @@ values a public key is made of — so there is no `keygen` here to have, and no
 leaving it off: its `verify` would reject every valid *stateful* signature, which
 is a wrong answer rather than a missing one. The seam arrives with the stateful
 component.
+
+That is also both halves of why the shared known-answer harness does not drive
+this — `conventions.md` asks for both to be named. There is no published format
+for a loader to normalize, and this is not on the seam the harness signs through.
 """
 
 from __future__ import annotations
@@ -43,10 +50,8 @@ from __future__ import annotations
 import frx.numpy as fnp
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx import Sha256
 
-from sig_frx.hash.slhdsa.slh_dsa import SlhDsa, SlhDsaParams
-from sig_frx.hash.tweakable import Sha2TweakableHash
+from sig_frx.hash.slhdsa.slh_dsa import SlhDsaParams, sha2_params
 
 # The specification's stateless parameters. `n` is not among them: every tweakable
 # hash in SHRINCS truncates to 16 bytes, which is what makes this security
@@ -84,26 +89,16 @@ class Stateless:
     returns `bool[B]`, and a single verification is `B = 1`.
     """
 
-    public_key_size: int = PUBLIC_KEY_SIZE
-    signature_size: int = SIGNATURE_SIZE
-
     def __init__(self) -> None:
-        self._slh_dsa = SlhDsa(
-            Sha2TweakableHash(Sha256(), n=PARAMS.n, m=PARAMS.m), PARAMS
-        )
+        self.slh_dsa = sha2_params(PARAMS)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Stateless):
             return NotImplemented
-        return self._slh_dsa == other._slh_dsa
+        return self.slh_dsa == other.slh_dsa
 
     def __hash__(self) -> int:
-        return hash((type(self), self._slh_dsa))
-
-    @property
-    def slh_dsa(self) -> SlhDsa:
-        """The SLH-DSA instance underneath, for a caller gating it directly."""
-        return self._slh_dsa
+        return hash((type(self), self.slh_dsa))
 
     def verify(
         self,
@@ -154,7 +149,7 @@ class Stateless:
         # key that shares the first two.
         slh_dsa_keys = keys[:, : 2 * n]
         bound = fnp.concatenate([keys[:, 2 * n :], messages], axis=-1)
-        accepted = self._slh_dsa.verify(
+        accepted = self.slh_dsa.verify(
             slh_dsa_keys, bound, signatures[:, 1:], context=context
         )
         return accepted & (signatures[:, 0] == STATELESS_INDICATOR)

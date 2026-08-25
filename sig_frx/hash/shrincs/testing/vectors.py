@@ -24,18 +24,20 @@ there is no published file to fetch. Each was produced by importing that
 reaches only the stateful half of key generation, and it is recorded because
 `sf_root` — which the stateless path binds into every message — depends on it.
 
-**The intermediates are pinned, not only the signature.** A digest of a final
-artifact says that something is wrong and nothing about where, and this path runs
-a message digest, a FORS reconstruction and a five-layer hypertree walk before it
-produces one. Each case therefore carries what the reference computes between
-them, obtained from the same module:
+**What is pinned is what this layer can check.** A case carries the public key's
+three parts and the randomizer separately from the artifacts they come out of, so
+a failure to split either one is its own failure rather than a wrong final
+verdict.
 
+The intermediates below those — the FORS digest, the tree and leaf indices, the
+FORS public key — are deliberately a recipe rather than constants. Reading them
+back needs SLH-DSA's private digest split, which this layer has no business
+reaching through, and the walk that consumes them is `slh_dsa.py`'s and gated by
+its own tests. When a case does fail, regenerate them from the pinned commit:
+
+    bound = toByte(0, 1) ‖ toByte(|ctx|, 1) ‖ ctx ‖ sf_root ‖ message
     md, tree_index, leaf_index = slh_dsa_digest_message(R, pk_seed, sl_root, bound)
     fors_public_key = fors_pubkey_from_sig(sig[17:17 + FORS_SIGNATURE_SIZE], md, ...)
-
-where `R` is the signature's first 16 bytes after the indicator, and `bound` is
-`toByte(0, 1) ‖ toByte(|ctx|, 1) ‖ ctx ‖ sf_root ‖ message` — the stateless
-component's message, with FIPS 205's context encoding around it.
 
 **A pinned draft moves.** That commit is a Draft-stage specification with a
 security proof still outstanding, and the numbers in it have already changed once
@@ -61,12 +63,7 @@ class StatelessVectors:
     pk_seed: bytes
     sl_root: bytes
     sf_root: bytes
-    # What the verifier recomputes on its way to `sl_root`.
-    randomizer: bytes  # `R`
-    fors_digest: bytes  # `md`, 17 bytes
-    tree_index: int
-    leaf_index: int
-    fors_public_key: bytes
+    randomizer: bytes  # `R`, the signature's first 16 bytes past the indicator
 
 
 REFERENCE: tuple[StatelessVectors, ...] = (
@@ -271,10 +268,6 @@ REFERENCE: tuple[StatelessVectors, ...] = (
         sl_root=bytes.fromhex("017bd5a63a0ec4689a6e7ab02a58182b"),
         sf_root=bytes.fromhex("30bfb08ba74e0f67ad0369ba45432317"),
         randomizer=bytes.fromhex("f01bc578ba9b98f7fc1af654b1aeb7ea"),
-        fors_digest=bytes.fromhex("198f3c27cc6a0e547407a2f06232c81da4"),
-        tree_index=40525347982,
-        leaf_index=251,
-        fors_public_key=bytes.fromhex("d27dacee680a3cd6a39ebf8824bb9781"),
     ),
     StatelessVectors(
         label="with_context",
@@ -479,9 +472,5 @@ REFERENCE: tuple[StatelessVectors, ...] = (
         sl_root=bytes.fromhex("8ad4673576d48085b58acbabf508d37a"),
         sf_root=bytes.fromhex("fcad3e1b6e25a43d458ea3b57bb594a2"),
         randomizer=bytes.fromhex("d71206689228b40a3ab11e3b99add174"),
-        fors_digest=bytes.fromhex("58da71fa200bb3d3c4d1ad38c7bde34518"),
-        tree_index=45588276414,
-        leaf_index=193,
-        fors_public_key=bytes.fromhex("865675837a7e323770894863e3785f58"),
     ),
 )

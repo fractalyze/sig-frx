@@ -11,9 +11,18 @@ thing this component checks is a thing it actually checks — the indicator byte
 the context, the message, the key, and above all `sf_root`, which is the binding
 the wrapper exists for and the one a correct-looking implementation can drop
 without failing any round trip of its own.
+
+**Every verification in this file runs at one batch size**, which is what
+`_verdicts` is for. Verification is compiled per input shape, so an unseen batch
+size costs a full compile of the program — seconds — where a repeat of one
+already seen costs milliseconds. Sixteen rejections at `B = 1` and one batch case
+at `B = 3` is two compiles and sixteen round trips; the same coverage grouped
+into a single shape is one compile and six.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 import numpy as np
 from absl.testing import absltest
@@ -21,14 +30,41 @@ from absl.testing import absltest
 from sig_frx.hash.shrincs import stateless
 from sig_frx.hash.shrincs.testing import vectors
 
+# The one batch shape this file compiles. Four, because that is the widest case
+# below — a batch whose verdicts alternate.
+_BATCH = 4
 
-def _batch(*values: bytes) -> np.ndarray:
-    return np.frombuffer(b"".join(values), dtype=np.uint8).reshape(len(values), -1)
+
+def _rows(*values: bytes) -> np.ndarray:
+    # Stacked rather than joined and reshaped, so that a batch of empty
+    # signatures is `[B, 0]` instead of a reshape of nothing.
+    return np.stack([np.frombuffer(v, dtype=np.uint8) for v in values])
 
 
 def _ctx(context: bytes) -> np.ndarray | None:
     """The context as the seam takes it: a `uint8` array, `None` meaning empty."""
     return np.frombuffer(context, dtype=np.uint8) if context else None
+
+
+def _verdicts(
+    scheme: stateless.Stateless, cases: list[vectors.StatelessVectors]
+) -> list[bool]:
+    """Verify `cases` in one call, padded to `_BATCH`, and return their verdicts.
+
+    Padding repeats the last case, so the shape is constant however many cases a
+    test has to say something about. Every case in one call shares a context and a
+    message length, since those are one per call and one per batch respectively.
+    """
+    if not 1 <= len(cases) <= _BATCH:
+        raise ValueError(f"1 to {_BATCH} cases per call, got {len(cases)}")
+    padded = list(cases) + [cases[-1]] * (_BATCH - len(cases))
+    got = scheme.verify(
+        _rows(*(c.public_key for c in padded)),
+        _rows(*(c.message for c in padded)),
+        _rows(*(c.signature for c in padded)),
+        context=_ctx(cases[0].context),
+    )
+    return [bool(v) for v in np.asarray(got)][: len(cases)]
 
 
 class ParameterTest(absltest.TestCase):
@@ -45,7 +81,7 @@ class ParameterTest(absltest.TestCase):
         self.assertEqual(params.signature_size, 5776)  # `SPHX_SIGNATURE_SIZE`
         self.assertEqual(params.security_category, 1)
 
-    def test_the_sizes_the_seam_would_publish(self) -> None:
+    def test_the_sizes_a_consumer_allocates_from(self) -> None:
         self.assertEqual(stateless.PUBLIC_KEY_SIZE, 48)
         self.assertEqual(stateless.SIGNATURE_SIZE, 5777)
 
@@ -58,17 +94,17 @@ class ReferenceTest(absltest.TestCase):
                     case.public_key, case.pk_seed + case.sl_root + case.sf_root
                 )
 
+    def test_the_randomizer_follows_a_one_byte_indicator(self) -> None:
+        """Pins the stateless signature's layout ahead of the SLH-DSA it wraps."""
+        for case in vectors.REFERENCE:
+            with self.subTest(case.label):
+                self.assertEqual(case.randomizer, case.signature[1:17])
+
     def test_every_reference_signature_verifies(self) -> None:
         scheme = stateless.Stateless()
         for case in vectors.REFERENCE:
             with self.subTest(case.label):
-                got = scheme.verify(
-                    _batch(case.public_key),
-                    _batch(case.message),
-                    _batch(case.signature),
-                    context=_ctx(case.context),
-                )
-                self.assertEqual(list(np.asarray(got)), [True])
+                self.assertEqual(_verdicts(scheme, [case]), [True])
 
     def test_the_wrapper_is_the_two_bindings_and_nothing_else(self) -> None:
         """Driving SLH-DSA directly, with the bindings applied by hand, agrees.
@@ -82,32 +118,12 @@ class ReferenceTest(absltest.TestCase):
         for case in vectors.REFERENCE:
             with self.subTest(case.label):
                 got = scheme.slh_dsa.verify(
-                    _batch(case.pk_seed + case.sl_root),
-                    _batch(case.sf_root + case.message),
-                    _batch(case.signature[1:]),
+                    _rows(*([case.pk_seed + case.sl_root] * _BATCH)),
+                    _rows(*([case.sf_root + case.message] * _BATCH)),
+                    _rows(*([case.signature[1:]] * _BATCH)),
                     context=_ctx(case.context),
                 )
-                self.assertEqual(list(np.asarray(got)), [True])
-
-
-class BatchTest(absltest.TestCase):
-    def test_a_batch_verdict_is_per_entry(self) -> None:
-        """A good and a tampered signature under one call, and neither moves.
-
-        The seam exists so a batch is one traced computation; what that must not
-        cost is an entry's verdict bleeding into its neighbour's.
-        """
-        case = vectors.REFERENCE[0]
-        broken = bytearray(case.signature)
-        broken[100] ^= 0x01
-        scheme = stateless.Stateless()
-        got = scheme.verify(
-            _batch(case.public_key, case.public_key, case.public_key),
-            _batch(case.message, case.message, case.message),
-            _batch(case.signature, bytes(broken), case.signature),
-            context=_ctx(case.context),
-        )
-        self.assertEqual(list(np.asarray(got)), [True, False, True])
+                self.assertEqual(list(np.asarray(got)), [True] * _BATCH)
 
 
 class RejectionTest(absltest.TestCase):
@@ -118,78 +134,84 @@ class RejectionTest(absltest.TestCase):
         self.scheme = stateless.Stateless()
         self.case = vectors.REFERENCE[1]  # the one with a non-empty context
 
-    def _verdict(
-        self,
-        *,
-        public_key: bytes | None = None,
-        message: bytes | None = None,
-        signature: bytes | None = None,
-        context: bytes | None = None,
-    ) -> bool:
-        case = self.case
-        ctx = case.context if context is None else context
-        got = self.scheme.verify(
-            _batch(public_key if public_key is not None else case.public_key),
-            _batch(message if message is not None else case.message),
-            _batch(signature if signature is not None else case.signature),
-            context=_ctx(ctx),
-        )
-        return bool(np.asarray(got)[0])
-
     def test_the_control_case_accepts(self) -> None:
         # Without this the rejections below prove nothing: a helper that rejected
         # everything would pass all of them.
-        self.assertTrue(self._verdict())
+        self.assertEqual(_verdicts(self.scheme, [self.case]), [True])
+
+    def test_a_batch_verdict_is_per_entry(self) -> None:
+        """A good and a tampered signature in one call, and neither moves.
+
+        The seam exists so a batch is one traced computation; what that must not
+        cost is an entry's verdict bleeding into its neighbour's.
+        """
+        broken = bytearray(self.case.signature)
+        broken[100] ^= 0x01
+        bad = replace(self.case, signature=bytes(broken))
+        self.assertEqual(
+            _verdicts(self.scheme, [self.case, bad, self.case, bad]),
+            [True, False, True, False],
+        )
 
     def test_a_stateful_indicator_is_rejected(self) -> None:
-        for indicator in (0, 1, 128, 254):
-            with self.subTest(indicator=indicator):
-                tampered = bytes([indicator]) + self.case.signature[1:]
-                self.assertFalse(self._verdict(signature=tampered))
+        cases = [
+            replace(self.case, signature=bytes([i]) + self.case.signature[1:])
+            for i in (0, 1, 128, 254)
+        ]
+        self.assertEqual(_verdicts(self.scheme, cases), [False] * len(cases))
 
     def test_a_flipped_bit_in_the_signature_is_rejected(self) -> None:
+        cases = []
         for offset in (1, 17, 2000, len(self.case.signature) - 1):
-            with self.subTest(offset=offset):
-                broken = bytearray(self.case.signature)
-                broken[offset] ^= 0x80
-                self.assertFalse(self._verdict(signature=bytes(broken)))
+            broken = bytearray(self.case.signature)
+            broken[offset] ^= 0x80
+            cases.append(replace(self.case, signature=bytes(broken)))
+        self.assertEqual(_verdicts(self.scheme, cases), [False] * len(cases))
 
-    def test_a_wrong_sf_root_is_rejected(self) -> None:
-        """The binding the wrapper exists for.
+    def test_a_wrong_public_key_third_is_rejected(self) -> None:
+        """`sf_root` is the binding the wrapper exists for.
 
-        `sf_root` reaches no hash unless the wrapper prepends it, so an
-        implementation that dropped it would verify its own signatures forever and
-        accept one issued under a different stateful half of the same key.
+        It reaches no hash unless the wrapper prepends it, so an implementation
+        that dropped it would verify its own signatures forever and accept one
+        issued under a different stateful half of the same key. The other two
+        thirds are SLH-DSA's own and ride along here.
         """
-        broken = bytearray(self.case.public_key)
-        broken[32] ^= 0x01  # first byte of `sf_root`
-        self.assertFalse(self._verdict(public_key=bytes(broken)))
-
-    def test_a_wrong_sl_root_or_pk_seed_is_rejected(self) -> None:
-        for offset, name in ((0, "pk_seed"), (16, "sl_root")):
-            with self.subTest(name):
-                broken = bytearray(self.case.public_key)
-                broken[offset] ^= 0x01
-                self.assertFalse(self._verdict(public_key=bytes(broken)))
-
-    def test_a_wrong_context_is_rejected(self) -> None:
-        self.assertFalse(self._verdict(context=b""))
-        self.assertFalse(self._verdict(context=b"sig-frY"))
-        self.assertFalse(self._verdict(context=b"sig-frx "))
+        cases = []
+        for offset in (0, 16, 32):  # pk_seed, sl_root, sf_root
+            broken = bytearray(self.case.public_key)
+            broken[offset] ^= 0x01
+            cases.append(replace(self.case, public_key=bytes(broken)))
+        self.assertEqual(_verdicts(self.scheme, cases), [False] * len(cases))
 
     def test_a_wrong_message_is_rejected(self) -> None:
         broken = bytearray(self.case.message)
         broken[0] ^= 0x01
-        self.assertFalse(self._verdict(message=bytes(broken)))
+        self.assertEqual(
+            _verdicts(self.scheme, [replace(self.case, message=bytes(broken))]), [False]
+        )
+
+    def test_a_wrong_context_is_rejected(self) -> None:
+        # One call each: the context is one value for the whole batch, so it is
+        # the one thing a batch cannot vary.
+        for context in (b"", b"sig-frY", b"sig-frx "):
+            with self.subTest(context=context):
+                self.assertEqual(
+                    _verdicts(self.scheme, [replace(self.case, context=context)]),
+                    [False],
+                )
 
     def test_a_signature_of_the_wrong_length_is_a_verdict(self) -> None:
+        # These cost nothing: a wrong length is answered before any hashing.
         for signature in (
             self.case.signature[:-1],
             self.case.signature + b"\x00",
             b"",
         ):
             with self.subTest(length=len(signature)):
-                self.assertFalse(self._verdict(signature=signature))
+                self.assertEqual(
+                    _verdicts(self.scheme, [replace(self.case, signature=signature)]),
+                    [False],
+                )
 
 
 class ShapeTest(absltest.TestCase):
@@ -205,23 +227,23 @@ class ShapeTest(absltest.TestCase):
         with self.assertRaisesRegex(ValueError, r"public key batch is \[B, 48\]"):
             self.scheme.verify(
                 np.frombuffer(case.public_key, dtype=np.uint8),
-                _batch(case.message),
-                _batch(case.signature),
+                _rows(case.message),
+                _rows(case.signature),
             )
 
     def test_a_batch_that_does_not_line_up_raises(self) -> None:
         case = self.case
         with self.assertRaisesRegex(ValueError, "one signature per public key"):
             self.scheme.verify(
-                _batch(case.public_key, case.public_key),
-                _batch(case.message, case.message),
-                _batch(case.signature),
+                _rows(case.public_key, case.public_key),
+                _rows(case.message, case.message),
+                _rows(case.signature),
             )
         with self.assertRaisesRegex(ValueError, "one message per public key"):
             self.scheme.verify(
-                _batch(case.public_key, case.public_key),
-                _batch(case.message),
-                _batch(case.signature, case.signature),
+                _rows(case.public_key, case.public_key),
+                _rows(case.message),
+                _rows(case.signature, case.signature),
             )
 
 
