@@ -1,0 +1,27 @@
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+load("//:defs.bzl", "GPU_PLUGIN_DEPS")
+
+# SHRINCS publishes no vectors, so these are transcribed from the reference
+# implementation its specification names as normative, pinned to a commit. The
+# provenance is the module docstring; there is no file to fetch.
+py_library(
+    name = "vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "vectors.py",
+    ],
+)
+
+py_test(
+    name = "stateless_test",
+    size = "medium",
+    srcs = ["stateless_test.py"],
+    deps = [
+        ":vectors",
+        "//sig_frx/hash/shrincs:stateless",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
