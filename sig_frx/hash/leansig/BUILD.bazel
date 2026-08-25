@@ -1,0 +1,35 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@sig_frx_pip//:requirements.bzl", "requirement")
+
+# LeanSig — the generalized XMSS Ethereum's lean consensus signs with. It hashes
+# with Poseidon over KoalaBear rather than a byte hash, so what it shares with the
+# FIPS 205 and RFC 8391 lines is the tree walk and the chain, not the family.
+
+# One scheme's parameter set, so it sits with the scheme rather than in hash-frx;
+# the siting rule and the provenance live in the module. Values only — no frx, no
+# hash — so a reader diffing them against the spec pulls in nothing.
+py_library(
+    name = "poseidon_constants",
+    srcs = [
+        "__init__.py",
+        "poseidon_constants.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# The two permutations those constants parameterize.
+py_library(
+    name = "poseidon",
+    srcs = [
+        "__init__.py",
+        "poseidon.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":poseidon_constants",
+        "@hash_frx//hash_frx",
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)
