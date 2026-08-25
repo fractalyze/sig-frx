@@ -56,12 +56,13 @@ ADRS_SIZE = _LAYER_BYTES + _TREE_BYTES + _TYPE_BYTES + 3 * _WORD_BYTES
 _COMPRESSED_LAYER_BYTES = 1
 _COMPRESSED_TREE_BYTES = 8
 _COMPRESSED_TYPE_BYTES = 1
-COMPRESSED_ADRS_SIZE = (
-    _COMPRESSED_LAYER_BYTES
-    + _COMPRESSED_TREE_BYTES
-    + _COMPRESSED_TYPE_BYTES
-    + 3 * _WORD_BYTES
+# Everything before the three trailing words: the layer address, the tree address
+# and the type. A caller that tweaks with a prefix of the address rather than the
+# whole of it slices this rather than restating the arithmetic.
+COMPRESSED_HEADER_SIZE = (
+    _COMPRESSED_LAYER_BYTES + _COMPRESSED_TREE_BYTES + _COMPRESSED_TYPE_BYTES
 )
+COMPRESSED_ADRS_SIZE = COMPRESSED_HEADER_SIZE + 3 * _WORD_BYTES
 
 
 Field = adrs_encoding.Field

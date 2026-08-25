@@ -30,7 +30,7 @@ def _ctx(context: bytes) -> np.ndarray | None:
 
 def _padded(signature: bytes) -> bytes:
     """A signature at the seam's width — the stateless length, zero-padded to."""
-    return signature + bytes(shrincs.SIGNATURE_MAX_SIZE - len(signature))
+    return signature + bytes(shrincs.stateless.SIGNATURE_SIZE - len(signature))
 
 
 # The one batch width this file verifies at. Four, because the mixed-path case
@@ -72,15 +72,16 @@ def _row(
 
 class SizeTest(absltest.TestCase):
     def test_the_seam_sizes_are_the_specifications(self) -> None:
-        self.assertEqual(shrincs.PUBLIC_KEY_SIZE, 48)
-        self.assertEqual(shrincs.SECRET_KEY_SIZE, 82)
-        self.assertEqual(shrincs.SIGNATURE_MAX_SIZE, 5777)
+        scheme = shrincs.Shrincs()
+        self.assertEqual(scheme.public_key_size, 48)
+        self.assertEqual(scheme.secret_key_size, 82)
+        self.assertEqual(scheme.signature_max_size, 5777)
 
     def test_a_stateful_signature_stays_below_a_stateless_one(self) -> None:
         """Which is what makes the two distinguishable by length at all."""
         widest = 17 + 8 + fxmss.SIGNATURE_SIZE_MAX
         self.assertEqual(widest, 4619)
-        self.assertLess(widest, shrincs.SIGNATURE_MAX_SIZE)
+        self.assertLess(widest, shrincs.stateless.SIGNATURE_SIZE)
 
     def test_every_reference_length_is_the_indicator_s(self) -> None:
         """The seam derives a length from the indicator; the vectors agree."""
@@ -113,10 +114,14 @@ class StatefulTest(absltest.TestCase):
         The gather that finds each FXMSS signature starts at a different offset
         per entry, which is the one place this path's shape depends on its data.
         """
-        cases = [c for c in vectors.REFERENCE if not c.context]
+        # One context and one message length, which is what a batch shares; the
+        # depths are what it must not.
+        cases = [
+            c
+            for c in vectors.REFERENCE
+            if not c.context and len(c.message) == len(vectors.REFERENCE[0].message)
+        ]
         self.assertGreater(len(cases), 1)
-        lengths = {len(c.message) for c in cases}
-        self.assertEqual(len(lengths), 1, "a batch shares one message length")
         self.assertEqual(
             _verdicts(self.scheme, [_row(c) for c in cases], b""),
             [True] * len(cases),
@@ -124,6 +129,7 @@ class StatefulTest(absltest.TestCase):
         self.assertEqual(
             sorted(fxmss.index_field_bytes(c.leaf_depth) for c in cases), [1, 1, 8]
         )
+        self.assertEqual(sorted(c.leaf_depth for c in cases), [1, 4, 64])
 
 
 class BothPathsTest(absltest.TestCase):
@@ -216,8 +222,10 @@ class RejectionTest(absltest.TestCase):
         depth is not a whole number of bytes, which is why the cases are chosen
         that way rather than taken from `self.case`.
         """
-        cases = [c for c in vectors.REFERENCE if c.leaf_depth % 8]
-        self.assertTrue(cases, "a depth that is not a byte multiple")
+        # Also `< 64`: at or past that the field is exactly 64 bits, so every
+        # value it can hold names a real position and there is nothing to reject.
+        cases = [c for c in vectors.REFERENCE if c.leaf_depth % 8 and c.leaf_depth < 64]
+        self.assertTrue(cases, "a depth that is neither a byte multiple nor 64+")
         for case in cases:
             size = fxmss.index_field_bytes(case.leaf_depth)
             for index in (1 << case.leaf_depth, (1 << (8 * size)) - 1):
@@ -257,14 +265,67 @@ class RejectionTest(absltest.TestCase):
                 self.assertEqual(list(np.asarray(got)), [False])
 
 
-class StatelessAtTheSeamTest(absltest.TestCase):
-    """The stateless vectors verify through the assembled scheme too."""
+class MessageDigestTest(absltest.TestCase):
+    """`H_msg_sf` against the digest the reference computed.
 
-    def test_every_stateless_reference_signature_verifies(self) -> None:
-        scheme = shrincs.Shrincs()
-        for case in stateless_vectors.REFERENCE:
+    The one construction SHRINCS does not share with FIPS 205, and the only place
+    the pinned `message_digest` is checked rather than fed in. Without it the
+    digest is gated solely through a final verdict, which reports that something
+    is wrong and not that it was this.
+    """
+
+    @staticmethod
+    def _digest(case: vectors.StatefulVectors, height: int, index: int) -> bytes:
+        got = shrincs.message_digest(
+            _rows(case.randomizer),
+            _rows(case.pk_seed),
+            _rows(case.sl_root),
+            _rows(case.sf_root),
+            # The address's first nine bytes: the leaf's height and its index.
+            _rows(bytes([height]) + index.to_bytes(8, "big")),
+            _rows(case.message),
+            context=_ctx(case.context),
+        )
+        return bytes(np.asarray(got)[0])
+
+    def test_every_reference_digest_is_reproduced(self) -> None:
+        for case in vectors.REFERENCE:
             with self.subTest(case.label):
-                self.assertEqual(_verdicts(scheme, [_row(case)], case.context), [True])
+                self.assertEqual(
+                    self._digest(case, case.leaf_height, case.leaf_index),
+                    case.message_digest,
+                )
+
+    def test_the_leaf_position_separates_two_digests(self) -> None:
+        """The position goes into both hashes, so one leaf's digest is not another's."""
+        case = vectors.REFERENCE[1]
+        digests = {
+            self._digest(case, height, index)
+            for height, index in (
+                (case.leaf_height, case.leaf_index),
+                (case.leaf_height + 1, case.leaf_index),
+                (case.leaf_height, case.leaf_index + 1),
+            )
+        }
+        self.assertLen(digests, 3)
+        self.assertIn(case.message_digest, digests)
+
+
+class StatelessAtTheSeamTest(absltest.TestCase):
+    """A stateless signature routes through the assembled scheme.
+
+    One case rather than the whole stateless set: those are gated in
+    `stateless_test`, and every entry of a seam call pays a stateful verification
+    beside its stateless one. What is left to show is the routing, and
+    `BothPathsTest` shows it under one key — this adds a second, so the select is
+    not reading something that happened to be constant.
+    """
+
+    def test_a_stateless_reference_signature_verifies(self) -> None:
+        case = stateless_vectors.REFERENCE[1]
+        self.assertEqual(
+            _verdicts(shrincs.Shrincs(), [_row(case)], case.context), [True]
+        )
 
 
 class SignerTest(absltest.TestCase):

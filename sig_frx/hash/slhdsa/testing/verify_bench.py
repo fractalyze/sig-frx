@@ -261,7 +261,7 @@ def _stages(name: str, batch: int) -> None:
     measured.reset()
     start = time.perf_counter()
     fors_keys = fors.pk_from_sig(
-        scheme._tweak,
+        scheme.tweak,
         params.fors_params,
         fors_signatures,
         md,
@@ -275,7 +275,7 @@ def _stages(name: str, batch: int) -> None:
     start = time.perf_counter()
     _blocked(
         hypertree.verify(
-            scheme._tweak,
+            scheme.tweak,
             params.hypertree_params,
             hypertree_signatures,
             fors_keys,

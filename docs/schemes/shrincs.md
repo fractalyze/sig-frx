@@ -77,12 +77,18 @@ the verdict its indicator asks for. Partitioning on the host instead would make
 the program's shape depend on the batch's composition — a recompile per mix, and
 no longer one traced computation over the batch.
 
-The two paths are not the same price. A stateless verification is roughly three
-thousand SHA-256 compressions; a stateful one is under a thousand, most of it the
-255-step Merkle walk that `FXMSS_HEIGHT` forces on every signature whatever depth
-it actually used. So a batch of stateful signatures — what a deployment mostly
-holds, the fallback being a recovery path — costs about four times verifying it
-alone would.
+The two paths are not the same price, and which is dearer depends on what is
+counted. In SHA-256 compressions the stateless path dominates: roughly three
+thousand against a stateful signature's under a thousand. In wall clock it
+inverts — measured warm at `B = 4`, the stateless leg is about a quarter of a
+verification and the stateful one the rest — because the stateful path is bound
+by the 255 sequential steps `FXMSS_HEIGHT` forces on every signature whatever
+depth it used, rather than by the hashing in them. So running both costs a batch
+of stateful signatures about a third again over verifying it alone, not the four
+times the hash count suggests.
+
+That the walk is dispatch-bound is also where the headroom is: most of its time
+goes to building 255 address batches rather than to hashing them.
 
 **One place the shape depends on the data.** The leaf-index field is one to eight
 bytes wide, chosen by the indicator, so the FXMSS signature begins at a

@@ -49,8 +49,9 @@ HEIGHT = 255
 
 _N = 16
 # The index field is as many whole bytes as the depth needs, capped at eight:
-# nothing beyond 64 bits is addressable, which is what the tree slot holds.
-_MAX_INDEX_BYTES = 8
+# nothing beyond 64 bits is addressable, which is what the tree slot holds. This
+# module owns the number because it owns the format the signature is in.
+INDEX_BYTES = 8
 
 # `FXMSS_SIGNATURE_SIZE_MIN` and `_MAX`: a WOTS+C signature and one node per step.
 SIGNATURE_SIZE_MIN = wots_c.SIGNATURE_SIZE + _N
@@ -64,7 +65,7 @@ def index_field_bytes(leaf_depth: int) -> int:
     the indicator byte concretely: the field's width decides where the FXMSS
     signature starts, so it cannot itself be read out of the signature.
     """
-    return -(-min(leaf_depth, 8 * _MAX_INDEX_BYTES) // 8)
+    return -(-min(leaf_depth, 8 * INDEX_BYTES) // 8)
 
 
 def root_from_sig(
@@ -91,9 +92,9 @@ def root_from_sig(
         )
     batch = parts.shape[0]
     indices = fnp.asarray(leaf_indices, dtype=fnp.uint8)
-    if indices.ndim != 2 or indices.shape[1] != _MAX_INDEX_BYTES:
+    if indices.ndim != 2 or indices.shape[1] != INDEX_BYTES:
         raise ValueError(
-            f"a leaf index batch is [B, {_MAX_INDEX_BYTES}] bytes, got shape "
+            f"a leaf index batch is [B, {INDEX_BYTES}] bytes, got shape "
             f"{tuple(indices.shape)}"
         )
     heights = fnp.asarray(leaf_heights, dtype=fnp.uint32)
@@ -111,14 +112,19 @@ def root_from_sig(
     # the depth's complement and the walk needs no second argument for it.
     depths = np.uint32(HEIGHT) - heights
 
+    # `parents` carries the index shifted right by the steps already run, so at
+    # the top of a step it is `index >> step`: its low bit is the side this node
+    # falls on, and one more shift makes it the parent's own index.
     parents = indices
     for step in range(HEIGHT):
         siblings = path[:, step, :]
-        # Bit `step` of the index, read from the byte that holds it: big-endian,
-        # so bit 0 lives in the last byte. Shifting the whole string once per step
-        # would be the same answer for more work.
-        byte = _MAX_INDEX_BYTES - 1 - step // 8
-        on_the_right = ((indices[:, byte] >> (step % 8)) & 1).astype(fnp.uint8)[:, None]
+        # The low bit of the running shift, not bit `step` of the original. Reading
+        # the original means indexing the byte that holds bit `step`, which runs off
+        # the front of an eight-byte index once `step` reaches 64 — and a tree at
+        # the format's full height has 191 steps past that, every one of which must
+        # fall left because an index has no bits up there. The shift feeds in zeros
+        # and gives that for free.
+        on_the_right = (parents[:, -1] & np.uint8(1))[:, None]
         left = fnp.where(on_the_right, siblings, nodes)
         right = fnp.where(on_the_right, nodes, siblings)
         parents = bytestring.shift_right(parents, 1)

@@ -20,7 +20,9 @@ signature's length, the width of its leaf-index field and the number of Merkle
 steps it walks all follow from the leaf's height, so the set below covers a
 `leaf_index_size` of one, two and eight bytes; depths of 1, 4, 16 and 64; a leaf
 index of zero, an odd one and an even one, so both sides of the Merkle walk run;
-and the specification's own minimum signature, 548 bytes, at depth 1.
+the specification's own minimum signature, 548 bytes, at depth 1; and a leaf
+**deeper than the index field is wide**, where the side-bit read runs past the
+64 bits an index has and every remaining level must fall left.
 
 The verifier is agnostic to the tree's shape — it reads the leaf's position out
 of the signature and climbs — so `shape` and `depth` are recorded for
@@ -363,6 +365,104 @@ REFERENCE: tuple[StatefulVectors, ...] = (
             "7fae32b92bd5951b9a190fb446ca1e7941293b59a177e92d8104a256b459c0ec"
         ),
         wots_c_public_key=bytes.fromhex("cfca81e3cff8019a2cdb936c7fa7ee3e"),
+    ),
+    StatefulVectors(
+        label="unbalanced_past_the_index_width",
+        shape=0,  # FXMSS_SHAPE_UNBALANCED
+        depth=100,
+        state_counter=99,
+        seed=bytes.fromhex(
+            "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
+            "e0e1e2e3e4e5e6e7e8e9eaebecedeeef"
+        ),
+        message=bytes.fromhex("646565706572207468616e20612036342d62697420696e646578"),
+        context=b"",
+        public_key=bytes.fromhex(
+            "e0e1e2e3e4e5e6e7e8e9eaebecedeeef00c5372c34ed8355e5b187e27c7c954f"
+            "d040fee5b2b1e9cb6c0ef7222e7010c7"
+        ),
+        signature=bytes.fromhex(
+            "9b89452ff40639a22747621895a5cac7670000000000000001002e288ac2511d"
+            "df5cb85648bb465490509fe00e928f119c9c612ddff1df628c20e391695fc759"
+            "27721817594f4754b9a4503dd52723692036fdf44d2f30066410d53096fe499c"
+            "b6fe14b69d3beb4c26c4f11770782dd97827965c3616cd2d72cd5c192312d461"
+            "2d3b37144feda752302710e067e5e7ab332c96cef21351816bba0c813365f671"
+            "e846475cca9407b0d6aefb951a7d2613a5722e266d7b289cb769f9ca16d17083"
+            "efbb6f3d95ab9b743173b70f58456071c28e5fa627319e000b3832a7d6289000"
+            "2fbc2a360ac86aae86c78caa5d510fa6ad62abf30ed554046d101a48bdb51b29"
+            "553156b29e1c7487738394537465f50bcb86dea517412c3eadd21bd1833bd703"
+            "c0d52acbad5b5d164088e4c84afcd950e864b83c7750f01d7be30fb3be84f2a5"
+            "a7851b7d8df9a4f006387f513972bcc1b7843ca78031eaa968b2dc64480de921"
+            "480dd4a5470b43796fad31e189e48c7d75c0e6e9998280eddb403082c3927cfc"
+            "d1839b0bf9c8681f8043a011ad7a4817dde7d3eba5fa91079e3b967b8fd62a3a"
+            "aacdd24e6eda1e451404d44e4dcf76a513e342de4b247c613ff1319797565275"
+            "420c029dcc1f7907e268c1ee764695e258acc3da45407262f3b44816becb466b"
+            "b0e877ea7590988943db3bafdbf19773c83eaae714967dac9cc476b8746c2ead"
+            "907365927047cca59ff90501e7485e0b622081579c8b98f2df82cd03611bcbd3"
+            "cb8d93974bd1732fc9c513af5a2d7e338a87a68a98b1f639753591133bb44add"
+            "4461f632a258e53d930ae806ace9ab01fb77d4488f29413e1f5640537dc876ed"
+            "ec79bab6235c490c9dd46e67c88e81d92f26b330638d8448c9565dbee44d4f35"
+            "92b883f9dc98e6f77d22256ea89dbe8f0035467b14fec2dc298ee846807bf101"
+            "3da19431177ba980a48bd798a43d1d6ba15df5cee09e12e0022445d39ebd9a6b"
+            "794e4f8e33e5618aae005cfe74eff05a0596f2d8d77c7a31ca7ea4c412172ee6"
+            "97d4fe1e267602dde9a6f7d1840d5cca6daf909a130abf721671f1b4f3fe1fca"
+            "381468259507829024d67d2cd47b2e914eeb9f21f6aff48aff6afa6781572bbc"
+            "0043e16244f94bbb1323be4d52d757c3b6d2aabaa2d8657cc31d947bdaa56b7d"
+            "316bbfc26dfbaa0314ba636fa8844286f73a1ed0e3a931dd584c64ac440c5c4a"
+            "891c01e73230118ca5ddcd2ac95b800e08881d5b69a940b37995689be01e76d8"
+            "29955260ee7a8283e09e4e9bf012116409fd5c592b177702934cc729450b7d31"
+            "6e6ed2979cea990ccdd0f3e5166bf1517f51c7133e29bdd21e658a566158d446"
+            "6c14768eeb6c1411330e84ca8af927a894137426c9612d70974338398ee1fce7"
+            "0228a9fd03ae222938386ed74986211e1aae46541b66c7e0c75b8982996c2268"
+            "5036dc685eb59c300ca2005cb7ce4a2953f0e04ac45784f6f92296eea66e2b0b"
+            "8af3add0926bf8b99cbdac3ae5c83e053ff767924a5acffb78e88cda429cd5b1"
+            "777bdda00cd95b81c66a57b83e9d948c2834dbbf5a859af1dc7f6399df9a75ac"
+            "6f3a538217771621f4b5c49a8b018c91a7630ee2785b02c1af78278678cf0aef"
+            "d70161923a401b7a8f9f695659c6fd6e44301c68bd118c90d1ef8f895674bfec"
+            "06c60a9c2bc0a61419066e44d5525d8ed8b3f3653f5531fbc7290d6ac9810b24"
+            "e792a84558cd7e941dba4280a52db02292a9d4359971520cadf7d332c552056c"
+            "46daa4be6e7944e202e66bb629dd706245e13ff84ca9a0463bf1cb1b05b6b518"
+            "0b4ae90288a6ef09f6925023401aefb9ecace4622b5d873822d4a0b820df9384"
+            "89bb223fd68ad840cb1d1fee84a13cc71c6095dae838bd410f6a1f65bad4d43f"
+            "6eb42f4b02eda239f45863a4e495eebf75a189652ea4fadd5d71c9b391fd94bd"
+            "9dfe178f4cc51e9068e3d7b741cac03733273d94e0ee40d655e8143cd130b485"
+            "4e19003356d554060e5d7b61bbb6c2819e002200c88575ec95c6392fb0c02e3f"
+            "2d2062112de8c6e6d1c4d84d54011cf497712a4c14a88fccc33bfe8c42d7c0f5"
+            "f065c539cbf7d3d67a654be4c488bff1165685b377d0ad94ac1d5d5ffbfc8522"
+            "76f2c19277247d3ff5bdbbb8f3393288f0e18405b58becbc0c9aa6cb41b0010a"
+            "1b21625f8677657dbfc8727daebd107559c6c835546c7aa15640f13e0b3cb358"
+            "995c2172bf8d136f3b7419db8abed921c660ef3731c38c220130dafe16992537"
+            "485e806be999a80db6559b985ef6c5c3d54d2f2f07acd83cfed59d25c1685d73"
+            "4e2c6a6b540b93390d1c966d6ebd1c4814061d184ce7d01259cfac40cde4f2a6"
+            "cc7d3eb248797859ed43db4e92c16a068290035d80d113ce7e323ab169e6c646"
+            "d1e37931e0e3ee029a4dcf07ca1a5fc2455f20870056d4e044f4b926038b6597"
+            "89175e37901afa80d0364b70b6b968e48e294ba47c70c2507d207bb6940ae6bf"
+            "9c5b1ff52fda8840e4376e5eda544e0901a038c819e28e1c6e77275d0622a894"
+            "91d088a47ba7273fbf5e77d8f27ca094c2e86713263119f0a3df7960f83c2427"
+            "c1de63f662ebff3b80f43e3ad35c517db81cf027240bad682f6b7c88e3f6a14f"
+            "906dc153c4fb694366e68147015ffef35dd23b7ae730330933c37138cde7f8f1"
+            "4d391c50acdb6b945540d3e85082bde675d42968df04337879831a66f9427e6d"
+            "9a828431f529648cddc09eeb83d09cba46c3689835c24ff03548f1b32e61273d"
+            "2f70aee7c80b01c1832ab92cefca1ec0e18e9b1995d0927206316da66e1d5367"
+            "688dc97d45f1bbf5f25ebd3f3e15fd955c6dfca3874a670a36b46bc3b1fafd42"
+            "4fd8cf39e206b8c7441d1ea71b3bceae4894e81a50493c1e9b6a7820e4467a75"
+            "a025f216897f53bc1557da518515807aa9fcedf15b43c40391224125df6385d1"
+            "45dd226f73c01c7f3ed9dde05f9c39bc316b6e75c493f16a007d50756e0d0a6a"
+            "9d846c5cdf4dff6cac89366ae22037bd65434b2cda9a6db60b7a96"
+        ),
+        pk_seed=bytes.fromhex("e0e1e2e3e4e5e6e7e8e9eaebecedeeef"),
+        sl_root=bytes.fromhex("00c5372c34ed8355e5b187e27c7c954f"),
+        sf_root=bytes.fromhex("d040fee5b2b1e9cb6c0ef7222e7010c7"),
+        leaf_index=1,
+        leaf_height=155,
+        leaf_depth=100,
+        leaf_index_size=8,
+        randomizer=bytes.fromhex("89452ff40639a22747621895a5cac767"),
+        grinding_counter=46,
+        message_digest=bytes.fromhex(
+            "cfa5408c829a9af3dfcf767d227e48855cc50566c6fdb4db0f6e4f2f54cff564"
+        ),
+        wots_c_public_key=bytes.fromhex("b878f244d18bf76a561f3a5c345b010f"),
     ),
 )
 

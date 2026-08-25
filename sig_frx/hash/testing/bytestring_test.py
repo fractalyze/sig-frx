@@ -55,6 +55,29 @@ class MaskToTest(parameterized.TestCase):
             np.asarray(bytestring.mask_to(rows, bits)),
         )
 
+    @parameterized.parameters(*_INDEX_WIDTHS)
+    def test_a_width_per_row_matches_the_static_one(
+        self, width: int, bits: int
+    ) -> None:
+        """The two paths differ in where the width comes from and nothing else.
+
+        SHRINCS reduces a leaf index to the depth its own signature names, so the
+        width is data rather than a parameter. It has to agree byte for byte with
+        the table the static widths use, or a reduction would mean two things.
+        """
+        rows = _rows(width)
+        per_row = np.full(rows.shape[0], bits, dtype=np.uint32)
+        np.testing.assert_array_equal(
+            np.asarray(bytestring.mask_to(rows, per_row)),
+            np.asarray(bytestring.mask_to(rows, bits)),
+        )
+
+    def test_a_width_per_row_reduces_each_row_to_its_own(self) -> None:
+        rows = _rows(8)
+        widths = np.arange(rows.shape[0], dtype=np.uint32) * 9
+        got = _ints(bytestring.mask_to(rows, widths))
+        self.assertEqual(got, [v % (1 << int(b)) for v, b in zip(_ints(rows), widths)])
+
 
 class LowBitsTest(parameterized.TestCase):
     @parameterized.parameters(*_INDEX_WIDTHS)

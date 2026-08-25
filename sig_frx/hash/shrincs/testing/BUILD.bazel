@@ -43,9 +43,17 @@ py_library(
     ],
 )
 
+# `medium`, decided by the GPU leg: 9.4 s to 26.4 s there across runs against
+# 4.4 s on CPU, and the top of that range is 44% of `small`'s 60 s before any
+# further spread. Sized from the worst run. This workstation's GPU
+# measures within a few percent of CI's for the targets whose numbers are
+# recorded — `slh_dsa_traced_test` is 182.2 s here against 177.7 s there — so the
+# 2.1-2.7x executor factor in this repo's other comments is the CPU leg's and
+# does not apply on top. Sized from the slowest leg's worst run, per
+# ../../../../docs/reference/conventions.md.
 py_test(
     name = "wots_c_test",
-    size = "small",
+    size = "medium",
     srcs = ["wots_c_test.py"],
     deps = [
         ":stateful_vectors",
@@ -57,6 +65,10 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# `medium` on the GPU leg's worst run, 53.7 s against 23.1 s on a quiet one
+# (9.7 s on CPU) — 18% of its 300 s. The walk
+# runs to the format's full 255 steps for every entry, so this is a floor rather
+# than a function of the cases.
 py_test(
     name = "fxmss_test",
     size = "medium",
@@ -71,6 +83,10 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# `medium` on the GPU leg's worst run, 110.4 s against 63.1 s on a quiet one
+# (28.3 s on CPU) — 37% of its 300 s at the top, which clears the
+# half-a-budget rule. Every entry of every call runs both signing paths, so
+# the seam's test is the package's dearest by construction.
 py_test(
     name = "shrincs_test",
     size = "medium",

@@ -68,14 +68,23 @@ def is_bytes(value: int | ByteString) -> bool:
     return len(np.shape(value)) == 2 and getattr(value, "dtype", None) == np.uint8
 
 
-def mask_to(values: ByteString, bits: int) -> ByteString:
+def mask_to(values: ByteString, bits: int | ByteString) -> ByteString:
     """Keep the low `bits` of each row, zeroing everything above them.
 
     The reduction FIPS 205 writes as `mod 2^bits`, done where the value lives. A
     digest slice is byte-rounded, so it carries up to seven bits more than the
     index does and those bits are not part of it.
+
+    **`bits` is one width, or one per row.** FIPS 205's widths come from the
+    parameter set, so they are static and the mask is a cached table. SHRINCS's
+    do not: a stateful signature carries the depth of the tree its index has to
+    fit, so the width is the data's and the same formula runs as array
+    arithmetic. The two produce identical bytes at identical widths, which is
+    what `bytestring_test` requires of them.
     """
-    return values & _byte_mask(values.shape[-1], bits)
+    if isinstance(bits, int):
+        return values & _byte_mask(values.shape[-1], bits)
+    return values & _byte_mask_rows(values.shape[-1], bits)
 
 
 def low_bits(values: ByteString, bits: int) -> ByteString:
@@ -130,3 +139,21 @@ def _byte_mask(width: int, bits: int) -> np.ndarray:
     """Which bits of each byte survive keeping the low `bits` of a `width`-byte row."""
     reaches = np.clip(bits - 8 * np.arange(width - 1, -1, -1), 0, 8)
     return ((1 << reaches) - 1).astype(np.uint8)
+
+
+def _byte_mask_rows(width: int, bits: ByteString) -> ByteString:
+    """`_byte_mask` with a width per row — `[rows]` of bits -> `[rows, width]`.
+
+    Not cached and not a table: the widths arrive as a column, so this is the
+    same expression over an axis. `_PLACES` is the only part that is static.
+    """
+    xnp = namespace(bits)
+    places = xnp.asarray(_PLACES(width))
+    reaches = xnp.clip(xnp.asarray(bits, dtype=np.int32)[:, None] - places, 0, 8)
+    return ((np.int32(1) << reaches) - 1).astype(np.uint8)
+
+
+@lru_cache(maxsize=None)
+def _PLACES(width: int) -> np.ndarray:  # noqa: N802
+    """`8·(width−1) … 0` — how far each byte sits above the row's low bit."""
+    return 8 * np.arange(width - 1, -1, -1, dtype=np.int32)

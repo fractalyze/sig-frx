@@ -142,9 +142,11 @@ def pk_from_sig(
     heights = adrs_encoding.repeat_rows(node_heights, CHAIN_COUNT)
     nodes = adrs_encoding.repeat_rows(node_indices, CHAIN_COUNT)
     chains = np.tile(np.arange(CHAIN_COUNT, dtype=np.uint32), batch)
+    # Encoded once at step zero and spliced per step: only the hash index moves,
+    # and it is one value for the whole batch.
+    at_first_step = sf_adrs.encode_batch(sf_adrs.wots_c_hash(heights, nodes, chains, 0))
     step_addresses = [
-        sf_adrs.encode_batch(sf_adrs.wots_c_hash(heights, nodes, chains, step))
-        for step in range(_MAX_INDEX)
+        sf_adrs.with_hash_index(at_first_step, step) for step in range(_MAX_INDEX)
     ]
     ends = wots.chain(
         tweak,

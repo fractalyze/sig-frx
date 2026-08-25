@@ -238,7 +238,12 @@ class SlhDsa:
                 f"set (n={params.n}, m={params.m}); a mismatch silently signs a "
                 f"digest of the wrong length"
             )
-        self._tweak = tweak
+        # Public, because a scheme built *over* SLH-DSA tweaks with the same
+        # family: SHRINCS's stateful path reaches `F`, `H` and `T` of it under
+        # addresses of its own. Handing it back is what keeps "which hash family
+        # goes with which security category" a fact `sha2_params` owns, rather
+        # than one the second consumer assembles again.
+        self.tweak = tweak
         self.params = params
         self.deterministic = deterministic
         self.public_key_size = params.public_key_size
@@ -249,13 +254,13 @@ class SlhDsa:
         if not isinstance(other, SlhDsa):
             return NotImplemented
         return (
-            self._tweak == other._tweak
+            self.tweak == other.tweak
             and self.params == other.params
             and self.deterministic == other.deterministic
         )
 
     def __hash__(self) -> int:
-        return hash((type(self), self._tweak, self.params, self.deterministic))
+        return hash((type(self), self.tweak, self.params, self.deterministic))
 
     # -- key generation ----------------------------------------------------
 
@@ -286,7 +291,7 @@ class SlhDsa:
     def _top_root(self, pk_seed: ArrayLike, sk_seed: ArrayLike) -> Array:
         """Algorithm 18 lines 1 to 3: the root of the top layer's only XMSS tree."""
         return xmss.root(
-            self._tweak,
+            self.tweak,
             self.params.wots_params,
             pk_seed,
             sk_seed,
@@ -352,7 +357,7 @@ class SlhDsa:
         """
         key = self._parse_secret_key(secret_key)
         body = fnp.asarray(message, dtype=fnp.uint8)
-        randomizer = self._tweak.prf_msg(key.prf, self._opt_rand(key, randomness), body)
+        randomizer = self.tweak.prf_msg(key.prf, self._opt_rand(key, randomness), body)
         digests, tree_indices, leaf_indices = self._split_digest(
             randomizer, key.pk_seed, key.pk_root, body
         )
@@ -367,7 +372,7 @@ class SlhDsa:
         leaf_index = int(leaf_indices[0])
         position = fors.ForsPosition(tree=tree_index, key_pair=leaf_index)
         fors_signature = fors.sign(
-            self._tweak,
+            self.tweak,
             self.params.fors_params,
             md[0],
             key.pk_seed,
@@ -377,7 +382,7 @@ class SlhDsa:
         # Line 16: the hypertree signs the FORS *public* key, which the verifier
         # recomputes from the FORS signature rather than being handed.
         fors_key = fors.pk_from_sig(
-            self._tweak,
+            self.tweak,
             self.params.fors_params,
             fnp.asarray(fors_signature)[None, ...],
             md,
@@ -385,7 +390,7 @@ class SlhDsa:
             position,
         )[0]
         hypertree_signature = hypertree.sign(
-            self._tweak,
+            self.tweak,
             self.params.hypertree_params,
             fors_key,
             key.pk_seed,
@@ -511,7 +516,7 @@ class SlhDsa:
         # A candidate FORS public key per entry, then one hypertree walk that
         # accepts an entry only if its candidate climbs to that entry's own root.
         fors_keys = fors.pk_from_sig(
-            self._tweak,
+            self.tweak,
             params.fors_params,
             fors_signatures,
             md,
@@ -519,7 +524,7 @@ class SlhDsa:
             fors.ForsPosition(tree=tree_indices, key_pair=leaf_indices),
         )
         return hypertree.verify(
-            self._tweak,
+            self.tweak,
             params.hypertree_params,
             hypertree_signatures,
             fors_keys,
@@ -593,7 +598,7 @@ class SlhDsa:
         """
         params = self.params
         digest = fnp.asarray(
-            self._tweak.h_msg(randomizers, pk_seeds, pk_roots, messages),
+            self.tweak.h_msg(randomizers, pk_seeds, pk_roots, messages),
             dtype=fnp.uint8,
         )
         tree_end = params.md_bytes + params.tree_index_bytes

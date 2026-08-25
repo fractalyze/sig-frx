@@ -56,7 +56,7 @@ class _RejectsEveryPreHashedSignature(slh_dsa.SlhDsa):
 
     def __init__(self, scheme: slh_dsa.SlhDsa) -> None:
         super().__init__(
-            scheme._tweak, scheme.params, deterministic=scheme.deterministic
+            scheme.tweak, scheme.params, deterministic=scheme.deterministic
         )
 
     def hash_verify(

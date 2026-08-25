@@ -46,11 +46,11 @@ class StatefulAdrsType(enum.IntEnum):
     WOTS_C_GRIND = 22
 
 
-# The `H_grind` tweak is the address's first ten bytes — the node's height and
-# index and the type — and not the twelve-byte payload behind them, which that
-# function leaves to its own message. Slicing rather than encoding a shorter
-# address keeps one layout in one place.
-GRIND_TWEAK_BYTES = 10
+# The `H_grind` tweak is the address's header — the node's height and index and
+# the type — and not the twelve-byte payload behind them, which that function
+# leaves to its own message. Taken from the layout rather than restated, so that
+# a slot moving moves this with it.
+GRIND_TWEAK_BYTES = adrs.COMPRESSED_HEADER_SIZE
 
 
 def wots_c_hash(
@@ -80,6 +80,17 @@ def fxmss_tree(node_height: Field, node_index: Field) -> adrs.Adrs:
 def wots_c_grind(node_height: Field, node_index: Field) -> adrs.Adrs:
     """Mapping a message digest into the constant-sum space, under a counter."""
     return adrs.Adrs(node_height, node_index, StatefulAdrsType.WOTS_C_GRIND, (0, 0, 0))
+
+
+def with_hash_index(encoded: np.ndarray | Array, step: int) -> np.ndarray | Array:
+    """The same chain addresses at another step — the third word replaced.
+
+    A chain walk holds the node's height and index, the chain and the type across
+    all `w − 1` steps and moves only the hash index, so re-encoding each step
+    rebuilds four fields that never move. `wots.py` learned this on the SLH-DSA
+    verify path, where re-encoding was two fifths of an eager verification.
+    """
+    return adrs.with_third_word(encoded, step, compressed=True)
 
 
 def encode_batch(address: adrs.Adrs) -> np.ndarray | Array:
