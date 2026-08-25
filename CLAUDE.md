@@ -25,6 +25,20 @@ this file is the map plus the rules every change must respect.
   job. A change can pass every test and still fail on a type error or a
   reformat, so run `pre-commit run --all-files` before claiming a change is
   clean rather than discovering it in the commit hook.
+- **`bazel test` is one leg, not both.** `.bazelrc` pins
+  `test --test_env=FRX_PLATFORMS=cpu`, so every command above runs the **CPU leg
+  only**. The GPU leg is a second command, and `--local_test_jobs=1` is required
+  rather than tuning — concurrent jobs each reserve a large share of free VRAM
+  and the losers fail during device init, naming the wrong cause:
+
+  ```sh
+  bazel test --test_env=FRX_PLATFORMS=cuda --local_test_jobs=1 //...
+  ```
+
+  The two are different programs where routing is involved: a marker routes
+  `DEDICATED` on one leg and `GENERIC` on the other, so a change to how a
+  primitive is routed, fused or emitted has been validated for half the wire
+  surface until both legs are green.
 - **Merge commits must be titled `Merge branch 'X' into Y`.**
   fractal-commit-lint exempts only that form (and `Merge pull request #N`);
   git's default `Merge remote-tracking branch 'origin/X'` wording fails the
