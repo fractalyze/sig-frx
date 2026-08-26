@@ -42,12 +42,10 @@ py_library(
     ],
 )
 
-# `medium` for the margin rather than the runtime. `small`'s 60 s is not what the
-# CI executor gives this: at 22 s on a workstation it still timed out there and
-# took the suite red, a 3.4x factor. Scanning the sponge's absorb rather than
-# unrolling it has since cut the workstation figure to ~13 s, so the budget is
-# sized against a cost the target no longer pays — which is the safe direction,
-# and `medium` stands either way. Nearly all of it is compiling the traced leg.
+# `medium` for the margin rather than the runtime. This measures 41.0 s on the
+# CPU leg and 31.2 s on the GPU leg, against 13 s on a workstation — `small`'s
+# 60 s is inside that spread, and an earlier revision proved it by timing out
+# there and taking the suite red. Nearly all of it is compiling the traced leg.
 # Sized from the worst run on the slowest leg, per
 # ../../../../docs/reference/measurement.md — re-check against a CI run, not a
 # workstation, before shrinking it.
