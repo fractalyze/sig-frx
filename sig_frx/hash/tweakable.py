@@ -27,6 +27,16 @@ under different public keys needs. Addresses arrive already encoded
 (`adrs.encode_batch`) — they are structural, so they are built on the host before
 any hashing starts.
 
+**`uint8` is this file's answer, not the protocols'.** `ChainHash` and `NodeHash`
+carry a `dtype`, because the components written to them — `wots.chain` and all of
+`tree.py` — are shared with a family whose digests are not bytes at all: leanSig
+hashes with Poseidon over KoalaBear, so a digest is eight *field* elements and a
+Merkle pair is sixteen ([`leansig/tweakable.py`](leansig/tweakable.py)). Those
+components used to spell `fnp.uint8` at each `asarray`, which made a byte string
+the walk's own assumption rather than the family's; reading it off the family is
+the whole of the change, and `n` generalizes with it — an output length in
+elements of `dtype`, which is bytes exactly when `dtype` is `uint8`.
+
 `prf_msg` is the exception, taking one message rather than a batch: it is called
 once per signature, on the signing path, which this repo does not put on the hot
 path (see `docs/reference/security.md`).
@@ -39,7 +49,7 @@ from typing import Protocol, runtime_checkable
 
 import frx.numpy as fnp
 from frx import Array
-from frx.typing import ArrayLike
+from frx.typing import ArrayLike, DTypeLike
 from hash_frx import ByteHash, Hmac, Mgf1
 from hash_frx import block_size as block_size_of
 
@@ -54,10 +64,21 @@ class ChainHash(Protocol):
     the two standards agree on the shape of, so it is the one this asks for.
     """
 
-    n: int  # security parameter and output length, in bytes
+    n: int  # security parameter and output length, in elements of `dtype`
+    # What a digest is made of. `uint8` for every byte family here; leanSig's is
+    # a KoalaBear field dtype. `wots.chain` reads it so the walk stops assuming
+    # bytes — see the module docstring.
+    dtype: DTypeLike
 
-    def f(self, pk_seed: ArrayLike, adrs: ArrayLike, m1: ArrayLike) -> Array:
-        """One-way function on one n-byte block: -> uint8 `[B, n]`."""
+    def f(self, pk_seed: ArrayLike, adrs: ArrayLike, m1: ArrayLike, /) -> Array:
+        """One-way function on one n-element block: -> `dtype` `[B, n]`.
+
+        Positional-only, because the operands are named for the standard the
+        family implements and no caller here spells them: `pk_seed` is leanSig's
+        public parameter and `adrs` is its tweak. A protocol that fixed the names
+        would make a family choose between matching this file and matching its
+        own specification.
+        """
         ...
 
 
@@ -70,9 +91,10 @@ class NodeHash(Protocol):
     """
 
     n: int
+    dtype: DTypeLike
 
-    def h(self, pk_seed: ArrayLike, adrs: ArrayLike, m2: ArrayLike) -> Array:
-        """Hash of two n-byte blocks — a Merkle parent: -> uint8 `[B, n]`."""
+    def h(self, pk_seed: ArrayLike, adrs: ArrayLike, m2: ArrayLike, /) -> Array:
+        """Hash of two n-element blocks — a Merkle parent: -> `dtype` `[B, n]`."""
         ...
 
 
@@ -204,6 +226,7 @@ class Sha2TweakableHash:
         self.n = n
         self.m = m
         self.compressed_address = True
+        self.dtype = fnp.uint8
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Sha2TweakableHash):
@@ -323,6 +346,7 @@ class ShakeTweakableHash:
         self.n = n
         self.m = m
         self.compressed_address = False
+        self.dtype = fnp.uint8
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, ShakeTweakableHash):

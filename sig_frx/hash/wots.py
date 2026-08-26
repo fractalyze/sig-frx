@@ -221,7 +221,7 @@ def chain(
     discarded by the select. That is the point — the alternative branches on
     secret-adjacent data.
     """
-    current = fnp.asarray(values, dtype=fnp.uint8)
+    current = fnp.asarray(values, dtype=tweak.dtype)
     starts = fnp.asarray(start, dtype=fnp.uint32)
     counts = fnp.asarray(steps, dtype=fnp.uint32)
     for step, addresses in enumerate(step_addresses):

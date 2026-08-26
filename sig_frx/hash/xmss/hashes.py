@@ -74,6 +74,9 @@ class Rfc8391Hashes:
         self._byte_hash = byte_hash
         self.n = n
         self.padding_len = padding_len
+        # RFC 8391 hashes bytes, so the components shared with FIPS 205 and with
+        # leanSig build their arrays at this — see `tweakable.ChainHash`.
+        self.dtype = fnp.uint8
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Rfc8391Hashes):
