@@ -19,7 +19,7 @@ import hmac
 
 import numpy as np
 from absl.testing import absltest
-from hash_frx import HostSha256, Sha256
+from hash_frx import Sha256, Sha512_256
 
 from sig_frx.hash import adrs as a
 from sig_frx.hash.tweakable import Sha2TweakableHash, TweakableHash
@@ -209,15 +209,17 @@ class SeamTest(absltest.TestCase):
 
     def test_swapping_the_injected_hash_changes_nothing_but_the_hash(self) -> None:
         # The whole reason the family takes a `ByteHash`: the parameter-set
-        # families are one implementation. Device and host SHA-256 are the pair
-        # available to check it with; a SHAKE family drops into the same seam.
+        # families are one implementation, and the way to show that is a
+        # DIFFERENT hash of the same width changing the answer. SHA-512/256 is
+        # the pair available: 32 bytes out, so it drops into the same `n`, and a
+        # distinct function underneath.
         payload = _u8(bytes(range(_N)))
         batch = a.encode_batch(a.wots_pk(1, 2, 3), compressed=True)
-        device = Sha2TweakableHash(Sha256(), n=_N, m=_M)
-        host = Sha2TweakableHash(HostSha256(), n=_N, m=_M)
-        self.assertEqual(
-            bytes(np.asarray(device.f(_u8(_PK_SEED), batch, payload))[0]),
-            bytes(np.asarray(host.f(_u8(_PK_SEED), batch, payload))[0]),
+        sha256 = Sha2TweakableHash(Sha256(), n=_N, m=_M)
+        sha512_256 = Sha2TweakableHash(Sha512_256(), n=_N, m=_M)
+        self.assertNotEqual(
+            bytes(np.asarray(sha256.f(_u8(_PK_SEED), batch, payload))[0]),
+            bytes(np.asarray(sha512_256.f(_u8(_PK_SEED), batch, payload))[0]),
         )
 
     def test_the_family_names_the_address_encoding_it_tweaks_with(self) -> None:

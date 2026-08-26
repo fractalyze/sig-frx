@@ -17,6 +17,37 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# The prime, and the base-p decomposition of the wide host integers the sponge
+# capacity and the message hash both pack. Shared by them rather than owned by
+# either, the way leanSpec's own `xmss/field.py` is.
+py_library(
+    name = "field",
+    srcs = [
+        "__init__.py",
+        "field.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)
+
+# The two presets leanSig instantiates: values, two derived quantities, and the
+# invariant that ties them together. It reaches `field` for the prime the
+# invariant is stated against, so unlike the Poseidon constants above this one is
+# not free of the frx runtime.
+py_library(
+    name = "params",
+    srcs = [
+        "__init__.py",
+        "params.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [":field"],
+)
+
 # The two permutations those constants parameterize.
 py_library(
     name = "poseidon",
@@ -26,10 +57,29 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":field",
         ":poseidon_constants",
         "@hash_frx//hash_frx",
         requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),
+    ],
+)
+
+# Message to codeword: the hash, the aborting decode and the target-sum filter.
+py_library(
+    name = "encoding",
+    srcs = [
+        "__init__.py",
+        "encoding.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":field",
+        ":params",
+        ":poseidon",
+        "//sig_frx:arrays",
+        requirement("frx"),
+        requirement("numpy"),
     ],
 )

@@ -62,16 +62,17 @@ its *result* is integers, not because its work has to be scalar. `is_identity` i
 the one exception on the wrong side of that line, and its docstring carries
 the reason (fractalyze/xla#594).
 
-There is no `jit` here, and for the point seams none would help: each is a
-single fused op, so compiling one measured identical to running it eagerly
-while adding a compile per batch shape. The square root is the one place that
-claim does not reach — it is ~325 chained multiplications rather than one op,
-so it is launch-bound and a compile does fuse it. It is still not taken, on
-the measurement rather than the principle: on an RTX 5090 at B=1024, jitting
-the ladder cut the placed `lift` call from ~5.5 ms to ~0.85 ms but raised the
-first call at each batch shape from ~0.1 s to ~1.95 s, which needs about 390
-batches at one shape before it is ahead. It becomes worth revisiting behind a
-compile cache that outlives the process, not before.
+There is one `jit` here and it is the square root's, which is the only seam
+that can use one. The point seams are single fused ops, so compiling one
+measured identical to running it eagerly while adding a compile per batch
+shape. The square root is ~325 *chained* multiplications instead, so eager it
+is a chain of that many sequential launches — launch-bound, not
+compute-bound, which is visible in a steady state that does not move with the
+batch: ~2.8-3.5 ms at B = 24, 64, 256 and 1024 alike. Compiled it is one
+kernel at ~0.15-0.19 ms, also flat. See `sqrt` for the trade that buys —
+~1.5-2.6 s of compile the first time a process meets a batch shape, ~40 ms
+once a persistent cache holds it — and for why shrinking the ladder is the
+wrong response to that number.
 
 The GPU story for these curves remains EC kernels over these same dtypes
 (fractalyze/sig-frx#139), not a traced re-derivation of the group law.
@@ -104,6 +105,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import frx
 import frx.numpy as fnp
 import numpy as np
 import zk_dtypes
@@ -394,6 +396,20 @@ def schnorr_verdicts(
     return np.array(verdicts, dtype=bool)
 
 
+def compressed_bytes(curve: Curve, x: int, y: int) -> bytes:
+    """One point as SEC 1 `02|03 ‖ X` — the parity byte and the x coordinate.
+
+    The width comes off the curve's base field, which is the coordinate's own,
+    rather than off a scalar: the two agree on secp256k1 and need not.
+
+    What a caller does about the identity is the caller's, because the schemes
+    disagree: BIP-327 encodes it as an all-zero point and RFC 9591 says it has
+    no encoding at all. This encodes whatever coordinates it is handed.
+    """
+    width = (curve.p.bit_length() + 7) // 8
+    return (2 + (y & 1)).to_bytes(1, "big") + x.to_bytes(width, "big")
+
+
 def uncompressed_rows(curve: Curve, points: ArrayLike, ok: ArrayLike) -> np.ndarray:
     """Each point as SEC 1 `04 ‖ X ‖ Y`, masked rows zeroed: `uint8[B, 65]`.
 
@@ -434,6 +450,16 @@ def affine_ints(curve: Curve, points: ArrayLike) -> list[tuple[int, int]]:
     affine = np.asarray(points).astype(curve.point)
     coords = affine.reshape(-1).view(curve.field).astype(object)
     return [(int(coords[2 * i]), int(coords[2 * i + 1])) for i in range(affine.size)]
+
+
+def sum_points(curve: Curve, points: ArrayLike) -> np.ndarray:
+    """The sum of a `[K]` point batch — `group.sum_points` with this curve's
+    identity as the pad, which on a short Weierstrass curve is a zero-filled
+    Jacobian buffer (see the shared function, which makes the choice the
+    caller's because padding wrongly agrees rather than raises).
+    """
+    points = np.asarray(points)
+    return group.sum_points(points, np.zeros([1], dtype=points.dtype))
 
 
 def is_identity(curve: Curve, points: ArrayLike) -> np.ndarray:
@@ -522,15 +548,65 @@ def on_curve_rows(curve: Curve, xs: Sequence[int], ys: Sequence[int]) -> np.ndar
     return in_range & satisfied
 
 
+@functools.cache
+def _fused_sqrt(curve: Curve) -> Any:
+    """`sqrt`'s ladder compiled into one kernel, built once per curve.
+
+    Cached on the curve so a process traces each exponent once; `frx.jit`
+    caches per argument shape underneath, which is the axis the compile cost
+    actually varies over.
+    """
+    exponent = (curve.p + 1) // 4
+    return frx.jit(lambda value: group.pow_const(curve, value, exponent))
+
+
 def sqrt(curve: Curve, value: ArrayLike) -> Any:
     """A square-root candidate in the base field, for `p ≡ 3 (mod 4)`.
 
     `value^((p+1)/4)` — Tonelli's shortcut; both curves qualify. For a
     non-residue the result is a root of `-value`, so membership is decided
     by squaring, which is what `lift_x_to_parity` does.
+
+    A placed batch runs the ladder compiled, and that is the one seam in this
+    module where `jit` earns its place. The point seams are single fused ops,
+    for which compiling measured identical to running them eagerly. This is
+    ~325 *chained* multiplications, so eager it is a chain of that many
+    sequential kernel launches — launch-bound rather than compute-bound, which
+    shows up as a steady state that does not move with the batch: 3.445, 3.438,
+    3.482 and 3.465 ms at B = 24, 64, 256 and 1024 on secp256k1 — 1.3% across a
+    43-fold range of batch sizes, which is the claim rather than an average
+    standing in for it. Compiled it is one kernel at ~0.15-0.19 ms, also flat,
+    so the win is ~19x wherever the batch is placed. Both curves land there
+    (secp256k1 18.7-19.0x, secp256r1 18.9-19.6x for B >= 24); an earlier
+    reading that made them differ was five reps against this one's twenty-one,
+    and the difference did not survive.
+
+    **The cost is a compile per batch shape, and it is not small.** Measured on
+    an RTX 5090, ~1.5-2.6 s the first time a process sees a shape, against
+    ~40 ms once a persistent compile cache holds it — so break-even moves from
+    a few hundred calls at a shape to single figures. A deployment that
+    verifies more than a handful of batches wants `FRX_COMPILATION_CACHE_DIR`
+    set; one that verifies a single signature and exits pays the compile to
+    save five milliseconds and would rather not. That trade is stated here
+    because it is invisible to every benchmark in this repo: they all warm each
+    shape before timing it, so none of them can see a first-call cost at all.
+
+    Shrinking the ladder does not help the compile, which is the
+    counter-intuitive part and worth recording so it is not retried. Compile
+    time tracks *live values*, not operation count — holding the multiplies at
+    328 and varying only how many stay live measured 0.54 s at 1 and 6.54 s at
+    64 — and the window's `2^w - 1` table is what is live here. So `window=1`
+    emits ~499 multiplies with no table and compiles in ~1.4 s, while
+    `window=4` emits ~328 with a 15-entry table and compiles in ~1.9 s. The
+    fewer-multiplication form is the slower compile. `window=4` stays because
+    it wins the steady state (0.200 ms against 0.312 ms), which is what is paid
+    on every call rather than once. The structural fix is outlining, which is
+    the same finding as fractalyze/prime-ir#405 and belongs there.
     """
     if curve.p % 4 != 3:
         raise ValueError("sqrt shortcut requires p ≡ 3 (mod 4)")
+    if traced(value):
+        return _fused_sqrt(curve)(value)
     return group.pow_const(curve, value, (curve.p + 1) // 4)
 
 

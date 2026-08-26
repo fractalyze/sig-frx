@@ -19,7 +19,7 @@ import hashlib
 
 import numpy as np
 from absl.testing import absltest
-from hash_frx import HostSha256, Sha256
+from hash_frx import Sha256, Sha512_256
 
 from sig_frx.hash.tweakable import ChainHash, NodeHash
 from sig_frx.hash.xmss import adrs as a
@@ -335,15 +335,19 @@ class SeamTest(absltest.TestCase):
         self.assertIsInstance(family, ChainHash)
         self.assertIsInstance(family, NodeHash)
 
-    def test_swapping_the_injected_hash_changes_nothing_but_the_hash(self) -> None:
+    def test_the_injected_hash_is_the_one_that_runs(self) -> None:
+        # The family is parameterized by the hash rather than hard-coding one,
+        # and the way to show that is a DIFFERENT hash of the same width
+        # changing the answer. SHA-512/256 is the pair available: 32 bytes out,
+        # so it drops into the same `n`, and a distinct function underneath.
         _, pub_seed, _ = _fixture(0x01)
         batch = a.encode_batch(a.ots(1, 2, 3, 4, 5))
         payload = v.fixture_bytes(32)
-        device = hashes.Rfc8391Hashes(Sha256(), n=32, padding_len=32)
-        host = hashes.Rfc8391Hashes(HostSha256(), n=32, padding_len=32)
-        self.assertEqual(
-            bytes(np.asarray(device.f(pub_seed, batch, payload))[0]),
-            bytes(np.asarray(host.f(pub_seed, batch, payload))[0]),
+        sha256 = hashes.Rfc8391Hashes(Sha256(), n=32, padding_len=32)
+        sha512_256 = hashes.Rfc8391Hashes(Sha512_256(), n=32, padding_len=32)
+        self.assertNotEqual(
+            bytes(np.asarray(sha256.f(pub_seed, batch, payload))[0]),
+            bytes(np.asarray(sha512_256.f(pub_seed, batch, payload))[0]),
         )
 
     def test_value_equality_survives_reconstruction(self) -> None:

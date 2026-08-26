@@ -84,9 +84,21 @@ py_test(
 # The substrate reads its namespace off its arguments, so the same call is a
 # host or a device computation. Every KAT runs one of them; this runs both and
 # holds them against each other.
+#
+# `large` from the CPU leg's worst run: 98.4 s, 119.9 s and 193.0 s across three
+# post-#226 executions, against `medium`'s 300 s — the worst is 64% of it, and
+# the spread over content that does not touch this test is 1.96x, which is the
+# CPU leg's documented variance rather than anything about the change. The GPU
+# leg runs the same target in 32.3-51.5 s, so CPU is the slowest leg and the one
+# the budget covers, per ../../../docs/reference/measurement.md.
+#
+# It costs what it does because it forces the placement threshold rather than
+# reaching it, so every shape it touches pays a compile — #226's fused ladder is
+# what made that expensive. Those forced shapes are the coverage (see the test's
+# own note on why), so the bucket moves rather than the test shrinking.
 py_test(
     name = "secp_device_test",
-    size = "medium",
+    size = "large",
     srcs = ["secp_device_test.py"],
     deps = [
         ":ecdsa_wycheproof_vectors",
@@ -237,5 +249,23 @@ py_binary(
         "//sig_frx/threshold:secp256k1_sha256",
         requirement("absl_py"),
         requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
+    name = "musig2_test",
+    size = "small",
+    srcs = ["musig2_test.py"],
+    data = [
+        "@bip327_key_agg_vectors//file",
+        "@bip327_key_sort_vectors//file",
+        "@bip327_nonce_agg_vectors//file",
+        "@bip327_nonce_gen_vectors//file",
+    ],
+    deps = [
+        "//sig_frx/classical:secp",
+        "//sig_frx/classical/schnorr:musig2",
+        "@rules_python//python/runfiles",
+        requirement("absl_py"),
     ] + GPU_PLUGIN_DEPS,
 )

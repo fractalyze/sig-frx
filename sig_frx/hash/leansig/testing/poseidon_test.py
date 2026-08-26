@@ -24,37 +24,15 @@ from functools import lru_cache
 
 import frx
 import frx.numpy as fnp
-import numpy as np
 from absl.testing import absltest, parameterized
 from zk_dtypes import koalabear_mont as F
 
 from sig_frx.hash.leansig import poseidon
+from sig_frx.hash.leansig.testing import harness
 from sig_frx.hash.leansig.testing.poseidon_vectors import (
     VECTORS,
     PermutationVector,
 )
-
-
-def _to_field(canonical: tuple[int, ...]) -> fnp.ndarray:
-    """Canonical residues -> field array (the dtype cast Montgomery-encodes)."""
-    return fnp.asarray(np.asarray(canonical, dtype=np.int64).astype(F))
-
-
-def _to_canonical(state: fnp.ndarray) -> list[int]:
-    """Field array -> canonical residues. The object cast Montgomery-decodes
-    without needing frx x64, which is why it is not a bitcast."""
-    return [int(x) for x in np.asarray(state).astype(object)]
-
-
-def _to_leanspec_order(state: fnp.ndarray) -> list[int]:
-    """Permutation output -> canonical residues in leanSpec's lane order.
-
-    The mirror of the reversal `_permute` does on the way in, named for the same
-    reason: both sides of that convention belong in one place, so a later case
-    compares against upstream's order without re-deriving which end to read
-    from.
-    """
-    return _to_canonical(state)[::-1]
 
 
 @lru_cache(maxsize=None)
@@ -81,7 +59,7 @@ def _permute(vector: PermutationVector, *, jit: bool) -> fnp.ndarray:
         if jit
         else poseidon.lane_reversed_permutation(width).permute
     )
-    return permute(_to_field(vector.input_state[::-1]))
+    return permute(harness.lane_reversed(vector.input_state))
 
 
 class PublishedVectorTest(parameterized.TestCase):
@@ -97,7 +75,7 @@ class PublishedVectorTest(parameterized.TestCase):
     def test_it_matches_upstream(self, vector: PermutationVector, jit: bool) -> None:
         got = _permute(vector, jit=jit)
 
-        self.assertEqual(_to_leanspec_order(got), list(vector.output_state))
+        self.assertEqual(harness.to_leanspec_order(got), list(vector.output_state))
         self.assertEqual(got.dtype, F)
         self.assertEqual(got.shape, (vector.width,))
 
@@ -114,9 +92,11 @@ class LaneConventionTest(absltest.TestCase):
 
         # The whole mistake: feed a leanSpec-ordered state and read the result
         # back as if it were leanSpec-ordered too.
-        mistaken = permutation.permute(_to_field(vector.input_state))
+        mistaken = permutation.permute(harness.to_field(vector.input_state))
 
-        self.assertNotEqual(_to_leanspec_order(mistaken), list(vector.output_state))
+        self.assertNotEqual(
+            harness.to_leanspec_order(mistaken), list(vector.output_state)
+        )
 
 
 class WidthTest(absltest.TestCase):
