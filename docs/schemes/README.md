@@ -9,6 +9,7 @@ readable.
 | ------ | ----- |
 | FROST (RFC 9591) | [`frost.md`](frost.md) |
 | ML-DSA (FIPS 204) | [`ml-dsa.md`](ml-dsa.md) |
+| MuSig2 (BIP-327) | [`musig2.md`](musig2.md) |
 | SHRINCS | [`shrincs.md`](shrincs.md) |
 | SLH-DSA (FIPS 205) | [`slh-dsa.md`](slh-dsa.md) |
 | XMSS and XMSS-MT (RFC 8391) | [`xmss.md`](xmss.md) |
