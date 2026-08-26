@@ -19,16 +19,19 @@ the widely-quoted 3112-byte signature is that figure. `PROD` is `v = 46`.
 **Only the columns something here reads.** The preset upstream carries also
 fixes `LOG_LIFETIME`, `HASH_LENGTH_FIELD_ELEMENTS`, `CAPACITY` and `MAX_TRIES`,
 and none of them has a call site in this package yet — the tree, the tweakable
-hash family and the signer's rejection loop are what read them, and each field
-arrives with the slice that does
-([`conventions.md`](../../../docs/reference/conventions.md#a-seam-field-ships-with-the-call-site-that-reads-it)).
-A column carried early is a value nothing can disagree with, which is the shape
-of error that rule exists to catch.
+hash family and the signer's rejection loop are what read them, and each arrives
+with the slice that does. That is
+[`conventions.md`](../../../docs/reference/conventions.md#generalize-a-component-when-its-second-consumer-arrives)
+read from the data side: a column nothing reads is a number nothing can
+disagree with, so a wrong one is found by the slice that finally uses it rather
+than here. It is *not* the argument `xmss/params.py` makes for carrying rows it
+cannot construct — that table is indexed by an OID off the wire, where a missing
+row reads as a set that does not exist, and these two presets are picked at build
+time.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Final
@@ -80,11 +83,23 @@ class LeanSigParams:
         # `0 .. PRIME - 2` is exactly `BASE^Z` groups of `Q` consecutive integers,
         # so every quotient is equally likely and `PRIME - 1` is the one value
         # left over — which is why the abort exists at all.
-        if self.quotient * self.base**self.digits_per_element != PRIME - 1:
+        if self.decode_threshold != PRIME - 1:
             raise ValueError(
                 f"Q * BASE^Z must equal PRIME - 1 = {PRIME - 1}, got "
                 f"{self.quotient} * {self.base}^{self.digits_per_element}"
             )
+
+    @cached_property
+    def decode_threshold(self) -> int:
+        """`Q * BASE^Z` — what the decode rejects at or above.
+
+        The invariant above makes this `PRIME - 1`, so it fires on that single
+        value. It is carried as the product rather than as the prime because that
+        is what makes the decode a range check rather than a coincidence, and it
+        lives here so the check and the invariant that justifies it cannot come
+        to be spelled differently.
+        """
+        return self.quotient * self.base**self.digits_per_element
 
     @cached_property
     def message_hash_length(self) -> int:
@@ -93,8 +108,11 @@ class LeanSigParams:
         `ceil(DIMENSION / Z)`, so the decode has at least `DIMENSION` digits to
         truncate to. At `PROD` that is 6 elements yielding 48 digits for 46
         chains; the last two are dropped.
+
+        The float-free ceiling is the one every parameter set here uses —
+        [`wots.py`](../wots.py), [`xmss/params.py`](../xmss/params.py).
         """
-        return math.ceil(self.dimension / self.digits_per_element)
+        return -(-self.dimension // self.digits_per_element)
 
 
 PROD: Final = LeanSigParams(

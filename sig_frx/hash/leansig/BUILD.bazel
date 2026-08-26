@@ -34,9 +34,10 @@ py_library(
     ],
 )
 
-# The two presets leanSig instantiates. Values plus one derived length and the
-# invariant that ties them together — no frx, no hash, same as the Poseidon
-# constants above.
+# The two presets leanSig instantiates: values, two derived quantities, and the
+# invariant that ties them together. It reaches `field` for the prime the
+# invariant is stated against, so unlike the Poseidon constants above this one is
+# not free of the frx runtime.
 py_library(
     name = "params",
     srcs = [

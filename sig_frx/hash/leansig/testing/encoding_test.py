@@ -18,10 +18,8 @@ to the scheme, for the reason [`poseidon.py`](../poseidon.py) gives.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from functools import lru_cache
 from typing import Any
 
-import frx
 import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest, parameterized
@@ -29,36 +27,20 @@ from zk_dtypes import koalabear_mont as F
 
 from sig_frx.hash.leansig import encoding, params
 from sig_frx.hash.leansig.params import LeanSigParams
+from sig_frx.hash.leansig.testing import harness
 from sig_frx.hash.leansig.testing.encoding_vectors import (
     DECODE_VECTORS,
     EPOCH_VECTORS,
     MESSAGE_HASH_VECTORS,
     MESSAGE_VECTORS,
     DecodeVector,
+    EpochVector,
     MessageHashVector,
+    MessageVector,
 )
 from sig_frx.hash.leansig.testing.mode_vectors import operand_elements
 
 PRESETS: dict[str, LeanSigParams] = {"prod": params.PROD, "test": params.TEST}
-
-
-def _to_field(canonical: Sequence[int]) -> fnp.ndarray:
-    """Canonical residues -> a field array, without the reversal."""
-    return fnp.asarray(np.asarray(canonical, dtype=np.int64).astype(F))
-
-
-def _lane_reversed(canonical: Sequence[int]) -> fnp.ndarray:
-    """leanSpec-ordered residues -> the lane-reversed vector the pipeline takes."""
-    return _to_field(list(canonical)[::-1])
-
-
-def _to_leanspec_order(elements: fnp.ndarray) -> list[int]:
-    """A lane-reversed field vector -> canonical residues in leanSpec's order.
-
-    The object cast is `poseidon_test._to_canonical`'s, for the reason recorded
-    there.
-    """
-    return [int(x) for x in np.asarray(elements).astype(object)][::-1]
 
 
 def _digits(codeword: str) -> list[int]:
@@ -66,30 +48,19 @@ def _digits(codeword: str) -> list[int]:
     return [int(digit) for digit in codeword]
 
 
-@lru_cache(maxsize=None)
-def _jitted(function: Callable[..., Any]) -> Callable[..., Any]:
-    """One jit wrapper per callable, shared across the cases that trace it.
-
-    `params` is static: it is a frozen dataclass the shapes are derived from, and
-    every branch here reads it at trace time. The caching argument is
-    `mode_test._jitted`'s.
-    """
-    return frx.jit(function, static_argnames=("params",))
-
-
-def _both_legs(vectors: Sequence[Any]) -> list[tuple[str, Any, bool]]:
-    """Each vector twice, once eagerly and once traced."""
-    return [
-        (f"{vector.name}_{'traced' if jit else 'host'}", vector, jit)
-        for vector in vectors
-        for jit in (False, True)
-    ]
+def _on(function: Callable[..., Any], jit: bool) -> Callable[..., Any]:
+    """`function` on the requested leg — traced through the shared jit cache."""
+    return harness.jitted(function, "params") if jit else function
 
 
 def _reference_decode(
     elements: Sequence[int], preset: LeanSigParams
 ) -> list[int] | None:
     """leanSpec's `aborting_decode`, transcribed — the loop, one element at a time.
+
+    Upstream is `src/lean_spec/spec/crypto/xmss/encoding.py` at the pin
+    [`encoding_vectors.py`](encoding_vectors.py) records; this is that function's
+    body written the way it writes it.
 
     The implementation expands every element and every digit position at once and
     masks; this is the form the spec writes, and the two have to agree. Cases
@@ -114,12 +85,12 @@ class EncodeMessageTest(parameterized.TestCase):
     @parameterized.named_parameters(
         *((vector.name, vector) for vector in MESSAGE_VECTORS)
     )
-    def test_it_matches_upstream(self, vector: Any) -> None:
+    def test_it_matches_upstream(self, vector: MessageVector) -> None:
         message = vector.message.to_bytes(encoding.MESSAGE_BYTES, "little")
 
         got = encoding.encode_message(message, params=params.PROD)
 
-        self.assertEqual(_to_leanspec_order(got), list(vector.elements))
+        self.assertEqual(harness.to_leanspec_order(got), list(vector.elements))
         self.assertEqual(got.dtype, F)
         self.assertEqual(got.shape, (params.PROD.message_length,))
 
@@ -136,10 +107,10 @@ class EncodeEpochTest(parameterized.TestCase):
     @parameterized.named_parameters(
         *((vector.name, vector) for vector in EPOCH_VECTORS)
     )
-    def test_it_matches_upstream(self, vector: Any) -> None:
+    def test_it_matches_upstream(self, vector: EpochVector) -> None:
         got = encoding.encode_epoch(vector.epoch, params=params.PROD)
 
-        self.assertEqual(_to_leanspec_order(got), list(vector.elements))
+        self.assertEqual(harness.to_leanspec_order(got), list(vector.elements))
         self.assertEqual(got.dtype, F)
         self.assertEqual(got.shape, (params.PROD.tweak_length,))
 
@@ -148,7 +119,7 @@ class EncodeEpochTest(parameterized.TestCase):
         # the tweak is the domain separator alone.
         got = encoding.encode_epoch(0, params=params.PROD)
 
-        self.assertEqual(_to_leanspec_order(got)[0], params.TWEAK_PREFIX_MESSAGE)
+        self.assertEqual(harness.to_leanspec_order(got)[0], params.TWEAK_PREFIX_MESSAGE)
 
     def test_it_rejects_a_slot_outside_its_own_type(self) -> None:
         with self.assertRaisesRegex(ValueError, "Uint64"):
@@ -164,13 +135,12 @@ class EncodeEpochTest(parameterized.TestCase):
 class AbortingDecodeTest(parameterized.TestCase):
     """The hypercube decode matches upstream, digits and verdict alike."""
 
-    @parameterized.named_parameters(*_both_legs(DECODE_VECTORS))
+    @parameterized.named_parameters(*harness.both_legs(DECODE_VECTORS))
     def test_it_matches_upstream(self, vector: DecodeVector, jit: bool) -> None:
         preset = PRESETS[vector.preset]
-        elements = _lane_reversed(vector.elements)
+        elements = harness.lane_reversed(vector.elements)
 
-        decode = _jitted(encoding.aborting_decode) if jit else encoding.aborting_decode
-        digits, accepted = decode(elements, params=preset)
+        digits, accepted = _on(encoding.aborting_decode, jit)(elements, params=preset)
 
         self.assertEqual(bool(accepted), vector.digits is not None)
         if vector.digits is not None:
@@ -179,25 +149,6 @@ class AbortingDecodeTest(parameterized.TestCase):
         self.assertEqual(digits.shape, (preset.dimension,))
         self.assertEqual(accepted.dtype, bool)
         self.assertEqual(accepted.shape, ())
-
-    @parameterized.named_parameters(("host", False), ("traced", True))
-    def test_it_decodes_a_batch_entry_by_entry(self, jit: bool) -> None:
-        # The digests a verifier decodes arrive stacked, and a decode that
-        # reduced across the batch instead of within a vector would pass every
-        # single-entry case above.
-        rows = [v for v in DECODE_VECTORS if v.preset == "prod"]
-        stacked = fnp.stack([_lane_reversed(v.elements) for v in rows])
-
-        decode = _jitted(encoding.aborting_decode) if jit else encoding.aborting_decode
-        digits, accepted = decode(stacked, params=params.PROD)
-
-        self.assertEqual(
-            np.asarray(accepted).tolist(), [v.digits is not None for v in rows]
-        )
-        self.assertEqual(
-            [np.asarray(row).tolist() for row, v in zip(digits, rows) if v.digits],
-            [_digits(v.digits) for v in rows if v.digits],
-        )
 
     @parameterized.named_parameters(
         *(
@@ -211,56 +162,62 @@ class AbortingDecodeTest(parameterized.TestCase):
         elements = operand_elements(preset.message_hash_length, seed)
 
         digits, accepted = encoding.aborting_decode(
-            _lane_reversed(elements), params=preset
+            harness.lane_reversed(elements), params=preset
         )
 
-        expected = _reference_decode(elements, preset)
         self.assertTrue(bool(accepted))
-        self.assertEqual(np.asarray(digits).tolist(), expected)
+        self.assertEqual(
+            np.asarray(digits).tolist(), _reference_decode(elements, preset)
+        )
 
-    def test_the_transcribed_loop_aborts_where_the_implementation_does(self) -> None:
-        preset = params.PROD
-        threshold = preset.quotient * preset.base**preset.digits_per_element
-        elements = (threshold,) + operand_elements(preset.message_hash_length - 1, 3)
+    @parameterized.named_parameters(
+        *((vector.name, vector) for vector in DECODE_VECTORS)
+    )
+    def test_the_transcribed_loop_agrees_on_the_vector_inputs(
+        self, vector: DecodeVector
+    ) -> None:
+        # The seeded cases above never abort and never hit a boundary; these do,
+        # and running the loop over them costs nothing beyond what upstream was
+        # already asked.
+        preset = PRESETS[vector.preset]
 
-        _, accepted = encoding.aborting_decode(_lane_reversed(elements), params=preset)
+        digits, accepted = encoding.aborting_decode(
+            harness.lane_reversed(vector.elements), params=preset
+        )
 
-        self.assertIsNone(_reference_decode(elements, preset))
-        self.assertFalse(bool(accepted))
+        expected = _reference_decode(vector.elements, preset)
+        self.assertEqual(bool(accepted), expected is not None)
+        if expected is not None:
+            self.assertEqual(np.asarray(digits).tolist(), expected)
 
 
 class MessageHashTest(parameterized.TestCase):
     """One compression and its decode, against the reference pipeline."""
 
-    @parameterized.named_parameters(*_both_legs(MESSAGE_HASH_VECTORS))
-    def test_it_matches_upstream(self, vector: MessageHashVector, jit: bool) -> None:
-        preset = PRESETS[vector.preset]
-        operands = _operands(vector, preset)
-
-        hash_ = _jitted(encoding.message_hash) if jit else encoding.message_hash
-        digits, accepted = hash_(*operands, params=preset)
-
-        self.assertEqual(np.asarray(digits).tolist(), _digits(vector.digits))
-        # The flag at this stage is the abort's alone — none of these vectors
-        # reaches it, and the target-sum narrowing is the next test.
-        self.assertTrue(bool(accepted))
-        self.assertEqual(digits.dtype, np.uint32)
-        self.assertEqual(digits.shape, (preset.dimension,))
-
-    @parameterized.named_parameters(*_both_legs(MESSAGE_HASH_VECTORS))
-    def test_the_target_sum_filter_matches_upstream(
+    @parameterized.named_parameters(*harness.both_legs(MESSAGE_HASH_VECTORS))
+    def test_both_entry_points_match_upstream(
         self, vector: MessageHashVector, jit: bool
     ) -> None:
+        # Both in one case rather than two: `target_sum_encode` returns the same
+        # digits and only narrows the flag, so a second case would re-run the
+        # width-24 compression for one boolean.
         preset = PRESETS[vector.preset]
         operands = _operands(vector, preset)
+        expected = _digits(vector.digits)
 
-        encode = (
-            _jitted(encoding.target_sum_encode) if jit else encoding.target_sum_encode
+        digits, accepted = _on(encoding.message_hash, jit)(*operands, params=preset)
+        on_layer_digits, on_layer = _on(encoding.target_sum_encode, jit)(
+            *operands, params=preset
         )
-        digits, accepted = encode(*operands, params=preset)
 
-        self.assertEqual(bool(accepted), vector.on_layer)
-        self.assertEqual(np.asarray(digits).tolist(), _digits(vector.digits))
+        self.assertEqual(np.asarray(digits).tolist(), expected)
+        # `message_hash`'s flag is the abort's alone, and no vector here reaches
+        # it; `target_sum_encode`'s is that one narrowed by the layer.
+        self.assertTrue(bool(accepted))
+        self.assertEqual(bool(on_layer), vector.on_layer)
+        self.assertEqual(np.asarray(on_layer_digits).tolist(), expected)
+        self.assertEqual(digits.dtype, np.uint32)
+        self.assertEqual(digits.shape, (preset.dimension,))
 
     def test_an_accepted_codeword_sums_to_the_target(self) -> None:
         # The filter's whole content, stated once so that a vector transcribed
@@ -306,11 +263,11 @@ def _operands(
     message = vector.message.to_bytes(encoding.MESSAGE_BYTES, "little")
     return (
         encoding.encode_message(message, params=preset),
-        _lane_reversed(
+        harness.lane_reversed(
             operand_elements(preset.parameter_length, vector.parameter_seed)
         ),
         encoding.encode_epoch(vector.epoch, params=preset),
-        _lane_reversed(
+        harness.lane_reversed(
             operand_elements(preset.randomness_length, vector.randomness_seed)
         ),
     )

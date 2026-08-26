@@ -15,6 +15,23 @@ py_library(
     ],
 )
 
+# The lane-order conversions and the host/traced pairing all three suites here
+# need. Shared rather than restated per suite: the reversal is the convention
+# most likely to move, and three copies are three places to find it.
+py_library(
+    name = "harness",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "harness.py",
+    ],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)
+
 py_test(
     name = "field_test",
     size = "small",
@@ -32,6 +49,7 @@ py_test(
     size = "small",
     srcs = ["poseidon_test.py"],
     deps = [
+        ":harness",
         ":poseidon_vectors",
         "//sig_frx/hash/leansig:poseidon",
         requirement("absl_py"),
@@ -66,6 +84,7 @@ py_test(
     size = "medium",
     srcs = ["mode_test.py"],
     deps = [
+        ":harness",
         ":mode_vectors",
         "//sig_frx/hash/leansig:poseidon",
         requirement("absl_py"),
@@ -102,6 +121,7 @@ py_test(
     srcs = ["encoding_test.py"],
     deps = [
         ":encoding_vectors",
+        ":harness",
         ":mode_vectors",
         "//sig_frx/hash/leansig:encoding",
         "//sig_frx/hash/leansig:params",

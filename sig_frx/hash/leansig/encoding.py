@@ -19,6 +19,16 @@ which of them rejects an attempt is the whole shape of the module:
    `TARGET_SUM` — a single layer of the hypercube. The layer sits above the mean
    digit sum on purpose, so most attempts miss and the signer resamples.
 
+This repo already has the second filter once, under another name: SHRINCS drops
+WOTS+'s checksum chains for the same trick, and
+[`shrincs/wots_c.py`](../shrincs/wots_c.py)'s `map_digest` ends in the same
+`(digits, digits.sum() == constant)` pair. The one difference is the one that
+decides the cost. `wots_c.CONSTANT_SUM` is the *mode* of its distribution, so
+grinding lands about one counter in sixty-five; leanSig's `TARGET_SUM = 200` sits
+2.5 standard deviations above a mean digit sum of 161, so an attempt lands about
+one in nine hundred. Same construction, three orders of magnitude apart in what
+signing costs — worth knowing before reading either as the other.
+
 ## What is reshaped, and what a caller gets instead of `None`
 
 Upstream returns `list[int] | None` and the caller reads the `None`. A tracer has
@@ -39,9 +49,11 @@ below `PRIME` and so all fit a lane.
 
 That boundary is a real one for batch verification and it is not resolved here.
 A verifier holds `[B]` roots and `[B]` slots, and the two encoders would meet them
-with a Python loop; `compress` in front of the decode is one-dimensional as well,
-so of this pipeline only `aborting_decode` takes a batch axis today. What the seam
-does about it is the verify slice's question — it is item 6 of
+with a Python loop. Every stage here is therefore one signature's, batch axis
+included — `compress` is one-dimensional too, so a leading axis on the decode
+alone would be a seam nothing could reach, and whether the batch arrives natively
+or through `frx.vmap` is not this slice's to guess. What the seam does about it is
+the verify slice's question — item 6 of
 [#195](https://github.com/fractalyze/sig-frx/issues/195), where the slot being a
 per-entry input already needs an answer — and the constraint to carry into it is
 the one above: the decomposition is bignum division, not a shift schedule.
@@ -56,18 +68,25 @@ data-dependent trip count leaks nothing a verifier does not already hold. The
 loop itself is the signer's and is not in this module, which is upstream's split
 too: `target_sum_encode` reports one attempt and the caller retries.
 
+When that signer lands, `wots_c.grind` is the shape it wants rather than a fresh
+one: a host search that tries a *block* of candidates per pass, so the loop is
+one batched dispatch per block instead of a Python iteration per candidate.
+
 ## Lane order
 
 Field vectors here are lane-reversed, the convention
 [`poseidon.py`](poseidon.py) states and the reason it gives — the encoders place
 their limbs reversed, and `compress` hands back a reversed digest. The codeword
 is where that ends: digit `i` addresses chain `i`, a chain number has no lane,
-and `aborting_decode` un-reverses once at that boundary rather than pushing a
-reversed-codeword convention onto everything downstream.
+and the decode un-reverses once at that boundary rather than pushing a
+reversed-codeword convention onto everything downstream. It does so through
+`poseidon.undo_lane_reversal` rather than an open-coded slice, because that
+module owns the convention and a second one re-deriving it is what spreads it.
 """
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Final
 
 import numpy as np
@@ -76,7 +95,7 @@ from frx.typing import ArrayLike
 
 from sig_frx.arrays import namespace
 from sig_frx.hash.leansig import poseidon
-from sig_frx.hash.leansig.field import int_to_base_p, to_field
+from sig_frx.hash.leansig.field import lane_reversed_limbs
 from sig_frx.hash.leansig.params import TWEAK_PREFIX_MESSAGE, LeanSigParams
 
 MESSAGE_BYTES: Final = 32
@@ -104,8 +123,7 @@ def encode_message(message: bytes, *, params: LeanSigParams) -> Array:
         raise ValueError(
             f"leanSig signs a {MESSAGE_BYTES}-byte root, got {len(message)} bytes"
         )
-    limbs = int_to_base_p(int.from_bytes(message, "little"), params.message_length)
-    return to_field(limbs[::-1])
+    return lane_reversed_limbs(int.from_bytes(message, "little"), params.message_length)
 
 
 def encode_epoch(epoch: int, *, params: LeanSigParams) -> Array:
@@ -123,14 +141,23 @@ def encode_epoch(epoch: int, *, params: LeanSigParams) -> Array:
     if not 0 <= epoch < 2**64:
         raise ValueError(f"a slot is a Uint64, got {epoch}")
     tweak = (epoch << 8) | TWEAK_PREFIX_MESSAGE
-    return to_field(int_to_base_p(tweak, params.tweak_length)[::-1])
+    return lane_reversed_limbs(tweak, params.tweak_length)
 
 
+@lru_cache(maxsize=None)
 def _places(params: LeanSigParams) -> np.ndarray:
     """`base^0 .. base^(digits_per_element - 1)`, the digit extraction's weights.
 
     A static schedule off the parameter set, so it stays a host constant on both
     paths rather than becoming `digits_per_element` traced multiplies.
+
+    Cached the way every other static schedule in the repo is —
+    [`wots.py`](../wots.py)'s `_digit_plan`, [`bytestring.py`](../bytestring.py)'s
+    `_PLACES`, `poseidon.lane_reversed_permutation`. Free under a tracer either
+    way; eagerly a rebuilt host array costs frx a fresh canonicalization on every
+    call, and the signer makes ~900 of them per signature. What
+    `safe_domain_separator` refuses to cache is a concrete *device* array, which
+    carries backend affinity; this is inert numpy.
     """
     return np.asarray(
         [params.base**place for place in range(params.digits_per_element)],
@@ -141,34 +168,42 @@ def _places(params: LeanSigParams) -> np.ndarray:
 def aborting_decode(
     elements: ArrayLike, *, params: LeanSigParams
 ) -> tuple[Array, Array]:
-    """Field elements -> `(digits, accepted)`, the hypercube decode.
+    """A digest -> `(digits, accepted)`, the hypercube decode.
 
-    `elements` is a lane-reversed digest of `message_hash_length` elements, with
-    a leading batch axis allowed; `digits` comes back in codeword order, so
-    `[..., dimension]`, and `accepted` is `[...]`.
+    `elements` is one lane-reversed digest of `message_hash_length` elements;
+    `digits` comes back in codeword order, `[dimension]`, and `accepted` is a
+    scalar. One signature's, like every stage here — see the module docstring on
+    where the batch axis is not.
 
     Each element divides by `quotient` and expands into `digits_per_element`
     base-`base` digits, least significant first; the digits of all the elements
     run together and the first `dimension` of them are the codeword. An element
     equal to `PRIME - 1` has no quotient in range and rejects the whole vector.
+
+    **Not `wots.base_2b`, and not `mldsa.encoding.unpack_fields`,** which are the
+    third and fourth spellings of "read digits out of something" in this repo —
+    [`falcon/encoding.py`](../../lattice/falcon/encoding.py) records the same
+    near-miss against both. Those two read bit-fields out of a *byte string* at a
+    fixed width; this is integer arithmetic on a field residue already in a lane,
+    `base` is not required to be a power of two, and the value has to be divided
+    by `quotient` first. Unifying any two of them round-trips forever while being
+    wrong.
     """
     xnp = namespace(elements)
     values = xnp.asarray(elements).astype(np.uint32)
 
-    # Upstream's own comparison. `quotient * base^digits_per_element` is
-    # `PRIME - 1` by the parameter invariant, so this fires on that one value —
-    # written as the threshold rather than as the value because that is what
-    # makes it a range check rather than a coincidence.
-    threshold = np.uint32(params.quotient * params.base**params.digits_per_element)
-    accepted = ~(values >= threshold).any(axis=-1)
+    # Upstream's own comparison, against the product rather than against
+    # `PRIME - 1`, for the reason `decode_threshold` records.
+    accepted = ~(values >= np.uint32(params.decode_threshold)).any()
 
-    # The digest arrives lane-reversed and the codeword does not, so the element
-    # order flips exactly here. Within an element the digits are arithmetic
-    # rather than layout, and their order does not move.
-    quotients = values[..., ::-1] // np.uint32(params.quotient)
-    digits = (quotients[..., None] // _places(params)) % np.uint32(params.base)
+    # The digest is lane-reversed and the codeword is not, so the convention
+    # exits here — through `poseidon`'s own seam, since this is device movement
+    # rather than placement. Within an element the digit order is arithmetic
+    # rather than layout and does not move.
+    quotients = poseidon.undo_lane_reversal(values) // np.uint32(params.quotient)
+    digits = (quotients[:, None] // _places(params)) % np.uint32(params.base)
 
-    return digits.reshape(*digits.shape[:-2], -1)[..., : params.dimension], accepted
+    return digits.reshape(-1)[: params.dimension], accepted
 
 
 def message_hash(
@@ -187,17 +222,18 @@ def message_hash(
     slot, which is where this splits from upstream's signature and why: the two
     encoders are host-only and this is not.
     """
-    operands = (message_elements, parameter, epoch_elements, randomness)
-    lengths = (
-        ("message", params.message_length),
-        ("parameter", params.parameter_length),
-        ("epoch", params.tweak_length),
-        ("randomness", params.randomness_length),
+    # One tuple in upstream's operand order, so the names, the lengths and what
+    # gets hashed cannot drift apart.
+    named = (
+        ("message", message_elements, params.message_length),
+        ("parameter", parameter, params.parameter_length),
+        ("epoch", epoch_elements, params.tweak_length),
+        ("randomness", randomness, params.randomness_length),
     )
-    # Per operand rather than on the total, which is what `compress` bounds: the
-    # four sum to 23 into a width-24 state, so two wrong lengths that cancel
-    # would pass that check and hash a different pre-image.
-    for operand, (name, length) in zip(operands, lengths):
+    # Checked per operand rather than on the total, which is all `compress`
+    # bounds: the four sum to 23 into a width-24 state, so two wrong lengths that
+    # cancel would pass that check and hash a different pre-image.
+    for name, operand, length in named:
         if operand.shape != (length,):
             raise ValueError(
                 f"the {name} operand is {length} field elements, "
@@ -205,7 +241,7 @@ def message_hash(
             )
 
     digest = poseidon.compress(
-        operands,
+        [operand for _, operand, _ in named],
         width=_MESSAGE_HASH_WIDTH,
         output_length=params.message_hash_length,
     )
@@ -232,5 +268,5 @@ def target_sum_encode(
     # `dtype` pinned: numpy promotes a reduction's accumulator and frx does not,
     # so a bare `.sum()` is `uint64` on the host and `uint32` traced from this
     # one line (`CLAUDE.md`). The widest sum here is `dimension * (base - 1)`.
-    on_layer = digits.sum(axis=-1, dtype=np.uint32) == np.uint32(params.target_sum)
+    on_layer = digits.sum(dtype=np.uint32) == np.uint32(params.target_sum)
     return digits, accepted & on_layer

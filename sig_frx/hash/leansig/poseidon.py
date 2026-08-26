@@ -50,6 +50,12 @@ that re-derived either has turned a boundary into a convention spread across the
 package. (Reversing a *host* list, as `safe_domain_separator` does to its limbs,
 is not that: it is a Python slice on values that have not reached a lane yet.)
 
+The convention also needs an *exit*, because eventually a consumer holds values
+with no lanes at all, and that is `undo_lane_reversal` — the one function here
+that moves data rather than placing it. It is exported for the same reason the
+two placement facts are private: a second module open-coding the reverse is the
+spread this section exists to prevent.
+
 Nothing else about the two widths differs, so both come from one builder: width
 16 is the chain hash, width 24 the message, tree and leaf hashes.
 
@@ -101,7 +107,7 @@ from hash_frx import Poseidon, PoseidonParams
 from zk_dtypes import koalabear_mont as _F
 
 from sig_frx.hash.leansig import poseidon_constants as _c
-from sig_frx.hash.leansig.field import int_to_base_p, to_field
+from sig_frx.hash.leansig.field import lane_reversed_limbs, to_field
 
 _WIDTHS: Final = {
     16: (_c.WIDTH_16_ROUNDS, _c.MDS_FIRST_ROW_16, _c.ROUND_CONSTANTS_16),
@@ -169,6 +175,25 @@ def _reversed_lanes(start: int, length: int, size: int) -> slice:
     """
     stop = size - start
     return slice(stop - length, stop)
+
+
+def undo_lane_reversal(vector: Array) -> Array:
+    """A lane-reversed vector back in leanSpec's order — the convention's exit.
+
+    Every other placement here is layout: an operand goes in reversed and a
+    digest comes out reversed, and nothing moves. This one *is* data movement, a
+    device `reverse`, and it exists because a consumer eventually has values that
+    have no lanes at all — the codeword [`encoding.py`](encoding.py) decodes to,
+    where digit `i` addresses chain `i`. Carrying a reversed codeword downstream
+    instead would spread the convention over the chain and tree layers to save
+    one reverse per verification, against the ~180 permutations one runs.
+
+    It lives here rather than at that call site for the reason the module
+    docstring gives: a second module that open-codes `[::-1]` has turned a
+    boundary into a convention spread across the package, and the third one
+    copies the line rather than the seam.
+    """
+    return vector[::-1]
 
 
 def _join(pieces: Sequence[Array]) -> Array:
@@ -328,9 +353,8 @@ def safe_domain_separator(lengths: Sequence[int], *, capacity_length: int) -> Ar
     for length in lengths:
         packed = (packed << 32) | length
 
-    limbs = int_to_base_p(packed, _DOMAIN_SEPARATOR_WIDTH)
     return compress(
-        [to_field(limbs[::-1])],
+        [lane_reversed_limbs(packed, _DOMAIN_SEPARATOR_WIDTH)],
         width=_DOMAIN_SEPARATOR_WIDTH,
         output_length=capacity_length,
     )

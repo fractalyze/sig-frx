@@ -9,18 +9,37 @@ is wider than an array lane — the root is 256 bits, the tweak 40 — so each s
 a Python integer on the host and only the limbs, all below `PRIME`, ever cross
 onto a device ([`../../../CLAUDE.md`](../../../CLAUDE.md)).
 
-That is the whole module: one decomposition and one conversion. It exists as a
-module rather than as two helpers private to their first caller because the
-decomposition has a second one, which is the question
+That is the whole module. It exists rather than staying private to its first
+caller because the decomposition has a second one, which is the question
 [`conventions.md`](../../../docs/reference/conventions.md#generalize-a-component-when-its-second-consumer-arrives)
 asks — and the answer here is not a judgement call, because upstream already
 made it: leanSpec's own `int_to_base_p` lives in `spec/crypto/xmss/field.py`,
-shared by `poseidon.safe_domain_separator` and `encoding` for exactly these two
+shared by `poseidon.safe_domain_separator` and `encoding` for exactly these
 call sites. One operation used twice, not two that resemble each other.
+
+**What callers get is `lane_reversed_limbs`, not the limbs.** Every one of them
+wants the decomposition placed for a hash, and the placement is a reversal
+([`poseidon.py`](poseidon.py) says why the state runs lane-reversed). Spelling
+`to_field(limbs[::-1])` per call site would leave the reversal optional at each
+of them, and a forgotten one is a silently different hash — it round-trips, it
+self-checks, and only an upstream vector for that particular family catches it.
+Two more call sites are already scheduled: the chain and tree tweaks arrive with
+the family that hashes with them ([`params.py`](params.py)). Reversing a host
+list is not the device-side placement `poseidon.py` reserves to itself — its own
+docstring carves this case out.
 
 The conversion is `astype` and never a bitcast: the dtype's storage is a
 Montgomery representative, so reinterpreting the bytes yields a different number
 and yields it consistently, which is the failure no round trip reveals.
+
+**`to_field` is not `arith.to_field`**, though the repo gives one operation one
+name and these two share it. The lattice pair
+([`mldsa/arith.py`](../../lattice/mldsa/arith.py),
+[`falcon/arith.py`](../../lattice/falcon/arith.py)) reduce their input mod `q`
+and answer in the namespace it arrived in; this one takes residues that are
+canonical already and lifts unconditionally, because everything leanSig hashes
+reaches a device permutation anyway. A reader who transfers what they know from
+those is wrong on both counts.
 """
 
 from __future__ import annotations
@@ -47,14 +66,27 @@ def to_field(canonical: ArrayLike) -> Array:
     """Canonical residues -> a field array. The dtype cast Montgomery-encodes.
 
     Host-side values only: everything that reaches this is a parameter set or the
-    limbs `int_to_base_p` returned, and a traced value has no business being
+    limbs `_int_to_base_p` returned, and a traced value has no business being
     rebuilt from residues.
     """
     return fnp.asarray(np.asarray(canonical, dtype=np.int64).astype(F))
 
 
-def int_to_base_p(value: int, num_limbs: int) -> list[int]:
+def lane_reversed_limbs(value: int, num_limbs: int) -> Array:
+    """`value` base-p, as the lane-reversed field vector a leanSig hash takes.
+
+    The composite every caller wants: decompose, place, convert. Host-only for
+    the reason the module docstring gives — `value` is wider than a lane.
+    """
+    return to_field(_int_to_base_p(value, num_limbs)[::-1])
+
+
+def _int_to_base_p(value: int, num_limbs: int) -> list[int]:
     """`value` as `num_limbs` base-p limbs, least significant first.
+
+    Private because `lane_reversed_limbs` is what callers want; kept as its own
+    function because a digest says only that something is wrong, not which limb,
+    so this is gated directly.
 
     Host-only, and the packing is why: every caller decomposes something wider
     than a lane, so only a Python integer holds the input without truncating.
