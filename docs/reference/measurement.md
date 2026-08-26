@@ -57,6 +57,93 @@ advice restores the flake, so it is the one bazel diagnostic this repo overrides
 on purpose rather than silences — it is right about the local number and the
 local number is not the one that decides.
 
+**The factor is the CPU leg's.** CI does not run the two legs on one machine:
+the CPU leg goes to the Buildbarn pool and the GPU leg executes on the
+self-hosted runner itself, because the pool is CPU-only
+([`ci.yml`](../../.github/workflows/ci.yml)). The factor above is therefore
+measured on the only leg that has an executor, and stacking it on top of a GPU
+measurement over-sizes. A GPU-decided budget can be sized from a local run on a
+comparable device; a CPU-decided one cannot. Which leg decides is the slower
+one, and for a compile-bound target that is usually the GPU.
+
+What a local GPU number is worth is an order of magnitude, not a tenth. The same
+four targets against the CI figures this page records, measured on one
+workstation in two sessions and kept in separate columns because a ratio and its
+denominator have to come from one of them:
+
+| target | CI, as recorded | one session | another |
+|---|---|---|---|
+| `slh_dsa_traced_test` | 177.7 s | 182.2 s (1.03x) | 138.2 s (0.78x) |
+| `falcon_kat_test` | 172.1 s | 193.6 s (1.12x) | 146.8 s (0.85x) |
+| `falcon_test` | 272.9 s | 309.1 s (1.13x) | 283.7 s (1.04x) |
+| `slh_dsa_kat_test` | ~285 s | 349.2 s (1.23x) | 395.6 s (1.39x) |
+
+**0.8x to 1.4x, and it runs both ways.** `slh_dsa_kat_test` at 1.39x is a local
+run *under*-sizing, which is the opposite of the error stacking an executor
+factor would make — so the rule is not "divide by something smaller", it is that
+a local GPU number sizes a budget and does not settle a bucket boundary. One
+landing near half takes the next bucket.
+
+Two things plausibly behind that spread, neither verified and both worth knowing
+rather than resolving first: a target's duration under a full concurrent sweep
+is a function of what else is on the device at that moment, so neither column is
+a clean per-target measurement and neither is CI's; and a workstation's core
+count sets a different concurrency than the runner's.
+
+### Running the GPU leg locally
+
+Two environment variables, and without them the leg fails wholesale in a way
+that reads as broken code rather than as a missing flag:
+
+```sh
+bazel --bazelrc=.bazelrc.ci test \
+  --test_env=XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  --test_env=FRX_PLATFORMS=cuda -- //...
+```
+
+Dropping `XLA_PYTHON_CLIENT_PREALLOCATE=false` produced 31 failures out of 50 —
+`cudaErrorMemoryAllocation: out of memory`, and `no supported devices found for
+platform CUDA` — because bazel runs the test actions concurrently against one
+device and each process would otherwise claim most of its memory. It is in
+`ci.yml` for that reason and not as a portability workaround.
+
+**A box carrying no CUDA 12 toolkit still runs the leg.** The plugin resolves
+CUDA by soname, so the `nvidia-*-cu12` wheels in a virtualenv are enough on
+`LD_LIBRARY_PATH`, and the repo's pinned frx wheel is still what runs. `ptxas`
+ships in the `cuda_nvcc` wheel rather than beside the runtime, so it is pointed
+at separately:
+
+```sh
+V=<virtualenv>/lib/python3.11/site-packages/nvidia
+LD=$(find "$V" -maxdepth 2 -type d -name lib | tr '\n' ':')
+bazel --bazelrc=.bazelrc.ci test \
+  --test_env=XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  --test_env=FRX_PLATFORMS=cuda \
+  --test_env=LD_LIBRARY_PATH="$LD" \
+  --test_env=XLA_FLAGS="--xla_gpu_cuda_data_dir=$V/cuda_nvcc" -- //...
+```
+
+A bench is a `bazel run` rather than a test, and takes the same environment
+through `--run_under="env ..."` instead of `--test_env`.
+
+**A green leg is evidence of the device, and that is checkable rather than
+assumed.** `cuda` is strict — there is no CPU fallback — so a passing run did
+use the GPU. The control that establishes it is the same target under
+`LD_LIBRARY_PATH=/nonexistent`, which dies instead of quietly measuring a CPU:
+
+```
+RuntimeError: jaxlib/cuda/versions_helpers.cc:38: operation
+cudaRuntimeGetVersion(&version) failed: Error loading CUDA libraries.
+RuntimeError: Unable to load CUDA. Is it installed?
+RuntimeError: Unable to initialize backend 'cuda': Backend 'cuda' is not in the
+list of known backends: ['cpu', 'tpu'].
+```
+
+The last line is the one that carries the claim: `cpu` is in that list and the
+run died anyway, rather than selecting it. That negative control is the part
+worth keeping. A reader who copies the invocation and mistypes a path needs to
+know the run would have failed rather than reported a suspiciously slow GPU.
+
 ### `size` moves two things and `timeout` moves one
 
 `size` picks a default deadline *and* the resource estimate bazel schedules
