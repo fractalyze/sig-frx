@@ -276,7 +276,10 @@ def root_from_sig(
         parents = bytestring.shift_right(parents, 1)
         # Clamped because a masked step can address above the root: a leaf at
         # height 254 has one real step and 254 discarded ones, whose heights would
-        # run past the byte the slot gives them and raise on a value nothing reads.
+        # run past the byte the slot gives them. This walk is traced, and
+        # `adrs_encoding` can only width-check a concrete field — so the overflow
+        # would wrap into the slot silently rather than raise, which is why the
+        # clamp is here and not left to the encoder to catch.
         parent_heights = fnp.minimum(heights + (step + 1), np.uint32(HEIGHT))
         combined = tweak.h(
             pk_seed,

@@ -86,7 +86,7 @@ _N = stateless.PARAMS.n
 # signature's are `stateless`'s, since the stateless signature is the longer of
 # the two — which the specification makes deliberate, so that a stateful one
 # staying below it keeps the pair distinguishable by length.
-SECRET_KEY_SIZE = 3 * _N + _N + 2 + _N
+SECRET_KEY_SIZE = 3 * _N + _N + fxmss.STRUCTURE_BYTES + _N
 
 # The stateful signature's fixed header: the indicator byte and the randomizer.
 _INDICATOR_BYTES = 1
@@ -162,23 +162,24 @@ class Shrincs:
         """
         structure = self._signing_structure()
         values = fnp.asarray(seed, dtype=fnp.uint8)
-        if values.shape != (stateless.PARAMS.seed_size,):
-            raise ValueError(
-                f"keygen takes SK.seed, SK.prf and PK.seed — {_N} bytes each, "
-                f"{stateless.PARAMS.seed_size} in all — got shape "
-                f"{tuple(values.shape)}"
-            )
-        slh_dsa_public, _ = self.stateless.slh_dsa.keygen(values)
+        # The seed's own shape check is `slh_dsa.keygen`'s below, which takes this
+        # same seed and raises the same sentence; repeating it here would be one
+        # more place for the two to disagree about what a seed is.
+        slh_dsa_public, slh_dsa_secret = self.stateless.slh_dsa.keygen(values)
         sl_root = slh_dsa_public[_N:]
         sf_root = fxmss.root(
             self._tweak, values[_SK_PK_SEED], values[_SK_SEED], structure
         )
+        # `slh_dsa_secret` *is* this key's first four values — the same
+        # `SK.seed ‖ SK.prf ‖ PK.seed ‖ sl_root` that `_SK_SLH_DSA` names and that
+        # `sign` hands back to `slh_dsa.sign`. Building on it rather than
+        # reassembling the pieces is what keeps that structural rather than a
+        # coincidence two concatenations happen to preserve.
         return (
             fnp.concatenate([values[_SK_PK_SEED], sl_root, sf_root]),
             fnp.concatenate(
                 [
-                    values,
-                    sl_root,
+                    slh_dsa_secret,
                     fnp.asarray(structure.encoded, dtype=fnp.uint8),
                     sf_root,
                 ]

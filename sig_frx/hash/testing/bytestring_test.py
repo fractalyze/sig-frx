@@ -103,6 +103,32 @@ class LowBitsTest(parameterized.TestCase):
         )
 
 
+class BigEndianTest(parameterized.TestCase):
+    """The one function here that makes a byte string rather than reading one."""
+
+    @parameterized.parameters(1, 2, 4, 8)
+    def test_it_writes_the_width_big_endian(self, width: int) -> None:
+        values = [0, 1, 2 ** (8 * width) - 1]
+        self.assertEqual(
+            [bytes(row) for row in bytestring.big_endian(values, width)],
+            [v.to_bytes(width, "big") for v in values],
+        )
+
+    def test_a_row_per_value(self) -> None:
+        self.assertEqual(bytestring.big_endian(np.arange(5), 2).shape, (5, 2))
+
+    def test_a_width_the_reinterpret_has_no_dtype_for_is_an_error(self) -> None:
+        """Three bytes is a fine big-endian field and not one this builds."""
+        for width in (0, 3, 5, 16):
+            with self.subTest(width=width):
+                with self.assertRaisesRegex(ValueError, "unsigned dtype"):
+                    bytestring.big_endian([1], width)
+
+    def test_it_reads_back_as_the_readers_expect(self) -> None:
+        """`is_bytes` is what the address encoder gates a byte field on."""
+        self.assertTrue(bytestring.is_bytes(bytestring.big_endian([7], 8)))
+
+
 class ShiftRightTest(parameterized.TestCase):
     @parameterized.parameters(*_SHIFTS)
     def test_it_divides_by_a_power_of_two(self, bits: int) -> None:
