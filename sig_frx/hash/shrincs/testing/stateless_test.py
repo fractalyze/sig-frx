@@ -27,51 +27,33 @@ from dataclasses import replace
 import numpy as np
 from absl.testing import absltest
 
-from sig_frx.hash.shrincs import stateless
-from sig_frx.hash.shrincs.testing import vectors
+from sig_frx.hash.shrincs import shrincs, stateless
+from sig_frx.hash.shrincs.testing import harness, vectors
 
-# The one batch shape this file compiles. Four, because that is the widest case
-# below — a batch whose verdicts alternate.
-_BATCH = 4
-
-
-def _rows(*values: bytes) -> np.ndarray:
-    # Stacked rather than joined and reshaped, so that a batch of empty
-    # signatures is `[B, 0]` instead of a reshape of nothing.
-    return np.stack([np.frombuffer(v, dtype=np.uint8) for v in values])
-
-
-def _one_bit_flipped(signature: bytes) -> bytes:
-    """The same signature, one bit of its body different."""
-    broken = bytearray(signature)
-    broken[17] ^= 0x80
-    return bytes(broken)
-
-
-def _ctx(context: bytes) -> np.ndarray | None:
-    """The context as the seam takes it: a `uint8` array, `None` meaning empty."""
-    return np.frombuffer(context, dtype=np.uint8) if context else None
+# Past the indicator byte and the randomizer, so inside the signature proper.
+_BODY = shrincs.INDEX_FIELD_START
 
 
 def _verdicts(
     scheme: stateless.Stateless, cases: list[vectors.StatelessVectors]
 ) -> list[bool]:
-    """Verify `cases` in one call, padded to `_BATCH`, and return their verdicts.
+    """`harness.verdicts` over recorded cases, which carry their own context.
 
-    Padding repeats the last case, so the shape is constant however many cases a
-    test has to say something about. Every case in one call shares a context and a
-    message length, since those are one per call and one per batch respectively.
+    The adapter is here and the batching is not: what a `StatelessVectors` looks
+    like is this file's business, and one batch width per file is every file's.
     """
-    if not 1 <= len(cases) <= _BATCH:
-        raise ValueError(f"1 to {_BATCH} cases per call, got {len(cases)}")
-    padded = list(cases) + [cases[-1]] * (_BATCH - len(cases))
-    got = scheme.verify(
-        _rows(*(c.public_key for c in padded)),
-        _rows(*(c.message for c in padded)),
-        _rows(*(c.signature for c in padded)),
-        context=_ctx(cases[0].context),
+    return harness.verdicts(
+        scheme.verify,
+        [(case.public_key, case.message, case.signature) for case in cases],
+        cases[0].context,
     )
-    return [bool(v) for v in np.asarray(got)][: len(cases)]
+
+
+def _one_bit_flipped(signature: bytes) -> bytes:
+    """The same signature, one bit of its body different."""
+    broken = bytearray(signature)
+    broken[_BODY] ^= 0x80
+    return bytes(broken)
 
 
 class ParameterTest(absltest.TestCase):
@@ -125,12 +107,12 @@ class ReferenceTest(absltest.TestCase):
         for case in vectors.REFERENCE:
             with self.subTest(case.label):
                 got = scheme.slh_dsa.verify(
-                    _rows(*([case.pk_seed + case.sl_root] * _BATCH)),
-                    _rows(*([case.sf_root + case.message] * _BATCH)),
-                    _rows(*([case.signature[1:]] * _BATCH)),
-                    context=_ctx(case.context),
+                    harness.rows(*([case.pk_seed + case.sl_root] * harness.BATCH)),
+                    harness.rows(*([case.sf_root + case.message] * harness.BATCH)),
+                    harness.rows(*([case.signature[1:]] * harness.BATCH)),
+                    context=harness.context(case.context),
                 )
-                self.assertEqual(list(np.asarray(got)), [True] * _BATCH)
+                self.assertEqual(list(np.asarray(got)), [True] * harness.BATCH)
 
 
 class SigningTest(absltest.TestCase):
@@ -157,7 +139,7 @@ class SigningTest(absltest.TestCase):
             np.frombuffer(case.sf_root, dtype=np.uint8),
             np.frombuffer(case.message, dtype=np.uint8),
             randomness=np.frombuffer(case.opt_rand, dtype=np.uint8),
-            context=_ctx(case.context),
+            context=harness.context(case.context),
         )
         self.assertEqual(bytes(np.asarray(made)), case.signature)
 
@@ -174,7 +156,7 @@ class SigningTest(absltest.TestCase):
                 np.frombuffer(case.seed + case.sl_root, dtype=np.uint8),
                 np.frombuffer(case.sf_root, dtype=np.uint8),
                 np.frombuffer(case.message, dtype=np.uint8),
-                context=_ctx(case.context),
+                context=harness.context(case.context),
             )
 
 
@@ -278,10 +260,10 @@ class ComponentTest(absltest.TestCase):
         self, case: vectors.StatelessVectors
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
         return (
-            _rows(case.public_key),
-            _rows(case.message),
-            _rows(case.signature),
-            _ctx(case.context),
+            harness.rows(case.public_key),
+            harness.rows(case.message),
+            harness.rows(case.signature),
+            harness.context(case.context),
         )
 
     def test_it_agrees_with_the_public_verifier(self) -> None:
@@ -345,23 +327,23 @@ class ShapeTest(absltest.TestCase):
         with self.assertRaisesRegex(ValueError, r"public key batch is \[B, 48\]"):
             self.scheme.verify(
                 np.frombuffer(case.public_key, dtype=np.uint8),
-                _rows(case.message),
-                _rows(case.signature),
+                harness.rows(case.message),
+                harness.rows(case.signature),
             )
 
     def test_a_batch_that_does_not_line_up_raises(self) -> None:
         case = self.case
         with self.assertRaisesRegex(ValueError, "one signature per public key"):
             self.scheme.verify(
-                _rows(case.public_key, case.public_key),
-                _rows(case.message, case.message),
-                _rows(case.signature),
+                harness.rows(case.public_key, case.public_key),
+                harness.rows(case.message, case.message),
+                harness.rows(case.signature),
             )
         with self.assertRaisesRegex(ValueError, "one message per public key"):
             self.scheme.verify(
-                _rows(case.public_key, case.public_key),
-                _rows(case.message),
-                _rows(case.signature, case.signature),
+                harness.rows(case.public_key, case.public_key),
+                harness.rows(case.message),
+                harness.rows(case.signature, case.signature),
             )
 
 

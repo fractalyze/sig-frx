@@ -89,9 +89,13 @@ _N = stateless.PARAMS.n
 SECRET_KEY_SIZE = 3 * _N + _N + fxmss.STRUCTURE_BYTES + _N
 
 # The stateful signature's fixed header: the indicator byte and the randomizer.
+# `INDEX_FIELD_START` is public because it is where a *reader* of a signature
+# starts — the leaf index follows the header, and its width follows from the
+# indicator — so a consumer parsing one needs it, and a test slicing a recorded
+# one needs it for the same reason. Restating it as 17 is how the two drift.
 _INDICATOR_BYTES = 1
 _RANDOMIZER_BYTES = _N
-_INDEX_FIELD_START = _INDICATOR_BYTES + _RANDOMIZER_BYTES  # 17
+INDEX_FIELD_START = _INDICATOR_BYTES + _RANDOMIZER_BYTES  # 17
 
 
 # FIPS 205 §10.2's pure-signature domain separator, which SHRINCS keeps for both
@@ -394,7 +398,7 @@ class Shrincs:
 
         indices, in_range = leaf_indices(signatures, widths, bits)
         digests = message_digest(
-            signatures[:, _INDICATOR_BYTES:_INDEX_FIELD_START],
+            signatures[:, _INDICATOR_BYTES:INDEX_FIELD_START],
             pk_seeds,
             sl_roots,
             sf_roots,
@@ -439,10 +443,8 @@ def leaf_indices(signatures: Array, widths: Array, bits: Array) -> tuple[Array, 
     different subtree while verifying perfectly against itself.
     """
     lanes = np.arange(fxmss.INDEX_BYTES, dtype=np.uint32)
-    columns = (
-        _INDEX_FIELD_START + widths[:, None] - np.uint32(fxmss.INDEX_BYTES) + lanes
-    )
-    inside = columns >= np.uint32(_INDEX_FIELD_START)
+    columns = INDEX_FIELD_START + widths[:, None] - np.uint32(fxmss.INDEX_BYTES) + lanes
+    inside = columns >= np.uint32(INDEX_FIELD_START)
     gathered = fnp.take_along_axis(signatures, columns.astype(fnp.int32), axis=1)
     indices = fnp.where(inside, gathered, np.uint8(0))
     # A depth of `d` addresses `2^d` leaves, so an index with a bit above that
@@ -458,7 +460,7 @@ def fxmss_signatures(signatures: Array, widths: Array) -> Array:
     those steps off. The widest read is `17 + 8 + 4593`, inside the stateless
     signature's length, so nothing gathers out of bounds.
     """
-    starts = _INDEX_FIELD_START + widths
+    starts = INDEX_FIELD_START + widths
     columns = starts[:, None] + np.arange(fxmss.SIGNATURE_SIZE_MAX, dtype=np.uint32)
     return fnp.take_along_axis(signatures, columns.astype(fnp.int32), axis=1)
 

@@ -19,6 +19,7 @@ from absl.testing import absltest
 from hash_frx import Sha256
 
 from sig_frx.hash.shrincs import wots_c
+from sig_frx.hash.shrincs.testing import harness
 from sig_frx.hash.shrincs.testing import stateful_vectors as vectors
 from sig_frx.hash.tweakable import Sha2TweakableHash
 
@@ -32,7 +33,7 @@ def _rows(*values: bytes) -> np.ndarray:
 
 def _fxmss_signature(case: vectors.StatefulVectors) -> bytes:
     """The FXMSS signature, past the indicator, randomizer and leaf-index field."""
-    return case.signature[17 + case.leaf_index_size :]
+    return harness.fxmss_body(case)
 
 
 def _structure(case: vectors.StatefulVectors) -> np.ndarray:

@@ -22,6 +22,7 @@ from absl.testing import absltest
 from hash_frx import Sha256
 
 from sig_frx.hash.shrincs import fxmss, shrincs
+from sig_frx.hash.shrincs.testing import harness
 from sig_frx.hash.shrincs.testing import stateful_vectors as vectors
 from sig_frx.hash.tweakable import Sha2TweakableHash
 
@@ -34,7 +35,7 @@ def _rows(*values: bytes) -> np.ndarray:
 
 def _padded(case: vectors.StatefulVectors) -> bytes:
     """The FXMSS signature, zero-padded to the widest the format allows."""
-    body = case.signature[17 + case.leaf_index_size :]
+    body = harness.fxmss_body(case)
     return body + bytes(fxmss.SIGNATURE_SIZE_MAX - len(body))
 
 
@@ -281,7 +282,7 @@ class SignerTest(absltest.TestCase):
                     case.leaf_height,
                     case.leaf_index,
                 )
-                body = case.signature[17 + case.leaf_index_size :]
+                body = harness.fxmss_body(case)
                 self.assertEqual(bytes(np.asarray(signature)), body)
 
     def test_a_depth_zero_tree_still_has_a_root(self) -> None:

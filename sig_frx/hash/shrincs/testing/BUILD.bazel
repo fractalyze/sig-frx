@@ -24,11 +24,32 @@ py_library(
 # The workstation reads 26.7 s and did not decide this. The executor factor is
 # per-target — 3.9x for this one — so a local CPU number cannot size a
 # CPU-decided budget, per ../../../../docs/reference/measurement.md.
+# How a recorded case becomes what the seam takes: one batch width with the
+# padding that holds it, and the header slice a component's input needs. Split
+# out of the test files rather than left in each, because the two that had it had
+# argued the same rationale in different words — and because the header offset
+# belongs to `shrincs.py`, not to four restatements of 17.
+py_library(
+    name = "harness",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "harness.py",
+    ],
+    deps = [
+        ":stateful_vectors",
+        "//sig_frx/hash/shrincs",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
 py_test(
     name = "stateless_test",
     size = "medium",
     srcs = ["stateless_test.py"],
     deps = [
+        ":harness",
         ":vectors",
         "//sig_frx/hash/shrincs:stateless",
         requirement("absl_py"),
@@ -56,6 +77,7 @@ py_test(
     size = "medium",
     srcs = ["wots_c_test.py"],
     deps = [
+        ":harness",
         ":stateful_vectors",
         "//sig_frx/hash:tweakable",
         "//sig_frx/hash/shrincs:wots_c",
@@ -76,6 +98,7 @@ py_test(
     size = "medium",
     srcs = ["fxmss_test.py"],
     deps = [
+        ":harness",
         ":stateful_vectors",
         "//sig_frx/hash:tweakable",
         "//sig_frx/hash/shrincs",
@@ -105,6 +128,7 @@ py_test(
     size = "large",
     srcs = ["shrincs_test.py"],
     deps = [
+        ":harness",
         ":stateful_vectors",
         ":vectors",
         "//sig_frx/hash/shrincs",
@@ -123,6 +147,7 @@ py_test(
     size = "large",
     srcs = ["shrincs_traced_test.py"],
     deps = [
+        ":harness",
         "//sig_frx/hash/shrincs",
         "//sig_frx/hash/shrincs:fxmss",
         requirement("absl_py"),
@@ -140,6 +165,7 @@ py_binary(
     testonly = True,
     srcs = ["verify_bench.py"],
     deps = [
+        ":harness",
         ":stateful_vectors",
         "//sig_frx/hash:bytestring",
         "//sig_frx/hash:tweakable",
