@@ -244,3 +244,10 @@ http_file(
     sha256 = "03c02a97e4ef3f2edfbc8e6013c127496dfcfd5889cfca60ddf009a4e9091cab",
     urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/key_agg_vectors.json"],
 )
+
+http_file(
+    name = "bip327_key_sort_vectors",
+    downloaded_file_path = "key_sort_vectors.json",
+    sha256 = "2389fa0c146cfd7455c643ca240ec32835dcfc916f430f50dd94d0b49c9ea16c",
+    urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/key_sort_vectors.json"],
+)

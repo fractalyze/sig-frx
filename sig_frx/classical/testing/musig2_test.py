@@ -53,6 +53,42 @@ def _aggregate(data: dict[str, Any], case: dict[str, Any]) -> musig2.KeyAggConte
     return context
 
 
+class KeySortTest(absltest.TestCase):
+    """BIP-327 `key_sort_vectors.json`.
+
+    Sorting is defined on the serializations, not on the points: BIP-327 orders
+    the 33-byte encodings lexicographically and never parses them. So an
+    unparseable key sorts as happily as any other and is refused later, by
+    `key_agg` — which is why this stage raises nothing of its own.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.data = _load("bip327_key_sort_vectors", "key_sort_vectors.json")
+
+    def test_the_published_ordering(self) -> None:
+        pubkeys = [bytes.fromhex(k) for k in self.data["pubkeys"]]
+        expected = [bytes.fromhex(k) for k in self.data["sorted_pubkeys"]]
+        self.assertEqual(musig2.key_sort(pubkeys), expected)
+
+    def test_a_repeated_key_is_kept_rather_than_collapsed(self) -> None:
+        """A duplicate is a distinct cosigner slot, so the count cannot move."""
+        pubkeys = [bytes.fromhex(k) for k in self.data["pubkeys"]]
+        self.assertLen(set(pubkeys), len(pubkeys) - 1)
+        self.assertLen(musig2.key_sort(pubkeys), len(pubkeys))
+
+    def test_the_order_is_decided_by_the_whole_encoding(self) -> None:
+        """The set pins two keys that differ only in their final byte, so a
+        comparison that stopped early would still pass the published case."""
+        near = sorted(
+            k for k in self.data["pubkeys"] if k.startswith("02DD308AFEC5777E")
+        )
+        self.assertLen(near, 3)
+        self.assertNotEqual(near[0][-2:], near[-1][-2:])
+        sorted_keys = musig2.key_sort([bytes.fromhex(k) for k in near[::-1]])
+        self.assertEqual([k.hex().upper() for k in sorted_keys], near)
+
+
 class KeyAggTest(absltest.TestCase):
     """BIP-327 `key_agg_vectors.json`, every case."""
 

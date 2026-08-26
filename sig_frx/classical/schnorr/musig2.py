@@ -170,6 +170,25 @@ class KeyAggContext:
         )
 
 
+def key_sort(pubkeys: Sequence[bytes]) -> list[bytes]:
+    """The cosigner keys in BIP-327's canonical order.
+
+    Defined on the serializations rather than on the points — the 33-byte
+    encodings, ordered lexicographically — so this parses nothing and refuses
+    nothing. An unusable key sorts like any other and is caught by `key_agg`,
+    which is the one place that has a cosigner index to blame.
+
+    Duplicates survive. A repeated key is a distinct cosigner slot that
+    `key_agg` weights separately, so collapsing them here would silently change
+    the aggregate.
+
+    Sorting is the caller's to apply, not `key_agg`'s to assume: aggregation
+    binds the order it is given, so a group that sorts and a group that keeps
+    its own order derive different keys, and neither is wrong.
+    """
+    return sorted(pubkeys)
+
+
 def key_agg(pubkeys: Sequence[bytes]) -> KeyAggContext:
     """The cosigners' compressed keys aggregated into one, in the order given.
 

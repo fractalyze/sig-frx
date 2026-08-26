@@ -244,7 +244,10 @@ py_test(
     name = "musig2_test",
     size = "small",
     srcs = ["musig2_test.py"],
-    data = ["@bip327_key_agg_vectors//file"],
+    data = [
+        "@bip327_key_agg_vectors//file",
+        "@bip327_key_sort_vectors//file",
+    ],
     deps = [
         "//sig_frx/classical:secp",
         "//sig_frx/classical/schnorr:musig2",
