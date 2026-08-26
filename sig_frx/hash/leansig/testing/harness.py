@@ -1,0 +1,92 @@
+# Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
+"""The vocabulary every leanSig suite needs: lane order, and the two legs.
+
+Three suites here gate three layers of one scheme — the permutation, the two
+modes over it, and the message-to-codeword pipeline — and each of them meets the
+same two facts. Upstream's vectors are in leanSpec's lane order while everything
+[`poseidon.py`](../poseidon.py) runs is over the reverse of it, so a case
+reverses on the way in and back on the way out; and every case runs twice, once
+eagerly and once traced, because the two must agree in *dtype* as well as value.
+
+Written once rather than per suite. The reversal is the convention most likely
+to move — a dtype change, an x64 switch, a different canonical read would each
+touch it — and three copies of it are three places a change has to be found,
+with nothing to make a reader confident they still agree. That is the same
+argument [`encoding_vectors.py`](encoding_vectors.py) makes for taking
+`operand_elements` from `mode_vectors` rather than restating the rule.
+
+The conversions here are the tests' own and deliberately not
+[`field.to_field`](../field.py), which they would otherwise be gating with
+itself. `field_test` gates that one directly.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from functools import lru_cache
+from typing import Any
+
+import frx
+import frx.numpy as fnp
+import numpy as np
+from zk_dtypes import koalabear_mont as F
+
+
+def to_field(canonical: Sequence[int]) -> fnp.ndarray:
+    """Canonical residues -> a field array. The dtype cast Montgomery-encodes.
+
+    Separate from `lane_reversed` because a case that feeds a leanSpec-ordered
+    vector *deliberately* — the ones that prove the reversal is load-bearing —
+    spells the conversion the same way rather than inlining its own.
+    """
+    return fnp.asarray(np.asarray(canonical, dtype=np.int64).astype(F))
+
+
+def lane_reversed(canonical: Sequence[int]) -> fnp.ndarray:
+    """leanSpec-ordered residues -> the lane-reversed field vector the scheme takes.
+
+    The reversal is on the host, where it is a slice of a sequence rather than a
+    device `reverse`.
+    """
+    return to_field(canonical[::-1])
+
+
+def to_canonical(values: fnp.ndarray) -> list[int]:
+    """A field array -> canonical residues.
+
+    The object cast Montgomery-decodes without needing frx x64, which is why it
+    is not a bitcast.
+    """
+    return [int(x) for x in np.asarray(values).astype(object)]
+
+
+def to_leanspec_order(values: fnp.ndarray) -> list[int]:
+    """A lane-reversed field array -> canonical residues in leanSpec's order.
+
+    The mirror of `lane_reversed`, and here for the same reason: both sides of
+    the convention belong in one place, so a case compares against upstream's
+    order without re-deriving which end to read from.
+    """
+    return to_canonical(values)[::-1]
+
+
+@lru_cache(maxsize=None)
+def jitted(function: Callable[..., Any], *static_argnames: str) -> Callable[..., Any]:
+    """One jit wrapper per callable, shared across the cases that trace it.
+
+    Not a compile saving — frx keys its executable cache on the wrapped function,
+    so a fresh wrapper still hits it — but it keeps the per-call dispatch off the
+    slowest target. Only module-level functions are ever passed: a lambda would
+    be a fresh key each time, pinning its closure alongside every executable it
+    compiled.
+    """
+    return frx.jit(function, static_argnames=static_argnames)
+
+
+def both_legs(vectors: Sequence[Any]) -> list[tuple[str, Any, bool]]:
+    """Each vector twice, named for the leg it runs on."""
+    return [
+        (f"{vector.name}_{'traced' if jit else 'host'}", vector, jit)
+        for vector in vectors
+        for jit in (False, True)
+    ]

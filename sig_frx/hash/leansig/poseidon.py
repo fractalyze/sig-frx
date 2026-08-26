@@ -50,6 +50,12 @@ that re-derived either has turned a boundary into a convention spread across the
 package. (Reversing a *host* list, as `safe_domain_separator` does to its limbs,
 is not that: it is a Python slice on values that have not reached a lane yet.)
 
+The convention also needs an *exit*, because eventually a consumer holds values
+with no lanes at all, and that is `undo_lane_reversal` — the one function here
+that moves data rather than placing it. It is exported for the same reason the
+two placement facts are private: a second module open-coding the reverse is the
+spread this section exists to prevent.
+
 Nothing else about the two widths differs, so both come from one builder: width
 16 is the chain hash, width 24 the message, tree and leaf hashes.
 
@@ -96,32 +102,22 @@ from typing import Final
 import frx
 import frx.numpy as fnp
 import numpy as np
-import zk_dtypes
 from frx import Array
 from hash_frx import Poseidon, PoseidonParams
 from zk_dtypes import koalabear_mont as _F
 
 from sig_frx.hash.leansig import poseidon_constants as _c
+from sig_frx.hash.leansig.field import lane_reversed_limbs, to_field
 
 _WIDTHS: Final = {
     16: (_c.WIDTH_16_ROUNDS, _c.MDS_FIRST_ROW_16, _c.ROUND_CONSTANTS_16),
     24: (_c.WIDTH_24_ROUNDS, _c.MDS_FIRST_ROW_24, _c.ROUND_CONSTANTS_24),
 }
 
-# Off the dtype's own metadata rather than restated, so the pinned wheel stays
-# the single source of truth — the reason `classical/secp.py` derives its moduli
-# the same way. leanSpec states the same value in `spec/crypto/koalabear.py`.
-_PRIME: Final = zk_dtypes.pfinfo(_F).modulus
-
 # Upstream fixes the domain separator at width 24 rather than at the sponge's
 # own width — the sponge is the only construction that needs one, and it runs
 # there.
 _DOMAIN_SEPARATOR_WIDTH: Final = 24
-
-
-def _to_field(canonical: np.ndarray) -> Array:
-    """Canonical ints -> field array. The dtype cast Montgomery-encodes."""
-    return fnp.asarray(canonical.astype(np.int64).astype(_F))
 
 
 def _params(width: int) -> PoseidonParams:
@@ -143,8 +139,8 @@ def _params(width: int) -> PoseidonParams:
         alpha=_c.ALPHA,
         full_rounds=rounds_f,
         partial_rounds=rounds_p,
-        round_constants=_to_field(round_constants),
-        mds=_to_field(mds),
+        round_constants=to_field(round_constants),
+        mds=to_field(mds),
     )
 
 
@@ -181,6 +177,25 @@ def _reversed_lanes(start: int, length: int, size: int) -> slice:
     return slice(stop - length, stop)
 
 
+def undo_lane_reversal(vector: Array) -> Array:
+    """A lane-reversed vector back in leanSpec's order — the convention's exit.
+
+    Every other placement here is layout: an operand goes in reversed and a
+    digest comes out reversed, and nothing moves. This one *is* data movement, a
+    device `reverse`, and it exists because a consumer eventually has values that
+    have no lanes at all — the codeword [`encoding.py`](encoding.py) decodes to,
+    where digit `i` addresses chain `i`. Carrying a reversed codeword downstream
+    instead would spread the convention over the chain and tree layers to save
+    one reverse per verification, against the ~180 permutations one runs.
+
+    It lives here rather than at that call site for the reason the module
+    docstring gives: a second module that open-codes `[::-1]` has turned a
+    boundary into a convention spread across the package, and the third one
+    copies the line rather than the seam.
+    """
+    return vector[::-1]
+
+
 def _join(pieces: Sequence[Array]) -> Array:
     """Concatenate lane-reversed `pieces` listed in leanSpec's order.
 
@@ -206,27 +221,6 @@ def _padded(pieces: Sequence[Array], size: int) -> Array:
 def _length(pieces: Sequence[Array]) -> int:
     """Elements across `pieces`, which is what the modes bound their inputs by."""
     return sum(piece.shape[0] for piece in pieces)
-
-
-def _int_to_base_p(value: int, num_limbs: int) -> list[int]:
-    """`value` as `num_limbs` base-p limbs, least significant first.
-
-    Host-only, and the packing is why: `safe_domain_separator` shifts its
-    lengths into 32-bit slots, so the value it decomposes is wider than any lane
-    and only a Python integer holds it without truncating (`CLAUDE.md`). Each
-    limb it returns is below `p`, which is what may then cross onto the device.
-
-    A short decomposition is rejected rather than truncated — dropping the high
-    part would silently change the hash, which is upstream's reasoning too.
-    """
-    limbs = []
-    remaining = value
-    for _ in range(num_limbs):
-        limbs.append(remaining % _PRIME)
-        remaining //= _PRIME
-    if remaining:
-        raise ValueError(f"value does not fit in {num_limbs} base-p limbs")
-    return limbs
 
 
 @lru_cache(maxsize=None)
@@ -359,9 +353,8 @@ def safe_domain_separator(lengths: Sequence[int], *, capacity_length: int) -> Ar
     for length in lengths:
         packed = (packed << 32) | length
 
-    limbs = _int_to_base_p(packed, _DOMAIN_SEPARATOR_WIDTH)
     return compress(
-        [_to_field(np.asarray(limbs[::-1]))],
+        [lane_reversed_limbs(packed, _DOMAIN_SEPARATOR_WIDTH)],
         width=_DOMAIN_SEPARATOR_WIDTH,
         output_length=capacity_length,
     )
