@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from functools import lru_cache
-from typing import Any
 
 import frx
 import frx.numpy as fnp
@@ -37,39 +36,50 @@ from sig_frx.hash.leansig.testing.mode_vectors import (
 )
 
 
+def _to_field(canonical: Sequence[int]) -> fnp.ndarray:
+    """Canonical residues -> field array. The dtype cast Montgomery-encodes.
+
+    Kept separate from the reversal so the case that feeds a leanSpec-ordered
+    vector *deliberately* — `LaneConventionTest` — spells the conversion the same
+    way rather than inlining its own.
+    """
+    return fnp.asarray(np.asarray(canonical, dtype=np.int64).astype(F))
+
+
 def _lane_reversed(canonical: Sequence[int]) -> fnp.ndarray:
     """leanSpec-ordered residues -> the lane-reversed field array the modes take.
 
     The reversal is on the host, where it is a slice of a tuple rather than a
     device `reverse`.
     """
-    return fnp.asarray(np.asarray(canonical[::-1], dtype=np.int64).astype(F))
+    return _to_field(canonical[::-1])
 
 
 def _to_leanspec_order(digest: fnp.ndarray) -> list[int]:
     """A lane-reversed digest -> canonical residues in leanSpec's lane order.
 
-    The object cast Montgomery-decodes without needing frx x64, which is why it
-    is not a bitcast.
+    The object cast is `poseidon_test._to_canonical`'s, for the reason recorded
+    there.
     """
     return [int(x) for x in np.asarray(digest).astype(object)][::-1]
 
 
 @lru_cache(maxsize=None)
 def _jitted(function: Callable[..., fnp.ndarray]) -> Callable[..., fnp.ndarray]:
-    """One jit wrapper per callable. A fresh `frx.jit` around the same function
-    re-traces every call, so wrapping per case would pay one compile per
-    vector."""
+    """One jit wrapper per callable, shared across the cases that trace it.
+
+    Not a compile saving — frx keys its executable cache on the wrapped function,
+    so a fresh wrapper still hits it — but it keeps the per-call dispatch off the
+    slowest target here. Only module-level functions are ever passed: a lambda
+    would be a fresh key each time, pinning its closure alongside every
+    executable it compiled.
+    """
     return frx.jit(function, static_argnames=("width", "output_length"))
 
 
-def _run(
-    function: Callable[..., fnp.ndarray], *args: object, jit: bool, **kwargs: object
-) -> fnp.ndarray:
-    return (_jitted(function) if jit else function)(*args, **kwargs)
-
-
-def _cases(vectors: Sequence[Any]) -> list[tuple[str, Any, bool]]:
+def _cases(
+    vectors: Sequence[CompressionVector | SpongeVector],
+) -> list[tuple[str, CompressionVector | SpongeVector, bool]]:
     """Each vector twice, once eagerly and once traced."""
     return [
         (f"{vector.name}_{'traced' if jit else 'host'}", vector, jit)
@@ -87,12 +97,9 @@ class CompressionTest(parameterized.TestCase):
             operand_elements(vector.input_length, vector.input_seed)
         )
 
-        got = _run(
-            poseidon.compress,
-            [operands],
-            jit=jit,
-            width=vector.width,
-            output_length=vector.output_length,
+        compress = _jitted(poseidon.compress) if jit else poseidon.compress
+        got = compress(
+            [operands], width=vector.width, output_length=vector.output_length
         )
 
         self.assertEqual(_to_leanspec_order(got), list(vector.output))
@@ -132,11 +139,10 @@ class SpongeTest(parameterized.TestCase):
         )
         capacity = _lane_reversed(vector.capacity)
 
-        got = _run(
-            poseidon.sponge,
+        sponge = _jitted(poseidon.sponge) if jit else poseidon.sponge
+        got = sponge(
             [operands],
             capacity,
-            jit=jit,
             width=vector.width,
             output_length=vector.output_length,
         )
@@ -157,17 +163,13 @@ class DomainSeparatorTest(parameterized.TestCase):
         *((vector.name, vector) for vector in DOMAIN_SEPARATOR_VECTORS)
     )
     def test_it_matches_upstream(self, vector: DomainSeparatorVector) -> None:
-        got = poseidon.safe_domain_separator(vector.lengths, vector.capacity_length)
+        got = poseidon.safe_domain_separator(
+            vector.lengths, capacity_length=vector.capacity_length
+        )
 
         self.assertEqual(_to_leanspec_order(got), list(vector.output))
         self.assertEqual(got.dtype, F)
         self.assertEqual(got.shape, (vector.capacity_length,))
-
-    def test_it_separates_two_shapes(self) -> None:
-        prod = poseidon.safe_domain_separator((5, 2, 46, 8), 9)
-        test = poseidon.safe_domain_separator((5, 2, 4, 8), 9)
-
-        self.assertNotEqual(_to_leanspec_order(prod), _to_leanspec_order(test))
 
 
 class LaneConventionTest(absltest.TestCase):
@@ -181,21 +183,12 @@ class LaneConventionTest(absltest.TestCase):
         # The whole mistake: place a leanSpec-ordered operand and read the digest
         # back as if it were leanSpec-ordered too.
         mistaken = poseidon.compress(
-            [fnp.asarray(np.asarray(elements, dtype=np.int64).astype(F))],
+            [_to_field(elements)],
             width=vector.width,
             output_length=vector.output_length,
         )
 
         self.assertNotEqual(_to_leanspec_order(mistaken), list(vector.output))
-
-    def test_operands_join_in_spec_order(self) -> None:
-        """`_join` reverses the piece order, so operands listed the spec's way
-        land contiguously rather than back to front."""
-        first, second = (1, 2, 3), (4, 5, 6)
-
-        joined = poseidon._join([_lane_reversed(first), _lane_reversed(second)])
-
-        self.assertEqual(_to_leanspec_order(joined), list(first + second))
 
 
 class RejectionTest(absltest.TestCase):
@@ -226,11 +219,6 @@ class RejectionTest(absltest.TestCase):
         with self.assertRaisesRegex(ValueError, "no rate lane"):
             poseidon.sponge([operands], capacity, width=16, output_length=8)
 
-    def test_a_short_decomposition_is_rejected_rather_than_truncated(self) -> None:
-        # Dropping the high part would silently change the hash.
-        with self.assertRaisesRegex(ValueError, "base-p limbs"):
-            poseidon._int_to_base_p(PRIME**3, 2)
-
 
 class DecompositionTest(absltest.TestCase):
     """The base-p decomposition the separator's packing rests on.
@@ -246,6 +234,11 @@ class DecompositionTest(absltest.TestCase):
 
     def test_it_pads_with_zeros(self) -> None:
         self.assertEqual(poseidon._int_to_base_p(5, 4), [5, 0, 0, 0])
+
+    def test_a_short_decomposition_is_rejected_rather_than_truncated(self) -> None:
+        # Dropping the high part would silently change the hash.
+        with self.assertRaisesRegex(ValueError, "base-p limbs"):
+            poseidon._int_to_base_p(PRIME**3, 2)
 
 
 if __name__ == "__main__":

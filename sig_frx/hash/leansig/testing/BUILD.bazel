@@ -42,12 +42,13 @@ py_library(
     ],
 )
 
-# `medium` for the margin rather than the runtime. This measures 73.9 s on the
-# CPU leg and 50.4 s on the GPU leg, against 22 s on a workstation — a 3.4x
-# executor factor, and `small`'s 60 s sat inside it, so the first CI run timed
-# out and took the suite red. Most of the cost is compiling the traced leg, where
-# the `PROD_CONFIG` leaf dominates: 25 absorb chunks unroll to 25 width-24
-# permutations in one graph. Sized from the worst run on the slowest leg, per
+# `medium` for the margin rather than the runtime. `small`'s 60 s is not what the
+# CI executor gives this: at 22 s on a workstation it still timed out there and
+# took the suite red, a 3.4x factor. Scanning the sponge's absorb rather than
+# unrolling it has since cut the workstation figure to ~13 s, so the budget is
+# sized against a cost the target no longer pays — which is the safe direction,
+# and `medium` stands either way. Nearly all of it is compiling the traced leg.
+# Sized from the worst run on the slowest leg, per
 # ../../../../docs/reference/measurement.md — re-check against a CI run, not a
 # workstation, before shrinking it.
 py_test(

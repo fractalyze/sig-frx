@@ -41,11 +41,14 @@ prefix back — reverses for free by placing and slicing from the other end. The
 reversal is a layout decision made once at the boundary, never data movement.
 
 "Once" is load-bearing on the callers too, and it is why the two modes below
-live here rather than in a module of their own. The convention is exactly two
-functions — `_reversed_lanes`, where a leanSpec lane range sits in a reversed
-vector, and `_join`, which turns `a ‖ b` into `R(b) ‖ R(a)` — and every
-placement here goes through one of them. A second module that re-derived either
-has turned a boundary into a convention spread across the package.
+live here rather than in a module of their own. The convention is two facts —
+`_reversed_lanes`, where a leanSpec lane range sits in a reversed vector, and
+`_join`, that `a ‖ b` reverses to `R(b) ‖ R(a)` — and every device-side
+placement here goes through one of them, `_padded` included, which is `_join`
+with upstream's own trailing zeros rather than a third rule. A second module
+that re-derived either has turned a boundary into a convention spread across the
+package. (Reversing a *host* list, as `safe_domain_separator` does to its limbs,
+is not that: it is a Python slice on values that have not reached a lane yet.)
 
 Nothing else about the two widths differs, so both come from one builder: width
 16 is the chain hash, width 24 the message, tree and leaf hashes.
@@ -86,12 +89,14 @@ conjugation's doing.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import lru_cache
 from typing import Final
 
+import frx
 import frx.numpy as fnp
 import numpy as np
+import zk_dtypes
 from frx import Array
 from hash_frx import Poseidon, PoseidonParams
 from zk_dtypes import koalabear_mont as _F
@@ -103,10 +108,10 @@ _WIDTHS: Final = {
     24: (_c.WIDTH_24_ROUNDS, _c.MDS_FIRST_ROW_24, _c.ROUND_CONSTANTS_24),
 }
 
-# leanSpec states it in `spec/crypto/koalabear.py`; `zk_dtypes` reduces
-# internally and exposes no modulus, so the base of a decomposition is named
-# here rather than read off the dtype.
-_PRIME: Final = 2**31 - 2**24 + 1
+# Off the dtype's own metadata rather than restated, so the pinned wheel stays
+# the single source of truth — the reason `classical/secp.py` derives its moduli
+# the same way. leanSpec states the same value in `spec/crypto/koalabear.py`.
+_PRIME: Final = zk_dtypes.pfinfo(_F).modulus
 
 # Upstream fixes the domain separator at width 24 rather than at the sponge's
 # own width — the sponge is the only construction that needs one, and it runs
@@ -186,6 +191,23 @@ def _join(pieces: Sequence[Array]) -> Array:
     return fnp.concatenate(list(pieces)[::-1])
 
 
+def _padded(pieces: Sequence[Array], size: int) -> Array:
+    """`pieces` joined and zero-extended to `size`, upstream's own padding.
+
+    Every mode here zero-extends something — a compression pre-image to the
+    state width, a sponge input to a whole number of chunks, a capacity to the
+    full state — and upstream always pads at the *end*, so `_join` is what puts
+    the zeros at the front. Routing all three through this is what keeps that a
+    single decision rather than an idiom re-spelled per site.
+    """
+    return _join([*pieces, fnp.zeros(size - _length(pieces), dtype=pieces[0].dtype)])
+
+
+def _length(pieces: Sequence[Array]) -> int:
+    """Elements across `pieces`, which is what the modes bound their inputs by."""
+    return sum(piece.shape[0] for piece in pieces)
+
+
 def _int_to_base_p(value: int, num_limbs: int) -> list[int]:
     """`value` as `num_limbs` base-p limbs, least significant first.
 
@@ -207,6 +229,30 @@ def _int_to_base_p(value: int, num_limbs: int) -> list[int]:
     return limbs
 
 
+@lru_cache(maxsize=None)
+def _absorb_step(
+    width: int, capacity_length: int
+) -> Callable[[Array, Array], tuple[Array, None]]:
+    """One absorb-and-permute over a lane-reversed state, as a *stable* callable.
+
+    Absorbing overwrites the rate lanes and leaves capacity alone, and the
+    permutation that follows belongs to the construction rather than to the
+    caller.
+
+    Memoized because `sponge` scans this from eager code as well as from inside
+    a trace: `frx.lax.scan`'s cache is keyed on the body's identity, so a body
+    built per call recompiles the same graph every time — orders of magnitude
+    over the work being scanned, and silent. Keyed on everything it closes over.
+    """
+    permutation = lane_reversed_permutation(width)
+    capacity_lanes = _reversed_lanes(0, capacity_length, width)
+
+    def step(state: Array, chunk: Array) -> tuple[Array, None]:
+        return permutation.permute(_join([state[capacity_lanes], chunk])), None
+
+    return step
+
+
 def compress(operands: Sequence[Array], *, width: int, output_length: int) -> Array:
     """Poseidon in compression mode: `Truncate(Permute(padded) + padded)`.
 
@@ -221,7 +267,7 @@ def compress(operands: Sequence[Array], *, width: int, output_length: int) -> Ar
     if not operands:
         raise ValueError("compress needs at least one operand")
 
-    length = sum(operand.shape[0] for operand in operands)
+    length = _length(operands)
     if length > width:
         raise ValueError(f"{length} operand elements do not fit a width-{width} state")
     # Upstream's own bound, and it is on the unpadded length: truncating to more
@@ -231,7 +277,7 @@ def compress(operands: Sequence[Array], *, width: int, output_length: int) -> Ar
             f"output_length {output_length} exceeds the {length} elements fed in"
         )
 
-    padded = _join([*operands, fnp.zeros(width - length, dtype=operands[0].dtype)])
+    padded = _padded(operands, width)
     state = lane_reversed_permutation(width).permute(padded) + padded
     return state[_reversed_lanes(0, output_length, width)]
 
@@ -264,21 +310,24 @@ def sponge(
         )
 
     rate = width - capacity_length
-    length = sum(operand.shape[0] for operand in operands)
-    dtype = capacity.dtype
+    length = _length(operands)
 
     # Padding to a whole number of chunks makes every absorb the same width, so
     # the block loop needs no tail case.
     absorbed_length = length + (-length % rate)
-    absorbed = _join([*operands, fnp.zeros(absorbed_length - length, dtype=dtype)])
+    absorbed = _padded(operands, absorbed_length)
 
     permutation = lane_reversed_permutation(width)
-    capacity_lanes = _reversed_lanes(0, capacity_length, width)
 
-    state = _join([capacity, fnp.zeros(rate, dtype=dtype)])
-    for block in range(absorbed_length // rate):
-        chunk = absorbed[_reversed_lanes(block * rate, rate, absorbed_length)]
-        state = permutation.permute(_join([state[capacity_lanes], chunk]))
+    # `reverse=True` is what makes the reshape legal: reversal put leanSpec's
+    # block 0 in the *last* row, so walking the rows from the back is walking the
+    # blocks in spec order — no device `reverse`, no per-block slice.
+    state, _ = frx.lax.scan(
+        _absorb_step(width, capacity_length),
+        _padded([capacity], width),
+        absorbed.reshape(absorbed_length // rate, rate),
+        reverse=True,
+    )
 
     squeezed: list[Array] = []
     remaining = output_length
@@ -291,7 +340,7 @@ def sponge(
     return _join(squeezed)
 
 
-def safe_domain_separator(lengths: Sequence[int], capacity_length: int) -> Array:
+def safe_domain_separator(lengths: Sequence[int], *, capacity_length: int) -> Array:
     """A sponge capacity that binds it to one hashing task's shape.
 
     The lengths pack into 32-bit slots, decompose base-p and compress. Two
@@ -299,8 +348,12 @@ def safe_domain_separator(lengths: Sequence[int], capacity_length: int) -> Array
     capacities and cannot collide.
 
     Depends only on the configuration, so a caller hashing many leaves computes
-    it once and hoists it; it is not cached here because the array it returns is
-    concrete and would outlive the backend it was built on.
+    it once and hoists it. Uncached on purpose, and the reason is the seam rather
+    than the cost: `sponge` takes the capacity as an argument and never calls
+    this itself, so the layer above physically cannot land it in a per-block
+    loop — the most it can waste is one permutation per leaf hash, against the
+    ~180 a verification runs. Caching a *concrete array* is also the thing
+    `lane_reversed_permutation` avoids by caching a builder instead.
     """
     packed = 0
     for length in lengths:
