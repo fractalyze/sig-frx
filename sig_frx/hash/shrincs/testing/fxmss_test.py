@@ -46,8 +46,14 @@ def _structure(case: vectors.StatefulVectors) -> fxmss.Structure:
     return fxmss.Structure.parse(np.array([case.shape, case.depth], dtype=np.uint8))
 
 
-def _secrets(case: vectors.StatefulVectors) -> tuple[np.ndarray, np.ndarray]:
-    """`SK.seed` and `PK.seed` out of the 48 bytes key generation takes."""
+def _secrets(
+    case: vectors.StatefulVectors | vectors.DepthZero,
+) -> tuple[np.ndarray, np.ndarray]:
+    """`SK.seed` and `PK.seed` out of the 48 bytes key generation takes.
+
+    Every case records that seed whatever else it records, so this takes the
+    field rather than the case class it came on.
+    """
     return (
         np.frombuffer(case.seed[:16], dtype=np.uint8),
         np.frombuffer(case.seed[32:], dtype=np.uint8),
@@ -286,8 +292,7 @@ class SignerTest(absltest.TestCase):
         them one seed would give the two keys the same stateful third.
         """
         case = vectors.DEPTH_ZERO
-        sk_seed = np.frombuffer(case.seed[:16], dtype=np.uint8)
-        pk_seed = np.frombuffer(case.seed[32:], dtype=np.uint8)
+        sk_seed, pk_seed = _secrets(case)
         roots = {}
         for shape, want in (
             (fxmss.SHAPE_UNBALANCED, case.unbalanced_sf_root),
@@ -323,8 +328,7 @@ class SignerTest(absltest.TestCase):
         exists there would pass it through to an authentication path of no nodes.
         """
         case = vectors.DEPTH_ZERO
-        sk_seed = np.frombuffer(case.seed[:16], dtype=np.uint8)
-        pk_seed = np.frombuffer(case.seed[32:], dtype=np.uint8)
+        sk_seed, pk_seed = _secrets(case)
         for shape in (fxmss.SHAPE_UNBALANCED, fxmss.SHAPE_BALANCED):
             with self.subTest(shape=shape):
                 with self.assertRaisesRegex(ValueError, "no leaf of this tree"):
