@@ -1,95 +1,71 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""Which implementation of a hash a value's namespace calls for.
+"""Which hash each scheme uses, named once.
 
-[`arrays.namespace`](arrays.py) picks the array module off its arguments; this
-picks the `ByteHash` off the same question, and for the same reason. A hash is
-the one operation a scheme reaches for that has two implementations of the same
-function — hash-frx ships a device sponge and a `hashlib` sibling, gated against
-each other — so it is the one place where "a value is used in the namespace it
-arrives in" ([`conventions.md`](../docs/reference/conventions.md)) has an answer
-to give rather than a lift to accept.
+Every hash hash-frx ships is a device row: `digest` takes a tracer and returns
+an `Array`, over messages shaped `[B, L]` where a single message is `B = 1`.
+There is no second implementation to choose between, so nothing here dispatches
+— this module is the one place a scheme's hash is named, not a place a choice is
+made.
 
-**The lift is not forced here, which is the whole of it.** `frx.lax.ntt` has no
-host implementation, so a host argument to `arith.ntt` is lifted because there is
-nowhere else for it to go. A hash is not that: a concrete caller reading its
-digest back immediately is exactly what `hash_frx`'s host rows exist for, and
-naming the device sponge unconditionally spends a dispatch to batch a message
-with itself. So the exemption hashing was granted on the grounds that the lift is
-forced does not survive the grounds being false.
+**It used to be a dispatcher**, because hash-frx shipped a `hashlib` sibling
+beside each device row and which one a call wanted was a property of the values
+rather than of the scheme holding them. `keccak256` was the exception that had
+only ever had one row, and it is now the shape of all of them: hash-frx retired
+its host rows (hash-frx#324), so the namespace question has no second answer to
+give for any hash.
 
-**Which way a call goes is the caller's fact, never the scheme's.** One instance
-verifies under a tracer and signs concretely, so this cannot be a property fixed
-when a scheme is built — it is read off the values at each call, which is what
-makes `verify` keep the device sponge without anything here naming verification.
-
-The reverse direction needs no rule and gets none: a host hash cannot be called
-on a tracer at all, because it reads the message bytes. `ByteHash`'s return type
-is what says so, and it is why nothing below can pick wrong in a way that runs.
+**What that costs the concrete caller**, stated because it is a real cost and
+not a wash: a caller that is not tracing now pays a device dispatch and a
+compilation per distinct message length, where a host row cost neither. Where
+that matters, reach for `hashlib` directly — ECDSA already does, which is what
+`MessageHash.host_constructor` is
+([`classical/ecdsa/core.py`](classical/ecdsa/core.py)): RFC 6979 requires the
+message hash and the HMAC to be one `H`, and the signing path takes that face
+rather than this one.
 """
 
 from __future__ import annotations
 
-from hash_frx import (
-    ByteHash,
-    HostSha256,
-    HostShake128,
-    HostShake256,
-    Keccak256,
-    Sha256,
-    Shake128,
-    Shake256,
-    Xof,
-)
-
-from sig_frx.arrays import traced
+from hash_frx import ByteHash, Keccak256, Sha256, Shake128, Shake256, Xof
 
 
 def shake128(*values: object) -> Xof:
-    """SHAKE128 as the namespace of `values` calls for it.
+    """SHAKE128.
 
     ML-DSA's `G` — `ExpandA` and nothing else, since `G` is the standard's name
     for the 128-bit XOF and only the matrix is sampled from it.
     """
-    return Shake128 if traced(*values) else HostShake128
+    del values  # one row exists; nothing to dispatch on
+    return Shake128
 
 
 def shake256(*values: object) -> Xof:
-    """SHAKE256 as the namespace of `values` calls for it.
+    """SHAKE256.
 
     ML-DSA's `H`, which is the rest of the scheme: the commitment hash, the two
     seed derivations, and the three samplers that are not `ExpandA`.
     """
-    return Shake256 if traced(*values) else HostShake256
+    del values  # one row exists; nothing to dispatch on
+    return Shake256
 
 
 def sha256(*values: object) -> ByteHash:
-    """SHA-256 as the namespace of `values` calls for it.
+    """SHA-256.
 
-    ECDSA's message hash in the FIPS 186-5 pairing: a batch of messages under a
-    tracer on the verification path, one concrete message on the signing path.
-    Fixed-length, so this returns an instance where the XOFs above return a
-    family awaiting an output length.
+    ECDSA's message hash in the FIPS 186-5 pairing. Fixed-length, so this
+    returns an instance where the XOFs above return a family awaiting an output
+    length. The signing path's concrete face is `MessageHash.host_constructor`,
+    not this.
     """
-    return Sha256() if traced(*values) else HostSha256()
+    del values  # one row exists; nothing to dispatch on
+    return Sha256()
 
 
 def keccak256(*values: object) -> ByteHash:
-    """Keccak-256 — the pre-FIPS submission — which only the device row serves.
+    """Keccak-256 — the pre-FIPS submission.
 
-    The stdlib has no keccak to wrap (`hashlib.sha3_256` carries the FIPS
-    domain byte), so hash-frx ships no host sibling and this is the one hash
-    where the lift the module docstring refuses to force is genuinely forced:
-    the namespace question has no host answer to give. Ethereum's address
-    derivation and message framing are the consumers. Being the device
-    sponge, messages arrive as exactly `[B, L]` — a single message is B = 1.
+    Ethereum's address derivation and message framing are the consumers.
 
-    That absence is a decision rather than a gap, so nothing here expires when
-    hash-frx grows another hash. Its host-row criterion — a native library
-    beating device dispatch, *and* a host-shaped consumer — is an AND, and
-    Keccak-256 fails the first: a plain-Python sponge is two orders off what a
-    `Host*` name promises, and paying a dependency to make one native was
-    weighed and refused. See "Which hashes get a host row" in hash-frx's
-    `docs/blocks/hash.md`.
     """
     del values  # one row exists; nothing to dispatch on
     return Keccak256()

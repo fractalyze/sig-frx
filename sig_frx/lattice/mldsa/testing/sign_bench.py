@@ -36,6 +36,7 @@ is committed too.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import time
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any, NamedTuple
@@ -47,8 +48,6 @@ from frx import Array
 from hash_frx import (
     SHAKE128_RATE,
     SHAKE256_RATE,
-    HostShake128,
-    HostShake256,
     Shake128,
     Shake256,
 )
@@ -326,7 +325,7 @@ def _sponge_table(params: ml_dsa.MlDsaParams, message_size: int, reps: int) -> N
     weighted by how many of that call a signature makes. `ExpandA` and `ExpandS`
     are charged zero there because key generation is not what the column is
     about, and they are still timed because the shape is where the batch axis
-    argues back — a host row is a `hashlib` call and `k·ℓ` of them are not one
+    argues back — a `hashlib` loop is a `hashlib` call and `k·ℓ` of them are not one
     dispatch.
     """
     print(
@@ -340,15 +339,20 @@ def _sponge_table(params: ml_dsa.MlDsaParams, message_size: int, reps: int) -> N
             dtype=np.uint8,
         ).reshape(shape.rows, shape.message)
         device_hash = (Shake256 if shape.shake == 256 else Shake128)(shape.output)
-        host_hash = (HostShake256 if shape.shake == 256 else HostShake128)(shape.output)
+        xof = hashlib.shake_256 if shape.shake == 256 else hashlib.shake_128
+
+        def host_digest(rows: np.ndarray = msg, n: int = shape.output) -> np.ndarray:
+            return np.array(
+                [np.frombuffer(xof(bytes(r)).digest(n), dtype=np.uint8) for r in rows],
+                dtype=np.uint8,
+            )
+
         # Byte-equality first: a timing comparison between two hashes that do not
         # agree is a comparison of two different functions.
-        if not np.array_equal(
-            np.asarray(device_hash.digest(msg)), np.asarray(host_hash.digest(msg))
-        ):
-            raise AssertionError(f"{shape.label}: host and device digests differ")
+        if not np.array_equal(np.asarray(device_hash.digest(msg)), host_digest()):
+            raise AssertionError(f"{shape.label}: hashlib and device digests differ")
         device = _fastest(lambda: device_hash.digest(msg), reps)
-        host = _fastest(lambda: host_hash.digest(msg), reps)
+        host = _fastest(host_digest, reps)
         total_device += device * shape.calls
         total_host += host * shape.calls
         print(
