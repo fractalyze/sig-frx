@@ -92,8 +92,11 @@ count sets a different concurrency than the runner's.
 
 ### Running the GPU leg locally
 
-Two environment variables, and without them the leg fails wholesale in a way
-that reads as broken code rather than as a missing flag:
+Why the leg needs its flags, and the control that proves a green one used the
+device rather than quietly measuring a CPU, are the playbook's — it carries them
+as
+[`sections/environment.md`](https://github.com/fractalyze/claude-plugins/blob/main/plugins/playbook/sections/environment.md).
+This is the invocation for this repo:
 
 ```sh
 bazel --bazelrc=.bazelrc.ci test \
@@ -101,17 +104,9 @@ bazel --bazelrc=.bazelrc.ci test \
   --test_env=FRX_PLATFORMS=cuda -- //...
 ```
 
-Dropping `XLA_PYTHON_CLIENT_PREALLOCATE=false` produced 31 failures out of 50 —
-`cudaErrorMemoryAllocation: out of memory`, and `no supported devices found for
-platform CUDA` — because bazel runs the test actions concurrently against one
-device and each process would otherwise claim most of its memory. It is in
-`ci.yml` for that reason and not as a portability workaround.
-
-**A box carrying no CUDA 12 toolkit still runs the leg.** The plugin resolves
-CUDA by soname, so the `nvidia-*-cu12` wheels in a virtualenv are enough on
-`LD_LIBRARY_PATH`, and the repo's pinned frx wheel is still what runs. `ptxas`
-ships in the `cuda_nvcc` wheel rather than beside the runtime, so it is pointed
-at separately:
+`ci.yml` passes exactly those two, and dropping the preallocate one produced 31
+failures out of 50 here. A box carrying no CUDA 12 toolkit adds the runtime and
+`ptxas` by hand; the repo's pinned frx wheel is still what runs:
 
 ```sh
 V=<virtualenv>/lib/python3.11/site-packages/nvidia
@@ -125,24 +120,6 @@ bazel --bazelrc=.bazelrc.ci test \
 
 A bench is a `bazel run` rather than a test, and takes the same environment
 through `--run_under="env ..."` instead of `--test_env`.
-
-**A green leg is evidence of the device, and that is checkable rather than
-assumed.** `cuda` is strict — there is no CPU fallback — so a passing run did
-use the GPU. The control that establishes it is the same target under
-`LD_LIBRARY_PATH=/nonexistent`, which dies instead of quietly measuring a CPU:
-
-```
-RuntimeError: jaxlib/cuda/versions_helpers.cc:38: operation
-cudaRuntimeGetVersion(&version) failed: Error loading CUDA libraries.
-RuntimeError: Unable to load CUDA. Is it installed?
-RuntimeError: Unable to initialize backend 'cuda': Backend 'cuda' is not in the
-list of known backends: ['cpu', 'tpu'].
-```
-
-The last line is the one that carries the claim: `cpu` is in that list and the
-run died anyway, rather than selecting it. That negative control is the part
-worth keeping. A reader who copies the invocation and mistypes a path needs to
-know the run would have failed rather than reported a suspiciously slow GPU.
 
 ### `size` moves two things and `timeout` moves one
 
@@ -181,99 +158,45 @@ stage is 0.8% of a verify, and nothing else about that function explains its
 shape.
 
 They are also the least rechecked claim here: written once, true when written,
-and read a milestone later as though still measured. So what a recorded number
-has to be is worth stating, and every rule below is here because a number that
-broke it was written down and believed.
+and read a milestone later as though still measured. Every anchor below is here
+because a number that broke a rule was written down and believed.
 
-### An A/B is interleaved, or the first number is the one you believe
+### The rules are the playbook's; the evidence behind them is this repo's
 
-Time the two forms alternately and take a median over enough samples that the
-spread is visible — not all of A and then all of B. Run-to-run spread on these
-stages is around 20% (±1.0 ms on 5 ms), so one sequential block lands anywhere
-in that range and there is nothing in the number that says where.
+What a recorded number has to be — an interleaved A/B, a share and its total
+from one session, an isolated stage read as a bound rather than an estimate, a
+bench that proves its two columns are two programs — follows from how
+measurement works rather than from what this repo computes. No repo owns it and
+a copy per repo is how it drifts, so the playbook carries it as
+[`sections/measurement.md`](https://github.com/fractalyze/claude-plugins/blob/main/plugins/playbook/sections/measurement.md).
 
-Twice, the number a sequential block returned would have decided differently:
+What is this repo's is the evidence, and it belongs where the modules arguing
+from it can cite it:
 
-- 20 samples per form in sequential blocks reported **1.07x** for a change that
-  3x40-sample interleaved medians put at **1.38x** — identical code, same box,
-  idle machine.
-- A three-sample smoke run reported **1.75x** on a Falcon `verify` for a change
-  whose interleaved median is **1.01x**.
+| the rule it anchors | measured here |
+|---|---|
+| an A/B is interleaved | sequential blocks read **1.07x** where interleaved medians read **1.38x**; a three-sample smoke run read **1.75x** on a Falcon `verify` whose median is **1.01x** — the honest answer was "no difference", which is the answer a sloppy A/B is least likely to return |
+| a share comes from one session | the decoder stage moved 5.8 to **7.3 ms** (25%) across two sessions on unchanged code while `verify` (21.7 against 21.0) and `HashToPoint` (14.7 against 14.5) held to 4% |
+| an isolated stage is a bound | `rejection.first_accepted`'s scatter wins its stage by 1.3-6.3x on CPU and 1.0-4.6x on GPU while `verify` stays flat at 0.96-1.04x, and the `ExpandA` compaction times **1.397 ms inside a `verify` costing 0.760 ms** |
+| a fused prefix does not repair it | [`decoder_bench`](../../sig_frx/lattice/falcon/testing/decoder_bench.py) prices each step as the whole decoder *stopped* there; collapsing the 48% within-byte chain to a `[256, 9]` lookup takes the step 1.84-2.54x and moves `verify` 0.98-1.00x, at 12% on CPU `sig_decode` |
 
-The second is the one worth remembering, because the honest answer there was "no
-difference" — and that is the answer a sloppy A/B is least likely to return.
-Noise manufactures differences; it does not manufacture ties.
+Two of those decide something a reader would otherwise have to guess at.
+`falcon.py` states its GPU stage division at `B` = 1024 rather than the 256 its
+CPU table uses — the batch is not the decision there, the session is. And the
+decoder breakdown still earned its keep: it moved the work off a `searchsorted`
+that was 15% of the decoder onto the chain that was 48%, ranking correctly and
+unable to price the fix, which is the whole rule in one example.
 
-### A share comes from one session, or it is not a share
+**A docstring stating a stage ratio says so in those words.**
 
-A stage and the total it is a share of are taken together, or the share is not
-stated. On unchanged code across two sessions the decoder stage moved from 5.8
-to **7.3 ms** — 25% — while the `verify` containing it (21.7 against 21.0) and
-`HashToPoint` beside it (14.7 against 14.5) both held to 4%. The drift is real
-and it is not uniform across stages, so it cannot be divided out: a numerator
-from one run over a denominator from another compares two machines and reports
-the difference as a property of the code.
-
-It is why `falcon.py` states its GPU stage division at `B` = 1024 rather than at
-the 256 its CPU table uses. The batch is not the decision there; the session is.
-
-### Every decomposition prices a program cut where the real one is whole
-
-Time the operation, not only the stage. When the two disagree the operation is
-the one that is about what a caller waits for, and they disagree by a lot:
-`rejection.first_accepted`'s scatter form wins its isolated stage by 1.3-6.3x on
-CPU and 1.0-4.6x on GPU, at nearly every site and batch, while `verify` is flat
-on both legs at 0.96-1.04x.
-
-The tell is stark. Timed on its own at `B` = 1024, the `ExpandA` compaction
-costs **1.397 ms inside a `verify` that costs 0.760 ms in total**. A component
-dearer than its whole is proof the standalone program is paying for memory
-traffic that does not exist in situ — the compaction is fused with the SHAKE
-that produces its candidates and the arithmetic that consumes its survivors, so
-it never makes the round trip a benchmark forces on it.
-
-**Fusing the step into the prefix that precedes it does not repair that.** It is
-the obvious fix and it fails, which is what makes it worth writing down.
-[`decoder_bench`](../../sig_frx/lattice/falcon/testing/decoder_bench.py) prices
-each step of `decompress` as the whole decoder *stopped* after that step, so
-every rung is already fused with everything above it. The within-byte chain came
-out at 48% of the decoder on GPU; collapsing it to a `[256, 9]` lookup takes the
-step 1.84-2.54x, moves `verify` by 0.98-1.00x, and costs CPU `sig_decode` 12%.
-Two residues a prefix ladder cannot remove:
-
-- a rung has to return something or the compiler deletes it, so it ends in a
-  reduction — a fusion barrier the whole function never pays;
-- dependent steps are **latency, not throughput**. Seven serial steps look
-  expensive as the last thing in a program; in situ the code around them has
-  enough independent work to cover them, so removing them frees a dependency
-  chain nothing was waiting on.
-
-So an isolated stage bounds what changing it can buy and does not estimate it,
-a fused prefix is the tighter bound and still not an estimate, and the A/B is
-budgeted against the operation from the start rather than after a stage figure
-has already been believed.
-
-None of which says don't profile. A per-part breakdown answers a different
-question well: it *ranks* what to try next, and it cannot *price* the fix. The
-decoder's breakdown earned its keep by moving the work off a `searchsorted` that
-was 15% of the decoder and onto the chain that was 48% — and the change it
-pointed at then bought nothing, which is the half only the operation could
-report.
-
-A docstring stating a stage ratio says so in those words.
-
-### A benchmark proves its two columns are two programs
-
-Two ways a bench reports a number for work it did not do, both of which read as
-results rather than as failures.
+### Two shapes the "prove the experiment fired" rule takes here
 
 **Routing that does not reach the trace.** Measuring the operation rather than
 the stage means swapping the form underneath it — a module attribute like
 `rejection.first_accepted` or `encoding.decompress`. If the swap misses, both
-columns time one executable and print **1.00x**, which is exactly what a real
-"this change is worth nothing" result looks like — and one of the two real
-results here *was* 1.00x. The clock cannot separate them, so ask the program
-instead:
+columns time one executable and print **1.00x**, which is what a real "worth
+nothing" result looks like, and one of the two real results here *was* 1.00x. So
+`decoder_bench` asks the program instead of the clock:
 
 ```python
 sizes[label] = len(program.lower(data).as_text().splitlines())
@@ -282,12 +205,12 @@ if len(set(sizes.values())) == 1:
 ```
 
 998 lines against 814, for the two decoder forms. A rung that takes its form as
-a *parameter* cannot stand in for that check — it differs even when the routing
-is dead. Same family, one level down: build a fresh `jit` per form, or the
-second lowering answers out of the first one's trace cache and one form is timed
-twice.
+a *parameter* cannot stand in — it differs even when the routing is dead. Same
+family one level down: build a fresh `jit` per form, or the second lowering
+answers out of the first one's trace cache and one form is timed twice.
 
-**Input the operation rejects before evaluating it.** Both lattice schemes
+**Input the operation rejects before evaluating it.** This one is the scheme's
+rather than the harness's, which is why it stays here. Both lattice schemes
 return `false` for a whole batch *without computing anything* when a key or
 signature length is wrong (FIPS 204 §3.6.2), so a mis-shaped batch still times —
 fast, stable, and reading as a speedup. A benchmark over a rejectable input
