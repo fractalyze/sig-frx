@@ -1,5 +1,5 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""MuSig2 key aggregation and tweaking per BIP-327, over BIP-340's substrate.
+"""MuSig2 per BIP-327, over BIP-340's substrate.
 
 MuSig2 aggregates `u` cosigner keys into one x-only key, and what it produces
 under that key is an ordinary BIP-340 signature — so this module borrows
@@ -58,10 +58,10 @@ _CURVE = secp.SECP256K1
 _KEYAGG_LIST = hashlib.sha256(b"KeyAgg list").digest()
 _KEYAGG_COEFF = hashlib.sha256(b"KeyAgg coefficient").digest()
 
-_PUBKEY_SIZE = 33
-_TWEAK_SIZE = 32
+# A compressed point, which is both a cosigner key and half a pubnonce.
+_POINT_SIZE = 33
+_PUBNONCE_SIZE = 2 * _POINT_SIZE
 _SCALAR_SIZE = 32
-_PUBNONCE_SIZE = 66
 
 # BIP-327's own tag prefixes for the nonce derivation.
 _AUX_TAG = hashlib.sha256(b"MuSig/aux").digest()
@@ -94,7 +94,7 @@ def _parse_point(data: bytes, signer: int, contrib: str) -> tuple[int, int]:
     it, so a key above `p` that reached the lift would raise from inside the
     substrate with no cosigner index left to name.
     """
-    if len(data) != _PUBKEY_SIZE or data[0] not in (2, 3):
+    if len(data) != _POINT_SIZE or data[0] not in (2, 3):
         raise InvalidContributionError(signer, contrib)
     x = int.from_bytes(data[1:], "big")
     if x >= _CURVE.p:
@@ -161,8 +161,8 @@ class KeyAggContext:
         wants is its own convention — a taproot output commits with the x-only
         form — so neither is a default here.
         """
-        if len(tweak) != _TWEAK_SIZE:
-            raise ValueError(f"a tweak is {_TWEAK_SIZE} bytes, not {len(tweak)}")
+        if len(tweak) != _SCALAR_SIZE:
+            raise ValueError(f"a tweak is {_SCALAR_SIZE} bytes, not {len(tweak)}")
         value = int.from_bytes(tweak, "big")
         if value >= _CURVE.n:
             raise ValueError("the tweak must be less than the group order")
@@ -179,11 +179,6 @@ class KeyAggContext:
         )
 
 
-def _compressed(x: int, y: int) -> bytes:
-    """SEC 1 compressed form — the parity byte and the x coordinate."""
-    return bytes([2 + (y & 1)]) + x.to_bytes(_SCALAR_SIZE, "big")
-
-
 @dataclass(frozen=True)
 class SecNonce:
     """One signer's secret nonce pair, drawn for exactly one signing session.
@@ -193,7 +188,10 @@ class SecNonce:
     concurrent-session attack that MuSig2's two-nonce construction exists to
     survive. It is not a liveness abort the way a FROST round failure is; the
     key is gone. Signing therefore consumes this and hands back nothing that
-    can be spent again, the shape `Xmss` already uses for its leaf counter.
+    can be spent again — the shape `Xmss` uses for its leaf counter, though
+    only the shape: an advanced index makes a spent key visible, and a nonce
+    has no such tell. Nothing here or in `sign` can detect reuse; the type
+    exists so that a caller has to write the reuse down to commit it.
 
     `public_key` is the signer's own, carried so that signing can refuse a
     nonce drawn for a different key rather than produce a partial signature
@@ -233,7 +231,7 @@ def _nonce_hash(
     extra_input: bytes,
     index: int,
 ) -> int:
-    """One of the two nonce scalars, before reduction.
+    """One of the two nonce scalars.
 
     Every variable-length field carries its own length, so no two distinct
     inputs can concatenate to the same buffer.
@@ -251,13 +249,13 @@ def _nonce_hash(
             index.to_bytes(1, "big"),
         )
     )
-    return int.from_bytes(bip340.tagged(_NONCE_TAG, payload), "big")
+    return int.from_bytes(bip340.tagged(_NONCE_TAG, payload), "big") % _CURVE.n
 
 
 def nonce_gen(
     rand: bytes,
-    *,
     public_key: bytes,
+    *,
     secret_key: bytes | None = None,
     aggregate_key: bytes | None = None,
     message: bytes | None = None,
@@ -275,8 +273,8 @@ def nonce_gen(
     randomness was not. Passing what is known is always at least as safe as
     passing nothing.
     """
-    if len(public_key) != _PUBKEY_SIZE:
-        raise ValueError(f"a public key is {_PUBKEY_SIZE} bytes, not {len(public_key)}")
+    if len(public_key) != _POINT_SIZE:
+        raise ValueError(f"a public key is {_POINT_SIZE} bytes, not {len(public_key)}")
     if secret_key is not None:
         mask = bip340.tagged(_AUX_TAG, rand)
         rand = bytes(a ^ b for a, b in zip(secret_key, mask, strict=True))
@@ -291,14 +289,13 @@ def nonce_gen(
             extra_input or b"",
             index,
         )
-        % _CURVE.n
         for index in (0, 1)
     ]
-    if not all(scalars):
+    if 0 in scalars:
         raise ValueError("the nonce derivation produced a zero scalar")
 
     points = [secp.host_multiple_of_g(_CURVE, scalar) for scalar in scalars]
-    pubnonce = b"".join(_compressed(x, y) for x, y in points)
+    pubnonce = b"".join(secp.compressed_bytes(_CURVE, x, y) for x, y in points)
     return SecNonce(scalars[0], scalars[1], public_key), pubnonce
 
 
@@ -321,8 +318,8 @@ def _serialize_ext(point: np.ndarray) -> bytes:
     other does not, and signing continues from it.
     """
     if bool(secp.is_identity(_CURVE, point)[0]):
-        return bytes(_PUBKEY_SIZE)
-    return _compressed(*secp.affine_ints(_CURVE, point)[0])
+        return bytes(_POINT_SIZE)
+    return secp.compressed_bytes(_CURVE, *secp.affine_ints(_CURVE, point)[0])
 
 
 def nonce_agg(pubnonces: Sequence[bytes]) -> bytes:
@@ -342,9 +339,9 @@ def nonce_agg(pubnonces: Sequence[bytes]) -> bytes:
     for half in (0, 1):
         parsed = []
         for signer, pubnonce in enumerate(pubnonces):
-            if len(pubnonce) != _PUBNONCE_SIZE:
+            if half == 0 and len(pubnonce) != _PUBNONCE_SIZE:
                 raise InvalidContributionError(signer, "pubnonce")
-            window = pubnonce[half * _PUBKEY_SIZE : (half + 1) * _PUBKEY_SIZE]
+            window = pubnonce[half * _POINT_SIZE : (half + 1) * _POINT_SIZE]
             parsed.append(_parse_point(window, signer, "pubnonce"))
         points = _lift_all(parsed, "pubnonce")
         halves.append(secp.sum_points(_CURVE, points))

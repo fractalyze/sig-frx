@@ -21,10 +21,10 @@ py_library(
     ],
 )
 
-# MuSig2 key aggregation over BIP-340's substrate — the tagged-hash
-# construction and the curve are `bip340`'s, and the signing rounds land above
-# this. Not on the seam: a two-round interactive protocol has no seam-shaped
-# `sign`, and its output is a BIP-340 signature, so it adds no verifier.
+# MuSig2 over BIP-340's substrate — the tagged-hash construction, the curve
+# and the even-y convention are `bip340`'s. Not on the seam: a two-round
+# interactive protocol has no seam-shaped `sign`, and its output is a BIP-340
+# signature, so it adds no verifier of its own.
 py_library(
     name = "musig2",
     srcs = [

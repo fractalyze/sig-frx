@@ -108,19 +108,22 @@ class NonceGenTest(absltest.TestCase):
         super().setUp()
         self.data = _load("bip327_nonce_gen_vectors", "nonce_gen_vectors.json")
 
+    def _generate(self, case: dict[str, Any]) -> tuple[Any, bytes]:
+        return musig2.nonce_gen(
+            bytes.fromhex(case["rand_"]),
+            bytes.fromhex(case["pk"]),
+            secret_key=_optional(case["sk"]),
+            aggregate_key=_optional(case["aggpk"]),
+            message=_optional(case["msg"]),
+            extra_input=_optional(case["extra_in"]),
+        )
+
     def test_the_published_nonces(self) -> None:
         cases = self.data["test_cases"]
         self.assertNotEmpty(cases)
         for index, case in enumerate(cases):
             with self.subTest(case=index):
-                secnonce, pubnonce = musig2.nonce_gen(
-                    bytes.fromhex(case["rand_"]),
-                    public_key=bytes.fromhex(case["pk"]),
-                    secret_key=_optional(case["sk"]),
-                    aggregate_key=_optional(case["aggpk"]),
-                    message=_optional(case["msg"]),
-                    extra_input=_optional(case["extra_in"]),
-                )
+                secnonce, pubnonce = self._generate(case)
                 self.assertEqual(
                     secnonce.to_bytes().hex().upper(),
                     case["expected_secnonce"].upper(),
@@ -135,22 +138,15 @@ class NonceGenTest(absltest.TestCase):
         case = self.data["test_cases"][0]
         rand = bytes.fromhex(case["rand_"])
         public_key = bytes.fromhex(case["pk"])
-        absent = musig2.nonce_gen(rand, public_key=public_key, message=None)
-        empty = musig2.nonce_gen(rand, public_key=public_key, message=b"")
+        absent = musig2.nonce_gen(rand, public_key, message=None)
+        empty = musig2.nonce_gen(rand, public_key, message=b"")
         self.assertNotEqual(absent[1], empty[1])
 
     def test_the_secnonce_carries_the_key_it_was_drawn_for(self) -> None:
         """Its tail is the signer's own public key, which is what lets signing
         refuse a secnonce drawn for a different key rather than sign with it."""
         case = self.data["test_cases"][0]
-        secnonce, _ = musig2.nonce_gen(
-            bytes.fromhex(case["rand_"]),
-            public_key=bytes.fromhex(case["pk"]),
-            secret_key=_optional(case["sk"]),
-            aggregate_key=_optional(case["aggpk"]),
-            message=_optional(case["msg"]),
-            extra_input=_optional(case["extra_in"]),
-        )
+        secnonce, _ = self._generate(case)
         self.assertEqual(secnonce.public_key.hex().upper(), case["pk"].upper())
 
 
@@ -200,6 +196,21 @@ class NonceAggTest(absltest.TestCase):
                     musig2.nonce_agg(self._nonces(case))
                 self.assertEqual(caught.exception.signer, case["error"]["signer"])
                 self.assertEqual(caught.exception.contrib, "pubnonce")
+
+    def test_a_nonce_of_the_wrong_length_is_refused(self) -> None:
+        """No published case is mis-sized, and a short one would be caught by
+        the point parse anyway — so an over-long nonce is the only thing the
+        length check alone rejects, and it would otherwise go untested."""
+        good = bytes.fromhex(self.data["pnonces"][0])
+        for position in (0, 1):
+            for bad in (good + b"\x00", good[:-1]):
+                nonces = [good, good]
+                nonces[position] = bad
+                with self.subTest(position=position, length=len(bad)):
+                    with self.assertRaises(musig2.InvalidContributionError) as caught:
+                        musig2.nonce_agg(nonces)
+                    self.assertEqual(caught.exception.signer, position)
+                    self.assertEqual(caught.exception.contrib, "pubnonce")
 
     def test_a_bad_nonce_is_named_at_whatever_position_it_sits(self) -> None:
         """As with key aggregation, each published case fixes one position, so

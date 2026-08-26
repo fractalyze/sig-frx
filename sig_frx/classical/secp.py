@@ -394,6 +394,20 @@ def schnorr_verdicts(
     return np.array(verdicts, dtype=bool)
 
 
+def compressed_bytes(curve: Curve, x: int, y: int) -> bytes:
+    """One point as SEC 1 `02|03 ‖ X` — the parity byte and the x coordinate.
+
+    The width comes off the curve's base field, which is the coordinate's own,
+    rather than off a scalar: the two agree on secp256k1 and need not.
+
+    What a caller does about the identity is the caller's, because the schemes
+    disagree: BIP-327 encodes it as an all-zero point and RFC 9591 says it has
+    no encoding at all. This encodes whatever coordinates it is handed.
+    """
+    width = (curve.p.bit_length() + 7) // 8
+    return (2 + (y & 1)).to_bytes(1, "big") + x.to_bytes(width, "big")
+
+
 def uncompressed_rows(curve: Curve, points: ArrayLike, ok: ArrayLike) -> np.ndarray:
     """Each point as SEC 1 `04 ‖ X ‖ Y`, masked rows zeroed: `uint8[B, 65]`.
 
