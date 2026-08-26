@@ -44,7 +44,7 @@ from dataclasses import dataclass
 
 import frx.numpy as fnp
 import numpy as np
-from frx import Array
+from frx import Array, lax
 from frx.typing import ArrayLike
 
 from sig_frx.hash import bytestring, tree
@@ -83,6 +83,31 @@ STRUCTURE_BYTES = 2
 # implementation hangs; this refuses, at a bound past anything a signer would
 # choose, since a million leaves is already thirty million chain walks.
 MAX_LEAVES = 2**20
+
+# How many of the walk's levels one scan step carries.
+#
+# The walk is `HEIGHT` levels whatever a tree's depth, and unrolling all of them
+# is most of what a traced verifier compiles. Measured at `B = 4`, same process,
+# interleaved — a compiled `Shrincs.verify` end to end, and the eager walk on its
+# own, because the suite still runs eager:
+#
+#     walk form          verify compile   verify warm   eager walk
+#     a Python loop              37.5 s       2.57 ms       950 ms
+#     scan, unroll 1             13.1 s       3.51 ms       549 ms
+#     scan, unroll 15            15.8 s       2.58 ms      1325 ms
+#
+# 15 is chosen for the traced path, which is the delivery path: it holds warm
+# latency at the loop's while cutting the compile 2.4x, where unrolling one level
+# at a time cuts more compile and gives back a third of the warm call. The eager
+# column is the cost — a scan re-traces its body per call off a jit, so a body
+# fifteen levels deep costs fifteen levels of tracing every time, and only the
+# suite pays it. It comes back cheaper anyway: `shrincs_traced_test` went 227 s
+# to 77 s, which is more than the eager cases lose.
+#
+# 15 divides 255, so the last step is whole. The floor under all of this is the
+# stateless leg, which compiles in 10.6 s of the 15.8 on its own — cutting the
+# walk further buys correspondingly less.
+_WALK_UNROLL = 15
 
 
 @dataclass(frozen=True)
@@ -261,15 +286,17 @@ def root_from_sig(
     # `parents` carries the index shifted right by the steps already run, so at
     # the top of a step it is `index >> step`: its low bit is the side this node
     # falls on, and one more shift makes it the parent's own index.
-    parents = indices
-    for step in range(HEIGHT):
-        siblings = path[:, step, :]
-        # The low bit of the running shift, not bit `step` of the original. Reading
-        # the original means indexing the byte that holds bit `step`, which runs off
-        # the front of an eight-byte index once `step` reaches 64 — and a tree at
-        # the format's full height has 191 steps past that, every one of which must
-        # fall left because an index has no bits up there. The shift feeds in zeros
-        # and gives that for free.
+    def climb(
+        carry: tuple[Array, Array], step: tuple[Array, Array]
+    ) -> tuple[tuple[Array, Array], None]:
+        nodes, parents = carry
+        siblings, index = step
+        # The low bit of the running shift, not bit `index` of the original.
+        # Reading the original means indexing the byte that holds that bit, which
+        # runs off the front of an eight-byte index once it reaches 64 — and a
+        # tree at the format's full height has 191 steps past that, every one of
+        # which must fall left because an index has no bits up there. The shift
+        # feeds in zeros and gives that for free.
         on_the_right = (parents[:, -1] & np.uint8(1))[:, None]
         left = fnp.where(on_the_right, siblings, nodes)
         right = fnp.where(on_the_right, nodes, siblings)
@@ -280,13 +307,20 @@ def root_from_sig(
         # `adrs_encoding` can only width-check a concrete field — so the overflow
         # would wrap into the slot silently rather than raise, which is why the
         # clamp is here and not left to the encoder to catch.
-        parent_heights = fnp.minimum(heights + (step + 1), np.uint32(HEIGHT))
+        parent_heights = fnp.minimum(heights + (index + 1), np.uint32(HEIGHT))
         combined = tweak.h(
             pk_seed,
             sf_adrs.encode_batch(sf_adrs.fxmss_tree(parent_heights, parents)),
             fnp.concatenate([left, right], axis=-1),
         )
-        nodes = fnp.where((step < depths)[:, None], combined, nodes)
+        return (fnp.where((index < depths)[:, None], combined, nodes), parents), None
+
+    (nodes, _), _ = lax.scan(
+        climb,
+        (nodes, indices),
+        (fnp.swapaxes(path, 0, 1), fnp.arange(HEIGHT, dtype=fnp.uint32)),
+        unroll=_WALK_UNROLL,
+    )
     return nodes, accepted
 
 
