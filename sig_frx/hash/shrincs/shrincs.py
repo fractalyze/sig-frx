@@ -359,10 +359,17 @@ class Shrincs:
         if signatures.shape[1] != self.signature_max_size:
             return fnp.zeros(batch, dtype=bool)
 
+        # Both paths run for every entry and the indicator selects — there is no
+        # branch to take, here or under a tracer. The stateless leg is reached as
+        # a component rather than through `Stateless.verify`, whose preamble is
+        # this one again and whose wrong-width verdict cannot fire: the two sizes
+        # are the same number.
         indicators = signatures[:, 0]
         return fnp.where(
             indicators == np.uint8(stateless.STATELESS_INDICATOR),
-            self.stateless.verify(keys, messages, signatures, context=context),
+            stateless.accepts(
+                self.stateless.slh_dsa, keys, messages, signatures, context
+            ),
             self._verify_stateful(keys, messages, signatures, context),
         )
 

@@ -41,6 +41,13 @@ def _rows(*values: bytes) -> np.ndarray:
     return np.stack([np.frombuffer(v, dtype=np.uint8) for v in values])
 
 
+def _one_bit_flipped(signature: bytes) -> bytes:
+    """The same signature, one bit of its body different."""
+    broken = bytearray(signature)
+    broken[17] ^= 0x80
+    return bytes(broken)
+
+
 def _ctx(context: bytes) -> np.ndarray | None:
     """The context as the seam takes it: a `uint8` array, `None` meaning empty."""
     return np.frombuffer(context, dtype=np.uint8) if context else None
@@ -257,6 +264,72 @@ class RejectionTest(absltest.TestCase):
                     _verdicts(self.scheme, [replace(self.case, signature=signature)]),
                     [False],
                 )
+
+
+class ComponentTest(absltest.TestCase):
+    """`accepts` — the wrapper without the door in front of it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.scheme = stateless.Stateless()
+        self.case = vectors.REFERENCE[1]  # the one with a non-empty context
+
+    def _parsed(
+        self, case: vectors.StatelessVectors
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+        return (
+            _rows(case.public_key),
+            _rows(case.message),
+            _rows(case.signature),
+            _ctx(case.context),
+        )
+
+    def test_it_agrees_with_the_public_verifier(self) -> None:
+        """The class is this function plus a preamble, so the two cannot differ.
+
+        Both a signature that verifies and one that does not: a component that
+        returned `True` unconditionally would agree with the verifier on the
+        first and not the second.
+        """
+        for label, signature in (
+            ("as issued", self.case.signature),
+            ("tampered", _one_bit_flipped(self.case.signature)),
+        ):
+            case = replace(self.case, signature=signature)
+            keys, messages, signatures, context = self._parsed(case)
+            with self.subTest(label):
+                np.testing.assert_array_equal(
+                    np.asarray(
+                        stateless.accepts(
+                            self.scheme.slh_dsa, keys, messages, signatures, context
+                        )
+                    ),
+                    np.asarray(
+                        self.scheme.verify(keys, messages, signatures, context=context)
+                    ),
+                )
+
+    def test_a_wrong_width_raises_here_and_is_a_verdict_at_the_door(self) -> None:
+        """The one place the two deliberately part.
+
+        A verifier handed a signature of the wrong length answers no — that is a
+        thing the world can send it. A component handed one has a caller inside
+        the package that got the format wrong, and saying `False` would let that
+        caller keep going.
+        """
+        case = replace(self.case, signature=self.case.signature + b"\x00")
+        keys, messages, signatures, context = self._parsed(case)
+        self.assertEqual(
+            [
+                bool(v)
+                for v in np.asarray(
+                    self.scheme.verify(keys, messages, signatures, context=context)
+                )
+            ],
+            [False],
+        )
+        with self.assertRaisesRegex(ValueError, r"stateless signature batch is"):
+            stateless.accepts(self.scheme.slh_dsa, keys, messages, signatures, context)
 
 
 class ShapeTest(absltest.TestCase):
