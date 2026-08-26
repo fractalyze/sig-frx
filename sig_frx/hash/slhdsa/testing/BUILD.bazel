@@ -51,6 +51,7 @@ py_test(
         "//sig_frx:context",
         "//sig_frx/hash:tree",
         "//sig_frx/hash:tweakable",
+        "//sig_frx/hash:wots",
         "//sig_frx/hash/slhdsa:fors",
         "//sig_frx/hash/slhdsa:hypertree",
         "//sig_frx/hash/slhdsa:slh_dsa",

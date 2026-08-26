@@ -22,19 +22,16 @@ from absl.testing import absltest
 from hash_frx import Sha256
 
 from sig_frx.hash.shrincs import fxmss, shrincs
+from sig_frx.hash.shrincs.testing import harness
 from sig_frx.hash.shrincs.testing import stateful_vectors as vectors
 from sig_frx.hash.tweakable import Sha2TweakableHash
 
 _TWEAK = Sha2TweakableHash(Sha256(), n=16, m=24)
 
 
-def _rows(*values: bytes) -> np.ndarray:
-    return np.stack([np.frombuffer(v, dtype=np.uint8) for v in values])
-
-
 def _padded(case: vectors.StatefulVectors) -> bytes:
     """The FXMSS signature, zero-padded to the widest the format allows."""
-    body = case.signature[17 + case.leaf_index_size :]
+    body = harness.fxmss_body(case)
     return body + bytes(fxmss.SIGNATURE_SIZE_MAX - len(body))
 
 
@@ -111,11 +108,11 @@ class RootTest(absltest.TestCase):
             with self.subTest(case.label, depth=case.leaf_depth):
                 roots, accepted = fxmss.root_from_sig(
                     _TWEAK,
-                    _rows(case.pk_seed),
-                    _rows(_padded(case)),
-                    _rows(case.message_digest),
+                    harness.rows(case.pk_seed),
+                    harness.rows(_padded(case)),
+                    harness.rows(case.message_digest),
                     np.array([case.leaf_height], dtype=np.uint32),
-                    _rows(_index(case)),
+                    harness.rows(_index(case)),
                 )
                 self.assertEqual(list(np.asarray(accepted)), [True])
                 self.assertEqual(bytes(np.asarray(roots)[0]), case.sf_root)
@@ -129,11 +126,11 @@ class RootTest(absltest.TestCase):
         cases = list(vectors.REFERENCE)
         roots, accepted = fxmss.root_from_sig(
             _TWEAK,
-            _rows(*(c.pk_seed for c in cases)),
-            _rows(*(_padded(c) for c in cases)),
-            _rows(*(c.message_digest for c in cases)),
+            harness.rows(*(c.pk_seed for c in cases)),
+            harness.rows(*(_padded(c) for c in cases)),
+            harness.rows(*(c.message_digest for c in cases)),
             np.array([c.leaf_height for c in cases], dtype=np.uint32),
-            _rows(*(_index(c) for c in cases)),
+            harness.rows(*(_index(c) for c in cases)),
         )
         self.assertEqual(list(np.asarray(accepted)), [True] * len(cases))
         self.assertEqual(
@@ -146,11 +143,11 @@ class RootTest(absltest.TestCase):
         body[fxmss.SIGNATURE_SIZE_MIN - 1] ^= 0x01  # the first auth-path node
         roots, _ = fxmss.root_from_sig(
             _TWEAK,
-            _rows(case.pk_seed),
-            _rows(bytes(body)),
-            _rows(case.message_digest),
+            harness.rows(case.pk_seed),
+            harness.rows(bytes(body)),
+            harness.rows(case.message_digest),
             np.array([case.leaf_height], dtype=np.uint32),
-            _rows(_index(case)),
+            harness.rows(_index(case)),
         )
         self.assertNotEqual(bytes(np.asarray(roots)[0]), case.sf_root)
 
@@ -163,11 +160,11 @@ class RootTest(absltest.TestCase):
         case = vectors.REFERENCE[1]
         roots, _ = fxmss.root_from_sig(
             _TWEAK,
-            _rows(case.pk_seed),
-            _rows(_padded(case)),
-            _rows(case.message_digest),
+            harness.rows(case.pk_seed),
+            harness.rows(_padded(case)),
+            harness.rows(case.message_digest),
             np.array([case.leaf_height], dtype=np.uint32),
-            _rows((case.leaf_index ^ 1).to_bytes(8, "big")),
+            harness.rows((case.leaf_index ^ 1).to_bytes(8, "big")),
         )
         self.assertNotEqual(bytes(np.asarray(roots)[0]), case.sf_root)
 
@@ -178,11 +175,11 @@ class RootTest(absltest.TestCase):
             with self.subTest(height=height):
                 roots, _ = fxmss.root_from_sig(
                     _TWEAK,
-                    _rows(case.pk_seed),
-                    _rows(_padded(case)),
-                    _rows(case.message_digest),
+                    harness.rows(case.pk_seed),
+                    harness.rows(_padded(case)),
+                    harness.rows(case.message_digest),
                     np.array([height], dtype=np.uint32),
-                    _rows(_index(case)),
+                    harness.rows(_index(case)),
                 )
                 self.assertNotEqual(bytes(np.asarray(roots)[0]), case.sf_root)
 
@@ -281,7 +278,7 @@ class SignerTest(absltest.TestCase):
                     case.leaf_height,
                     case.leaf_index,
                 )
-                body = case.signature[17 + case.leaf_index_size :]
+                body = harness.fxmss_body(case)
                 self.assertEqual(bytes(np.asarray(signature)), body)
 
     def test_a_depth_zero_tree_still_has_a_root(self) -> None:

@@ -44,7 +44,12 @@ Field = adrs.Field
 # assembles the window in. A digit may start part-way into a byte, so the window
 # has to hold `b` bits from any of the eight offsets within one.
 _MAX_WINDOW_BYTES = 4
-_MAX_DIGIT_BITS = 8 * _MAX_WINDOW_BYTES - 7
+# The widest digit the window can hold from any bit offset within a byte, and so
+# the whole of what `base_2b` is defined over. Public because it is the shared
+# layer's own domain: a scheme's table is right about `lg_w` or `a` when the
+# widths it asks for fall inside this, and that is a claim the scheme's own tests
+# can make without this file having to know the scheme exists.
+MAX_DIGIT_BITS = 8 * _MAX_WINDOW_BYTES - 7
 
 
 @dataclass(frozen=True)
@@ -135,12 +140,12 @@ def base_2b(data: ArrayLike, b: int, out_len: int) -> Array:
     Rank is preserved the way the callers expect: `[L]` gives `[1, out_len]` and
     `[B, L]` gives `[B, out_len]`.
     """
-    if b > _MAX_DIGIT_BITS:
+    if b > MAX_DIGIT_BITS:
         raise ValueError(
             f"a {b}-bit digit does not fit the {8 * _MAX_WINDOW_BYTES}-bit "
             f"window it is read out of, which has to hold it from any bit "
-            f"offset within a byte; the widest a defined parameter set asks "
-            f"for is 14"
+            f"offset within a byte, so the widest this converts is "
+            f"{MAX_DIGIT_BITS}"
         )
     values = fnp.asarray(data, dtype=fnp.uint32)
     if values.ndim == 1:

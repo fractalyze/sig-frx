@@ -55,7 +55,7 @@ import frx.numpy as fnp
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hash.slhdsa.slh_dsa import SlhDsaParams, sha2_params
+from sig_frx.hash.slhdsa.slh_dsa import SlhDsa, SlhDsaParams, sha2_params
 
 # The specification's stateless parameters. `n` is not among them: every tweakable
 # hash in SHRINCS truncates to 16 bytes, which is what makes this security
@@ -84,6 +84,44 @@ STATELESS_INDICATOR = 255
 
 # One indicator byte, then the SLH-DSA signature.
 SIGNATURE_SIZE = 1 + PARAMS.signature_size
+
+
+def accepts(
+    slh_dsa: SlhDsa,
+    keys: ArrayLike,
+    messages: ArrayLike,
+    signatures: ArrayLike,
+    context: ArrayLike | None = None,
+) -> Array:
+    """The wrapper's verdict on an already-parsed batch — `bool[B]`.
+
+    The two bindings and the tag the module docstring describes, and nothing
+    else: `keys` is `[B, PUBLIC_KEY_SIZE]`, `signatures` is
+    `[B, SIGNATURE_SIZE]`, `messages` is `[B, L]`.
+
+    A component takes the family and the parsed arrays, the way
+    `fxmss.root_from_sig` and `wots_c.pk_from_sig` do, so a caller that has
+    already checked those shapes does not check them again — and a caller that
+    composes both paths, as `Shrincs` does, reaches one of them without going
+    back through a public verifier's front door. `Stateless.verify` is that door,
+    and it is this function underneath.
+    """
+    parts = fnp.asarray(signatures, dtype=fnp.uint8)
+    if parts.ndim != 2 or parts.shape[1] != SIGNATURE_SIZE:
+        raise ValueError(
+            f"a stateless signature batch is [B, {SIGNATURE_SIZE}], got shape "
+            f"{tuple(parts.shape)}"
+        )
+    public_keys = fnp.asarray(keys, dtype=fnp.uint8)
+    n = PARAMS.n
+    # `pk_seed ‖ sl_root` is the SLH-DSA public key; `sf_root` binds the
+    # message. Dropping the third would verify a signature under any SHRINCS
+    # key that shares the first two.
+    bound = fnp.concatenate([public_keys[:, 2 * n :], messages], axis=-1)
+    accepted = slh_dsa.verify(
+        public_keys[:, : 2 * n], bound, parts[:, 1:], context=context
+    )
+    return accepted & (parts[:, 0] == STATELESS_INDICATOR)
 
 
 class Stateless:
@@ -186,16 +224,10 @@ class Stateless:
                 f"one message per public key, as a [B, L] batch: got {batch} keys "
                 f"and messages of shape {tuple(messages.shape)}"
             )
+        # A width this component does not issue is a verdict, not an error — the
+        # same reading as a wrong indicator byte. `accepts` raises on it instead,
+        # because reaching it is a caller inside the package getting the format
+        # wrong rather than a verifier being handed something.
         if signatures.shape[1] != SIGNATURE_SIZE:
             return fnp.zeros(batch, dtype=bool)
-
-        n = PARAMS.n
-        # `pk_seed ‖ sl_root` is the SLH-DSA public key; `sf_root` binds the
-        # message. Dropping the third would verify a signature under any SHRINCS
-        # key that shares the first two.
-        slh_dsa_keys = keys[:, : 2 * n]
-        bound = fnp.concatenate([keys[:, 2 * n :], messages], axis=-1)
-        accepted = self.slh_dsa.verify(
-            slh_dsa_keys, bound, signatures[:, 1:], context=context
-        )
-        return accepted & (signatures[:, 0] == STATELESS_INDICATOR)
+        return accepts(self.slh_dsa, keys, messages, signatures, context)
