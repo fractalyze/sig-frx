@@ -33,7 +33,7 @@ from frx.typing import ArrayLike
 from hash_frx import Sha256
 
 from sig_frx.context import MAX_SIZE as MAX_CONTEXT_SIZE
-from sig_frx.hash import tree
+from sig_frx.hash import tree, wots
 from sig_frx.hash.slhdsa import fors, hypertree, slh_dsa, xmss
 from sig_frx.hash.tweakable import Sha2TweakableHash
 
@@ -188,6 +188,30 @@ class ParameterSetTest(absltest.TestCase):
                 # Figures 15 and 16: the private key is the public one plus the
                 # two secret seeds.
                 self.assertEqual(params.secret_key_size, 2 * public_key)
+
+    def test_every_width_the_table_asks_base_2b_for_is_one_it_defines(self) -> None:
+        """The half of `base_2b`'s correctness that belongs to this table.
+
+        `wots_test` pins the conversion against Algorithm 4's loop at every width
+        the window allows, which is a claim about the shared layer and is made
+        without knowing SLH-DSA exists. What is left is a claim about this table:
+        that the widths it asks for are inside that domain. It used to be made in
+        `wots_test` by sweeping this dict from there, which quietly turned the
+        shared test into a test of one scheme's parameters — and left the widths
+        of every other scheme reaching `base_2b` unswept.
+
+        WOTS+ asks for `len1` and `len2` digits of `lg_w` bits; FORS asks for `k`
+        of `a`.
+        """
+        for name in slh_dsa.SHA2_PARAMETER_SETS:
+            params = slh_dsa.SHA2_PARAMETER_SETS[name]
+            for label, bits in (
+                ("lg_w", params.lg_w),
+                ("a", params.a),
+            ):
+                with self.subTest(name=name, width=label):
+                    self.assertLessEqual(bits, wots.MAX_DIGIT_BITS)
+                    self.assertGreaterEqual(bits, 1)
 
     def test_the_digest_is_exactly_the_slices_the_split_consumes(self) -> None:
         for name in slh_dsa.SHA2_PARAMETER_SETS:
