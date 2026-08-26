@@ -42,12 +42,14 @@ py_library(
     ],
 )
 
-# `medium` for the margin rather than the runtime. The work is ~22 s on a
-# workstation, steady across runs, but `small`'s 60 s is not what the CI executor
-# gives it: this timed out there on its first run. Most of the cost is compiling
-# the traced leg, and the `PROD_CONFIG` leaf dominates it — 25 absorb chunks is 25
-# width-24 permutations in one unrolled graph. Sized from the worst run on the
-# slowest leg, per ../../../../docs/reference/measurement.md.
+# `medium` for the margin rather than the runtime. This measures 73.9 s on the
+# CPU leg and 50.4 s on the GPU leg, against 22 s on a workstation — a 3.4x
+# executor factor, and `small`'s 60 s sat inside it, so the first CI run timed
+# out and took the suite red. Most of the cost is compiling the traced leg, where
+# the `PROD_CONFIG` leaf dominates: 25 absorb chunks unroll to 25 width-24
+# permutations in one graph. Sized from the worst run on the slowest leg, per
+# ../../../../docs/reference/measurement.md — re-check against a CI run, not a
+# workstation, before shrinking it.
 py_test(
     name = "mode_test",
     size = "medium",
