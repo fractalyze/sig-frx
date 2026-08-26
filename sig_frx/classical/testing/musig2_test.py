@@ -25,11 +25,12 @@ import json
 from typing import Any
 from unittest import mock
 
+import numpy as np
 from absl.testing import absltest
 from python.runfiles import Runfiles
 
 from sig_frx.classical import secp
-from sig_frx.classical.schnorr import musig2
+from sig_frx.classical.schnorr import bip340, musig2
 
 _RUNFILES = Runfiles.Create()
 
@@ -382,6 +383,99 @@ class PartialSigVerifyTest(_SignVectors):
                     self._verify(case, bytes.fromhex(case["sig"]))
                 self.assertEqual(caught.exception.signer, case["error"]["signer"])
                 self.assertEqual(caught.exception.contrib, case["error"]["contrib"])
+
+
+class PartialSigAggTest(absltest.TestCase):
+    """BIP-327 `sig_agg_vectors.json` — where the protocol's output becomes an
+    ordinary BIP-340 signature.
+
+    This is the stage the whole scheme exists for: everything above it produces
+    values only MuSig2 understands, and what comes out here is what a taproot
+    output accepts. So it is gated twice — against the published bytes, and by
+    running the result through this repo's own BIP-340 verifier.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.data = _load("bip327_sig_agg_vectors", "sig_agg_vectors.json")
+
+    def _session(self, case: dict[str, Any]) -> Any:
+        return musig2.Session(
+            aggnonce=bytes.fromhex(case["aggnonce"]),
+            pubkeys=[
+                bytes.fromhex(self.data["pubkeys"][i]) for i in case["key_indices"]
+            ],
+            message=bytes.fromhex(self.data["msg"]),
+            tweaks=[
+                (bytes.fromhex(self.data["tweaks"][i]), xonly)
+                for i, xonly in zip(
+                    case["tweak_indices"], case["is_xonly"], strict=True
+                )
+            ],
+        )
+
+    def _psigs(self, case: dict[str, Any]) -> list[bytes]:
+        return [bytes.fromhex(self.data["psigs"][i]) for i in case["psig_indices"]]
+
+    def test_the_published_aggregate_signatures(self) -> None:
+        cases = self.data["valid_test_cases"]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, tweaks=len(case["tweak_indices"])):
+                signature = musig2.partial_sig_agg(
+                    self._psigs(case), self._session(case)
+                )
+                self.assertEqual(signature.hex().upper(), case["expected"].upper())
+
+    def test_the_aggregate_verifies_through_the_existing_bip340_verifier(self) -> None:
+        """The scheme's whole claim, asserted rather than described.
+
+        No MuSig2 verifier exists because none should: the aggregate is a
+        BIP-340 signature under the aggregate x-only key, so it goes through
+        the seam's own `verify` — batch-shaped, since the seam has no scalar
+        form — and a chain would accept exactly what this accepts.
+        """
+        scheme = bip340.Bip340()
+        cases = self.data["valid_test_cases"]
+        message = bytes.fromhex(self.data["msg"])
+        keys, messages, signatures = [], [], []
+        for case in cases:
+            session = self._session(case)
+            signatures.append(musig2.partial_sig_agg(self._psigs(case), session))
+            keys.append(session.key_context().xonly_bytes())
+            messages.append(message)
+
+        verdicts = scheme.verify(
+            np.stack([np.frombuffer(k, dtype=np.uint8) for k in keys]),
+            np.stack([np.frombuffer(m, dtype=np.uint8) for m in messages]),
+            np.stack([np.frombuffer(s, dtype=np.uint8) for s in signatures]),
+            context=None,
+        )
+        self.assertLen(verdicts, len(cases))
+        self.assertTrue(bool(np.all(np.asarray(verdicts))))
+
+    def test_a_tweaked_session_still_verifies(self) -> None:
+        """Tweaking moves the aggregate key, and the signature has to follow it
+        — `tacc` is what carries that, and nothing before this stage spent it."""
+        case = next(c for c in self.data["valid_test_cases"] if c["tweak_indices"])
+        session = self._session(case)
+        untweaked = musig2.Session(
+            aggnonce=session.aggnonce, pubkeys=session.pubkeys, message=session.message
+        )
+        self.assertNotEqual(
+            session.key_context().xonly_bytes(),
+            untweaked.key_context().xonly_bytes(),
+        )
+
+    def test_a_partial_signature_over_the_group_order_names_its_signer(self) -> None:
+        cases = self.data["error_test_cases"]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, comment=case["comment"]):
+                with self.assertRaises(musig2.InvalidContributionError) as caught:
+                    musig2.partial_sig_agg(self._psigs(case), self._session(case))
+                self.assertEqual(caught.exception.signer, case["error"]["signer"])
+                self.assertEqual(caught.exception.contrib, "psig")
 
 
 class KeyAggTest(absltest.TestCase):

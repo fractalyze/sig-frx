@@ -532,6 +532,42 @@ def sign(secnonce: SecNonce, secret_key: bytes, session: Session) -> bytes:
     return total.to_bytes(_SCALAR_SIZE, "big")
 
 
+def partial_sig_agg(psigs: Sequence[bytes], session: Session) -> bytes:
+    """The cosigners' partial signatures combined into one BIP-340 signature.
+
+    This is where the protocol stops being MuSig2. Everything above produces
+    values only these functions understand; what comes out here is 64 bytes a
+    taproot output accepts, indistinguishable on chain from a single signer's.
+    That is why this module ships no verifier — `Bip340.verify` is already the
+    right one, and adding a second would be a second accept set to keep in
+    agreement with it.
+
+    The tweaks are spent here. `tacc` accumulated what tweaking added to the
+    public key, and folding it in is what makes the signature check against the
+    tweaked key rather than the one the cosigners aggregated.
+
+    Raises `InvalidContributionError` naming the cosigner whose partial
+    signature is not a scalar. That is the last point where a name is available
+    — after this there is one signature, and a bad one says only that some
+    cosigner was wrong.
+    """
+    values = _session_values(session)
+    total = 0
+    for signer, psig in enumerate(psigs):
+        if len(psig) != _SCALAR_SIZE:
+            raise InvalidContributionError(signer, "psig")
+        share = int.from_bytes(psig, "big")
+        if share >= _CURVE.n:
+            raise InvalidContributionError(signer, "psig")
+        total = (total + share) % _CURVE.n
+
+    parity = 1 if values.keys.has_even_y() else _CURVE.n - 1
+    total = (total + values.challenge * parity * values.keys.tacc) % _CURVE.n
+    return values.nonce_x.to_bytes(_SCALAR_SIZE, "big") + total.to_bytes(
+        _SCALAR_SIZE, "big"
+    )
+
+
 def partial_sig_verify(
     psig: bytes,
     pubnonces: Sequence[bytes],

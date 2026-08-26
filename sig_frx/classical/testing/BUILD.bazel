@@ -267,10 +267,12 @@ py_test(
         "@bip327_key_sort_vectors//file",
         "@bip327_nonce_agg_vectors//file",
         "@bip327_nonce_gen_vectors//file",
+        "@bip327_sig_agg_vectors//file",
         "@bip327_sign_verify_vectors//file",
     ],
     deps = [
         "//sig_frx/classical:secp",
+        "//sig_frx/classical/schnorr:bip340",
         "//sig_frx/classical/schnorr:musig2",
         "@rules_python//python/runfiles",
         requirement("absl_py"),

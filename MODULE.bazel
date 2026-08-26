@@ -272,3 +272,10 @@ http_file(
     sha256 = "692eecc101f3e515c29137f05031935e1210d2a01bab91e674eb0234f095c15c",
     urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/sign_verify_vectors.json"],
 )
+
+http_file(
+    name = "bip327_sig_agg_vectors",
+    downloaded_file_path = "sig_agg_vectors.json",
+    sha256 = "15f14c034fb2a5739d7ce638be94c5b37ea675a2e01159092dd93b59d69c3439",
+    urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/sig_agg_vectors.json"],
+)
