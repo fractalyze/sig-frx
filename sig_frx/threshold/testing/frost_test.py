@@ -273,7 +273,7 @@ class Secp256k1SchnorrTest(absltest.TestCase):
     The batched `verify` reshapes the RFC's per-signature check — masked
     wire validation, one two-term combination, a coordinate compare — so
     the RFC's algorithm is kept transcribed beside it and the two are held
-    to agree row for row (`docs/reference/conventions.md`: test the
+    to agree row for row (`docs/reference/testing.md`: test the
     reshaped form against the standard's own form).
     """
 
