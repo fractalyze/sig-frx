@@ -100,7 +100,7 @@ class Secp256k1Sha256:
         if bool(secp.is_identity(self.curve, element)[0]):
             raise ValueError("the identity element has no encoding here")
         ((x, y),) = secp.affine_ints(self.curve, element)
-        return (2 + (y & 1)).to_bytes(1, "big") + x.to_bytes(32, "big")
+        return secp.compressed_bytes(self.curve, x, y)
 
     def verify(
         self, public_key: ArrayLike, message: ArrayLike, signature: ArrayLike

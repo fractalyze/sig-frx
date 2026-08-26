@@ -49,7 +49,9 @@ _NONCE = hashlib.sha256(b"BIP0340/nonce").digest()
 _CHALLENGE = hashlib.sha256(b"BIP0340/challenge").digest()
 
 
-def _tagged(prefix: bytes, payload: bytes) -> bytes:
+def tagged(prefix: bytes, payload: bytes) -> bytes:
+    """BIP-340's `SHA256(SHA256(tag) || SHA256(tag) || x)`, shared because
+    BIP-327 incorporates it by reference rather than defining its own."""
     return hashlib.sha256(prefix + prefix + payload).digest()
 
 
@@ -108,9 +110,9 @@ class Bip340:
         d = d0 if py % 2 == 0 else n - d0
         p_bytes = px.to_bytes(32, "big")
 
-        mask = int.from_bytes(_tagged(_AUX, aux.tobytes()), "big")
+        mask = int.from_bytes(tagged(_AUX, aux.tobytes()), "big")
         t = (d ^ mask).to_bytes(32, "big")
-        k0 = int.from_bytes(_tagged(_NONCE, t + p_bytes + message_bytes), "big") % n
+        k0 = int.from_bytes(tagged(_NONCE, t + p_bytes + message_bytes), "big") % n
         if k0 == 0:  # the spec fails rather than redraws (a ~2^-256 draw)
             raise ValueError("the derived nonce is zero")
         rx, ry = secp.host_multiple_of_g(_CURVE, k0)
@@ -118,9 +120,7 @@ class Bip340:
         r_bytes = rx.to_bytes(32, "big")
 
         e = (
-            int.from_bytes(
-                _tagged(_CHALLENGE, r_bytes + p_bytes + message_bytes), "big"
-            )
+            int.from_bytes(tagged(_CHALLENGE, r_bytes + p_bytes + message_bytes), "big")
             % n
         )
         scalar = _CURVE.scalar
@@ -229,7 +229,7 @@ class Bip340:
                 ),
             ]
         )
-        return bool(np.asarray(lhs == _sum(terms))[0])
+        return bool(np.asarray(lhs == secp.sum_points(_CURVE, terms))[0])
 
     def _parsed(
         self, public_key: ArrayLike, message: ArrayLike, signature: ArrayLike
@@ -277,7 +277,7 @@ class Bip340:
         """
         return [
             int.from_bytes(
-                _tagged(
+                tagged(
                     _CHALLENGE,
                     entry[:32].tobytes() + key.tobytes() + row.tobytes(),
                 ),
@@ -286,12 +286,6 @@ class Bip340:
             % _CURVE.n
             for key, row, entry in zip(keys, messages, signatures)
         ]
-
-
-def _sum(points: np.ndarray) -> np.ndarray:
-    """The sum of a `[K]` point batch — `group.sum_points` padded with the
-    zero-filled Jacobian buffer, which on this curve *is* infinity."""
-    return group.sum_points(points, np.zeros([1], dtype=points.dtype))
 
 
 if TYPE_CHECKING:
