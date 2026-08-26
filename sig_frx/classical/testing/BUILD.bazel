@@ -239,3 +239,16 @@ py_binary(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+py_test(
+    name = "musig2_test",
+    size = "small",
+    srcs = ["musig2_test.py"],
+    data = ["@bip327_key_agg_vectors//file"],
+    deps = [
+        "//sig_frx/classical:secp",
+        "//sig_frx/classical/schnorr:musig2",
+        "@rules_python//python/runfiles",
+        requirement("absl_py"),
+    ],
+)

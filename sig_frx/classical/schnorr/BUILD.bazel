@@ -20,3 +20,20 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# MuSig2 — key aggregation and the two signing rounds over BIP-340's substrate.
+# Not on the seam: a two-round interactive protocol has no seam-shaped `sign`,
+# and its output is a BIP-340 signature, so it adds no verifier of its own.
+py_library(
+    name = "musig2",
+    srcs = [
+        "__init__.py",
+        "musig2.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//sig_frx/classical:group",
+        "//sig_frx/classical:secp",
+        requirement("numpy"),
+    ],
+)
