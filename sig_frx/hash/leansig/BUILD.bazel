@@ -34,6 +34,19 @@ py_library(
     ],
 )
 
+# The two presets leanSig instantiates. Values plus one derived length and the
+# invariant that ties them together — no frx, no hash, same as the Poseidon
+# constants above.
+py_library(
+    name = "params",
+    srcs = [
+        "__init__.py",
+        "params.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [":field"],
+)
+
 # The two permutations those constants parameterize.
 py_library(
     name = "poseidon",
@@ -49,5 +62,23 @@ py_library(
         requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),
+    ],
+)
+
+# Message to codeword: the hash, the aborting decode and the target-sum filter.
+py_library(
+    name = "encoding",
+    srcs = [
+        "__init__.py",
+        "encoding.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":field",
+        ":params",
+        ":poseidon",
+        "//sig_frx:arrays",
+        requirement("frx"),
+        requirement("numpy"),
     ],
 )
