@@ -42,9 +42,15 @@ py_library(
     ],
 )
 
+# `medium` for the margin rather than the runtime. The work is ~22 s on a
+# workstation, steady across runs, but `small`'s 60 s is not what the CI executor
+# gives it: this timed out there on its first run. Most of the cost is compiling
+# the traced leg, and the `PROD_CONFIG` leaf dominates it — 25 absorb chunks is 25
+# width-24 permutations in one unrolled graph. Sized from the worst run on the
+# slowest leg, per ../../../../docs/reference/measurement.md.
 py_test(
     name = "mode_test",
-    size = "small",
+    size = "medium",
     srcs = ["mode_test.py"],
     deps = [
         ":mode_vectors",
