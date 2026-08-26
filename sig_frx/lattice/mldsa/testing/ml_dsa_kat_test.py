@@ -69,9 +69,9 @@ _MERGE_GATE_SET = "ML-DSA-44"
 # That is free on a backend that declines the whole-hash Keccak marker and
 # ruinous on one that routes it, because the routed composite's decomposition is
 # the entire absorb and squeeze — traced per shape, and in proportion to the
-# message's block count. Measured: 4.6 s for a 6-block message against 103 s for
-# a 61-block one, and 0.056 s for a second message that lands in a bucket already
-# compiled. Bounding the *count* per operation is therefore what bounds the cost,
+# message's block count. Measured: a 61-block message costs 22x a 6-block one,
+# while a second message landing in a bucket already compiled costs ~1% of a
+# fresh one. Bounding the *count* per operation is therefore what bounds the cost,
 # and padding lengths to a rate multiple does nothing at all — that is already
 # the bucket.
 #

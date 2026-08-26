@@ -68,15 +68,17 @@ one, and for a compile-bound target that is usually the GPU.
 
 What a local GPU number is worth is an order of magnitude, not a tenth. The same
 four targets against the CI figures this page records, measured on one
-workstation in two sessions and kept in separate columns because a ratio and its
-denominator have to come from one of them:
+workstation in two sessions and carried as a ratio to CI rather than as the
+local durations themselves, which are the machine's and not the target's. The
+sessions stay in separate columns because a ratio and its denominator have to
+come from one of them:
 
 | target | CI, as recorded | one session | another |
 |---|---|---|---|
-| `slh_dsa_traced_test` | 177.7 s | 182.2 s (1.03x) | 138.2 s (0.78x) |
-| `falcon_kat_test` | 172.1 s | 193.6 s (1.12x) | 146.8 s (0.85x) |
-| `falcon_test` | 272.9 s | 309.1 s (1.13x) | 283.7 s (1.04x) |
-| `slh_dsa_kat_test` | ~285 s | 349.2 s (1.23x) | 395.6 s (1.39x) |
+| `slh_dsa_traced_test` | 177.7 s | 1.03x | 0.78x |
+| `falcon_kat_test` | 172.1 s | 1.12x | 0.85x |
+| `falcon_test` | 272.9 s | 1.13x | 1.04x |
+| `slh_dsa_kat_test` | ~285 s | 1.23x | 1.39x |
 
 **0.8x to 1.4x, and it runs both ways.** `slh_dsa_kat_test` at 1.39x is a local
 run *under*-sizing, which is the opposite of the error stacking an executor
@@ -176,8 +178,8 @@ from it can cite it:
 | the rule it anchors | measured here |
 |---|---|
 | an A/B is interleaved | sequential blocks read **1.07x** where interleaved medians read **1.38x**; a three-sample smoke run read **1.75x** on a Falcon `verify` whose median is **1.01x** — the honest answer was "no difference", which is the answer a sloppy A/B is least likely to return |
-| a share comes from one session | the decoder stage moved 5.8 to **7.3 ms** (25%) across two sessions on unchanged code while `verify` (21.7 against 21.0) and `HashToPoint` (14.7 against 14.5) held to 4% |
-| an isolated stage is a bound | `rejection.first_accepted`'s scatter wins its stage by 1.3-6.3x on CPU and 1.0-4.6x on GPU while `verify` stays flat at 0.96-1.04x, and the `ExpandA` compaction times **1.397 ms inside a `verify` costing 0.760 ms** |
+| a share comes from one session | the decoder stage moved **25%** across two sessions on unchanged code while `verify` and `HashToPoint`, measured in the same two, held to 4% |
+| an isolated stage is a bound | `rejection.first_accepted`'s scatter wins its stage by 1.3-6.3x on CPU and 1.0-4.6x on GPU while `verify` stays flat at 0.96-1.04x, and the `ExpandA` compaction times **1.8x the `verify` it sits inside** |
 | a fused prefix does not repair it | [`decoder_bench`](../../sig_frx/lattice/falcon/testing/decoder_bench.py) prices each step as the whole decoder *stopped* there; collapsing the 48% within-byte chain to a `[256, 9]` lookup takes the step 1.84-2.54x and moves `verify` 0.98-1.00x, at 12% on CPU `sig_decode` |
 
 Two of those decide something a reader would otherwise have to guess at.

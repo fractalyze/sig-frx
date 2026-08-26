@@ -66,8 +66,8 @@ because a sampler's compaction is fused with the SHAKE that produced its
 candidates and the arithmetic that consumes its survivors, and so never pays the
 round trip a standalone measurement forces on it. **An isolated stage here is an
 upper bound on what changing it could buy, not an estimate of it**: at
-Falcon-1024 and `B` = 256 the scatter takes the stage from 3.6 ms to 0.6 ms
-inside an 18.2 ms `verify`, and `verify` does not move.
+Falcon-1024 and `B` = 256 the scatter takes the stage 6x, and the `verify` that
+stage sits inside — where it is a fifth of the cost — does not move.
 
 So the direction carries no claim about backends — in particular not that a
 scatter serialises on one, which is what this paragraph used to say and what the

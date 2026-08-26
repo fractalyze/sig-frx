@@ -136,9 +136,9 @@ def batch_inverse(values: np.ndarray) -> np.ndarray:
     become `3B` multiplies and one inversion, which is worth doing because the
     dtype's inversion is the expensive operation and its multiply is not.
 
-    Measured on secp256k1's scalar field at B=1024: 0.10 ms here against
-    1.91 ms for a Python loop calling `** -1` per row, and against 1.19 ms for
-    the elementwise `a / b` the dtype also offers — that one still inverts `B`
+    Measured on secp256k1's scalar field at B=1024: 19x a Python loop calling
+    `** -1` per row, and 12x the elementwise `a / b` the dtype also offers —
+    that one still inverts `B`
     times, so a caller needing two quotients over one denominator pays for it
     twice and ends up behind the loop it replaced.
 

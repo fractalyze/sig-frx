@@ -239,8 +239,8 @@ def _ball_from_stream(stream: Any, tau: int) -> tuple[Any, Any]:
     steps of half a dozen elementwise operations each on a few hundred bytes, so
     eagerly it is several hundred dispatches doing almost nothing, and what it
     costs is the dispatching. Compiling collapses them into one program: measured
-    at ML-DSA-65, 6.80 ms eager against 0.12 ms warm, for a compile of about 0.8 s
-    per `(τ, stream length)` that a caller pays once and every later signature
+    at ML-DSA-65, 57x eager against warm, for one compile per
+    `(τ, stream length)` that a caller pays once and every later signature
     reuses.
 
     Compiling the batched samplers instead makes them worse, which is why none of

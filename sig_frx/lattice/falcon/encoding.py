@@ -70,11 +70,13 @@ around each form and the transition table kept in `uint8` throughout — nine
 states fit in a byte, and this table is what every combine step moves, which
 `_ON_ZERO` prices on its own:
 
+The two cost columns are relative to the shipped form, which is the last row:
+
 | walk | ranking | `decompress` | share | `verify` |
 |---|---|---|---|---|
-| bits | bits | 15.2 ms | 46% | 33.0 ms |
-| bytes | bits | 7.3 ms | 31% | 23.4 ms |
-| bytes | bytes | 4.9 ms | 23% | 21.0 ms |
+| bits | bits | 3.10x | 46% | 1.57x |
+| bytes | bits | 1.49x | 31% | 1.11x |
+| bytes | bytes | 1.00x | 23% | 1.00x |
 
 **3.1x on the stage and 1.6x on the operation**, and the stage is no longer the
 pole: `HashToPoint` is, at 69%. The two steps are not the same size — the walk
@@ -223,8 +225,8 @@ SK_F_BITS = 8
 # and in the unary run a `1` is what ends the coefficient.
 # uint8 rather than a lane-width integer: nine states fit in a byte, and this
 # table is what the scan below moves on every combine step, so the width is the
-# scan's bandwidth. Measured at Falcon-1024 B=256 it is 4.04 ms as int32 against
-# 1.33 as uint8, for bit-identical output.
+# scan's bandwidth. Measured at Falcon-1024 B=256 it is 3.0x as int32 against
+# uint8, for bit-identical output.
 _ON_ZERO = np.array([1, 2, 3, 4, 5, 6, 7, 8, 8], dtype=np.uint8)
 _ON_ONE = np.array([1, 2, 3, 4, 5, 6, 7, 8, 0], dtype=np.uint8)
 _UNARY_STATE = 8

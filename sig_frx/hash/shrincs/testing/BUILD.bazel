@@ -14,16 +14,6 @@ py_library(
     ],
 )
 
-# `medium`, decided by the CPU leg: 105.1 s worst across this branch's three CI
-# runs against 89.6 s on the GPU leg, which is 35% of the 300 s budget. Signing
-# landed here since the last sizing and one stateless signature is 5776 bytes of
-# FORS and hypertree, which is why `SigningTest` makes one and not one per case;
-# every verification still shares one batch shape, so the suite pays one compile
-# of the verification program and not one per distinct `B`.
-#
-# The workstation reads 26.7 s and did not decide this. The executor factor is
-# per-target — 3.9x for this one — so a local CPU number cannot size a
-# CPU-decided budget, per ../../../../docs/reference/measurement.md.
 # How a recorded case becomes what the seam takes: one batch width with the
 # padding that holds it, and the header slice a component's input needs. Split
 # out of the test files rather than left in each, because the two that had it had
@@ -44,6 +34,16 @@ py_library(
     ],
 )
 
+# `medium`, decided by the CPU leg: 105.1 s worst across this branch's three CI
+# runs against 89.6 s on the GPU leg, which is 35% of the 300 s budget. Signing
+# landed here since the last sizing and one stateless signature is 5776 bytes of
+# FORS and hypertree, which is why `SigningTest` makes one and not one per case;
+# every verification still shares one batch shape, so the suite pays one compile
+# of the verification program and not one per distinct `B`.
+#
+# A local run did not decide this. The executor factor is per-target — 3.9x for
+# this one — so a local CPU number cannot size a CPU-decided budget, per
+# ../../../../docs/reference/measurement.md.
 py_test(
     name = "stateless_test",
     size = "medium",
@@ -114,9 +114,9 @@ py_test(
 # ../../../../docs/reference/measurement.md moves a target up at half — and the
 # CPU leg's spread across runs of one commit is a median 2.2x, so the run that
 # times out is one that has not happened yet. The GPU leg is the quieter one
-# here, 114.7-162.6 s. A local measurement said 28% and would have kept this at
-# `medium`: the executor factor is per-target, which is why that page says a
-# local number does not size a CPU-decided budget.
+# here, 114.7-162.6 s. A local measurement would have kept this at `medium`:
+# the executor factor is per-target, which is why that page says a local number
+# does not size a CPU-decided budget.
 #
 # It is the package's dearest test by construction — every entry of every call
 # runs both signing paths — and the signer adds an FXMSS tree per case on top.
@@ -141,9 +141,9 @@ py_test(
 # Verification under `frx.jit`. Its own target for the reason
 # `slh_dsa_traced_test` is: the cost here is compilation rather than hashing, and
 # it is most of this target's runtime. `large`, decided by the CPU leg: 180.1 s
-# against 65.3 s on the GPU leg, which is 20% of the 900 s budget. The local
-# number was 77 s and could not have sized this — the executor factor is the CPU
-# leg's, per `measurement.md`.
+# against 65.3 s on the GPU leg, which is 20% of the 900 s budget. A local
+# number could not have sized this — the executor factor is the CPU leg's, per
+# `measurement.md`.
 py_test(
     name = "shrincs_traced_test",
     size = "large",

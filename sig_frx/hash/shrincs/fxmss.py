@@ -89,23 +89,24 @@ MAX_LEAVES = 2**20
 # The walk is `HEIGHT` levels whatever a tree's depth, and unrolling all of them
 # is most of what a traced verifier compiles. Measured at `B = 4`, same process,
 # interleaved — a compiled `Shrincs.verify` end to end, and the eager walk on its
-# own, because the suite still runs eager:
+# own, because the suite still runs eager. Every column is relative to the
+# Python loop:
 #
 #     walk form          verify compile   verify warm   eager walk
-#     a Python loop              37.5 s       2.57 ms       950 ms
-#     scan, unroll 1             13.1 s       3.51 ms       549 ms
-#     scan, unroll 15            15.8 s       2.58 ms      1325 ms
+#     a Python loop               1.00x         1.00x        1.00x
+#     scan, unroll 1              0.35x         1.37x        0.58x
+#     scan, unroll 15             0.42x         1.00x        1.39x
 #
 # 15 is chosen for the traced path, which is the delivery path: it holds warm
 # latency at the loop's while cutting the compile 2.4x, where unrolling one level
 # at a time cuts more compile and gives back a third of the warm call. The eager
 # column is the cost — a scan re-traces its body per call off a jit, so a body
 # fifteen levels deep costs fifteen levels of tracing every time, and only the
-# suite pays it. It comes back cheaper anyway: `shrincs_traced_test` went 227 s
-# to 77 s, which is more than the eager cases lose.
+# suite pays it. It comes back cheaper anyway: `shrincs_traced_test` fell 2.9x,
+# which is more than the eager cases lose.
 #
 # 15 divides 255, so the last step is whole. The floor under all of this is the
-# stateless leg, which compiles in 10.6 s of the 15.8 on its own — cutting the
+# stateless leg, which is two-thirds of that compile on its own — cutting the
 # walk further buys correspondingly less.
 _WALK_UNROLL = 15
 

@@ -104,9 +104,9 @@ py_test(
 # nearly every one traces its own program, and a compile is what the GPU leg is
 # worst at.
 #
-# `large`'s 900 s covers that worst run at 30%. `medium` would have been at 91%
-# — a target that passes on a workstation at 25 s and flakes where it counts,
-# which is the whole of why a local number does not size a budget.
+# `large`'s 900 s covers that worst run at 30%. `medium` would have been at 91%,
+# which a local run would have called comfortable — a budget is sized from CI,
+# never from a workstation.
 py_test(
     name = "falcon_test",
     size = "large",
