@@ -9,6 +9,10 @@ this file is the map plus the rules every change must respect.
   [`docs/reference/security.md`](docs/reference/security.md)
 - **Coding conventions — what implementing a scheme here requires, and only
   that:** [`docs/reference/conventions.md`](docs/reference/conventions.md)
+- **What gates a scheme — the reference transcription and the KAT rules:**
+  [`docs/reference/testing.md`](docs/reference/testing.md)
+- **Measurement — CI budgets, and what a recorded number may claim:**
+  [`docs/reference/measurement.md`](docs/reference/measurement.md)
 - **Per-scheme design notes:** [`docs/schemes/README.md`](docs/schemes/README.md)
 - **The one seam every scheme implements:**
   [`sig_frx/signature.py`](sig_frx/signature.py)
@@ -53,7 +57,7 @@ this file is the map plus the rules every change must respect.
   vectors are half the gate, because a verifier that returns `True`
   unconditionally passes every positive one. Not every standard publishes
   vectors; that does not lower the bar, it changes what the authority is
-  ([`conventions.md`](docs/reference/conventions.md#a-standard-that-publishes-no-vectors-still-gets-gated)).
+  ([`testing.md`](docs/reference/testing.md#a-standard-that-publishes-no-vectors-still-gets-gated)).
 - **Batch-parallel verification.** Verification is the hot path and it is
   embarrassingly parallel, so a batch of `B` signatures verifies in one call.
   The seam has no scalar `verify` on purpose: a single verification is `B = 1`.

@@ -101,7 +101,7 @@ them was not.
 
 One thing this does **not** claim. The numbers compare implementations, which is
 what a local measurement is good for, and they size no budget
-([`conventions.md`](../../../docs/reference/conventions.md)).
+([`measurement.md`](../../../docs/reference/measurement.md)).
 
 **The GPU leg has since been measured, and it does rank the stages differently.**
 At Falcon-1024 and `B` = 1024, taken in one session against the `verify` it

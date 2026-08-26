@@ -8,7 +8,7 @@ dtype and the transform opcode. `fips204_reference` is Algorithms 6, 7 and 8 wri
 the way the standard writes them — Python integers, one coefficient at a time, a
 `while` that squeezes `hashlib` — and key generation and signing are required to
 reproduce its bytes exactly at every parameter set
-([`conventions.md`](../../../../docs/reference/conventions.md)).
+([`testing.md`](../../../../docs/reference/testing.md)).
 
 Byte equality with the reference is what makes the loop checkable at all. A
 signature agrees only if the two implementations rejected the same candidates in

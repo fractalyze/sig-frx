@@ -4,7 +4,7 @@
 [`kat.check`](../../../testing/kat.py) owns three passes and Falcon owns none of
 them: the published verdicts, the tampering that moves a bit in each of the three
 inputs, and the batch axis built by replicating an accepted case and corrupting
-some entries. `conventions.md` puts them there rather than in a scheme's own
+some entries. `testing.md` puts them there rather than in a scheme's own
 tests "because the gap is a property of how the vectors are published, not of any
 one scheme — a per-scheme fix would be written once per scheme for one cause",
 and a Falcon-shaped copy would be the third.
@@ -20,7 +20,7 @@ day their bodies land and the vectors grow a seed.
 The rejections a generic bit flip cannot reach — the uncompressed header byte,
 the padding byte, a public key coefficient at or above `q` — are Falcon's own
 structure and stay in [`falcon_test.py`](falcon_test.py), which is what
-`conventions.md` asks a scheme to add on top of the harness rather than instead
+`testing.md` asks a scheme to add on top of the harness rather than instead
 of it.
 """
 

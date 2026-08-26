@@ -3,7 +3,7 @@
 
 The published verdicts, the generic tampering pass and the batch axis are
 [`falcon_kat_test`](falcon_kat_test.py)'s, through the shared harness. What is
-here is the half `conventions.md` asks a scheme to add on top: "every rejection
+here is the half `testing.md` asks a scheme to add on top: "every rejection
 its own structure makes possible that a generic bit flip would not reach."
 
 For Falcon that is the encoding. The harness moves a bit in each of the three
@@ -22,7 +22,7 @@ fill in.
 
 Falcon has no `sign` here, so there is no round trip to lean on — which is the
 right way round: a scheme verifying its own signatures is the self-consistency
-`conventions.md` says is not evidence.
+`testing.md` says is not evidence.
 """
 
 from __future__ import annotations

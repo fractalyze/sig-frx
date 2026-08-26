@@ -52,7 +52,7 @@ vector file to parse, and no seam-shaped `sign` because it is stateful — gates
 its own test instead. Satisfying the Protocol for such a scheme would mean an
 adapter whose `sign` discards the advanced key, which is not a different operation
 the way the internal and pre-hash interfaces are: it is the operation with the
-property that makes it safe removed. `docs/reference/conventions.md` states what
+property that makes it safe removed. `docs/reference/testing.md` states what
 that scheme owes in exchange.
 
 **A standard publishes vectors per operation, so the caller says which one it is

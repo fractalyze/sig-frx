@@ -130,7 +130,7 @@ py_test(
     # At 521-571 s the GPU leg is over half of `large`'s 900 s, so the deadline
     # moves up a bucket while `size` stays `large` — see "`size` moves two
     # things and `timeout` moves one" in
-    # ../../../../docs/reference/conventions.md. The GPU leg agrees with itself
+    # ../../../../docs/reference/measurement.md. The GPU leg agrees with itself
     # to within 1.1x run over run, so that range is the target's own cost rather
     # than a contention artefact.
     size = "large",
