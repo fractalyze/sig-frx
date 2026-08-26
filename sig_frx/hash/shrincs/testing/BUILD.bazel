@@ -1,4 +1,4 @@
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
@@ -110,6 +110,28 @@ py_test(
         "//sig_frx/hash/shrincs",
         "//sig_frx/hash/shrincs:fxmss",
         requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# Where verification spends its time. A dev tool rather than a test — it asserts
+# nothing, and the numbers belong on the issue that acts on them — but it is
+# committed so a re-measurement after the walk changes compares against the same
+# harness rather than a fresh one. Same reason its SLH-DSA sibling is committed.
+py_binary(
+    name = "verify_bench",
+    testonly = True,
+    srcs = ["verify_bench.py"],
+    deps = [
+        ":stateful_vectors",
+        "//sig_frx/hash:bytestring",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash/shrincs",
+        "//sig_frx/hash/shrincs:adrs",
+        "//sig_frx/hash/shrincs:fxmss",
+        "@hash_frx//hash_frx",
+        requirement("absl_py"),
+        requirement("frx"),
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
