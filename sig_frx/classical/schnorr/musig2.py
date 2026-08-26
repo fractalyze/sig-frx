@@ -60,6 +60,12 @@ _KEYAGG_COEFF = hashlib.sha256(b"KeyAgg coefficient").digest()
 
 _PUBKEY_SIZE = 33
 _TWEAK_SIZE = 32
+_SCALAR_SIZE = 32
+_PUBNONCE_SIZE = 66
+
+# BIP-327's own tag prefixes for the nonce derivation.
+_AUX_TAG = hashlib.sha256(b"MuSig/aux").digest()
+_NONCE_TAG = hashlib.sha256(b"MuSig/nonce").digest()
 
 
 class InvalidContributionError(Exception):
@@ -77,8 +83,11 @@ class InvalidContributionError(Exception):
         self.contrib = contrib
 
 
-def _parse_pubkey(data: bytes, signer: int) -> tuple[int, int]:
-    """One compressed key to `(x, parity)`, or the sender's index as an error.
+def _parse_point(data: bytes, signer: int, contrib: str) -> tuple[int, int]:
+    """One compressed point to `(x, parity)`, or the sender's index as an error.
+
+    `contrib` names what the sender got wrong, because a key and a nonce fail
+    the same three ways and a coordinator needs to know which one it was.
 
     The bound on `x` is checked here, where the value is still an integer: the
     base field's dtype aborts on an out-of-range operand rather than reducing
@@ -86,10 +95,10 @@ def _parse_pubkey(data: bytes, signer: int) -> tuple[int, int]:
     substrate with no cosigner index left to name.
     """
     if len(data) != _PUBKEY_SIZE or data[0] not in (2, 3):
-        raise InvalidContributionError(signer, "pubkey")
+        raise InvalidContributionError(signer, contrib)
     x = int.from_bytes(data[1:], "big")
     if x >= _CURVE.p:
-        raise InvalidContributionError(signer, "pubkey")
+        raise InvalidContributionError(signer, contrib)
     return x, data[0] - 2
 
 
@@ -170,6 +179,178 @@ class KeyAggContext:
         )
 
 
+def _compressed(x: int, y: int) -> bytes:
+    """SEC 1 compressed form — the parity byte and the x coordinate."""
+    return bytes([2 + (y & 1)]) + x.to_bytes(_SCALAR_SIZE, "big")
+
+
+@dataclass(frozen=True)
+class SecNonce:
+    """One signer's secret nonce pair, drawn for exactly one signing session.
+
+    **Use once.** Signing twice from one `SecNonce` against different messages
+    or different cosigner sets reveals the signer's secret key outright — the
+    concurrent-session attack that MuSig2's two-nonce construction exists to
+    survive. It is not a liveness abort the way a FROST round failure is; the
+    key is gone. Signing therefore consumes this and hands back nothing that
+    can be spent again, the shape `Xmss` already uses for its leaf counter.
+
+    `public_key` is the signer's own, carried so that signing can refuse a
+    nonce drawn for a different key rather than produce a partial signature
+    that silently fails to aggregate.
+    """
+
+    first: int
+    second: int
+    public_key: bytes
+
+    def to_bytes(self) -> bytes:
+        """The specification's 97-byte layout, `k1 || k2 || pk`."""
+        return (
+            self.first.to_bytes(_SCALAR_SIZE, "big")
+            + self.second.to_bytes(_SCALAR_SIZE, "big")
+            + self.public_key
+        )
+
+
+def _message_prefix(message: bytes | None) -> bytes:
+    """An absent message and an empty one are different inputs.
+
+    Length-prefixing alone would make `None` and `b""` hash identically, so the
+    specification tags presence first. A signer that conflated them would draw
+    one nonce for two sessions, which is the loss described on `SecNonce`.
+    """
+    if message is None:
+        return b"\x00"
+    return b"\x01" + len(message).to_bytes(8, "big") + message
+
+
+def _nonce_hash(
+    rand: bytes,
+    public_key: bytes,
+    aggregate_key: bytes,
+    message_prefixed: bytes,
+    extra_input: bytes,
+    index: int,
+) -> int:
+    """One of the two nonce scalars, before reduction.
+
+    Every variable-length field carries its own length, so no two distinct
+    inputs can concatenate to the same buffer.
+    """
+    payload = b"".join(
+        (
+            rand,
+            len(public_key).to_bytes(1, "big"),
+            public_key,
+            len(aggregate_key).to_bytes(1, "big"),
+            aggregate_key,
+            message_prefixed,
+            len(extra_input).to_bytes(4, "big"),
+            extra_input,
+            index.to_bytes(1, "big"),
+        )
+    )
+    return int.from_bytes(bip340.tagged(_NONCE_TAG, payload), "big")
+
+
+def nonce_gen(
+    rand: bytes,
+    *,
+    public_key: bytes,
+    secret_key: bytes | None = None,
+    aggregate_key: bytes | None = None,
+    message: bytes | None = None,
+    extra_input: bytes | None = None,
+) -> tuple[SecNonce, bytes]:
+    """A signer's nonce pair for one session: the secret and what it publishes.
+
+    `rand` is the caller's randomness and must be fresh per session — the
+    derivation is a pure function of it, which is what makes the published
+    vectors reproducible and what makes reuse fatal (see `SecNonce`).
+
+    Every other input is optional and each one that is supplied narrows the
+    sessions this nonce could belong to. `secret_key` is the strongest: it is
+    folded in by masking `rand`, so the nonce stays unpredictable even if the
+    randomness was not. Passing what is known is always at least as safe as
+    passing nothing.
+    """
+    if len(public_key) != _PUBKEY_SIZE:
+        raise ValueError(f"a public key is {_PUBKEY_SIZE} bytes, not {len(public_key)}")
+    if secret_key is not None:
+        mask = bip340.tagged(_AUX_TAG, rand)
+        rand = bytes(a ^ b for a, b in zip(secret_key, mask, strict=True))
+
+    prefixed = _message_prefix(message)
+    scalars = [
+        _nonce_hash(
+            rand,
+            public_key,
+            aggregate_key or b"",
+            prefixed,
+            extra_input or b"",
+            index,
+        )
+        % _CURVE.n
+        for index in (0, 1)
+    ]
+    if not all(scalars):
+        raise ValueError("the nonce derivation produced a zero scalar")
+
+    points = [secp.host_multiple_of_g(_CURVE, scalar) for scalar in scalars]
+    pubnonce = b"".join(_compressed(x, y) for x, y in points)
+    return SecNonce(scalars[0], scalars[1], public_key), pubnonce
+
+
+def _lift_all(parsed: list[tuple[int, int]], contrib: str) -> np.ndarray:
+    """Every `(x, parity)` to its point, blaming the first sender that has none."""
+    points, lifted = secp.lift_x_to_parity(
+        _CURVE, [x for x, _ in parsed], [parity for _, parity in parsed]
+    )
+    if not lifted.all():
+        raise InvalidContributionError(int(np.argmin(lifted)), contrib)
+    return points
+
+
+def _serialize_ext(point: np.ndarray) -> bytes:
+    """A point that may be the identity, in the wire form BIP-327 gives it.
+
+    The identity serializes as 33 zero bytes — a value no real point occupies,
+    since `x = 0` would need `b` to be a residue. It is a legitimate aggregate
+    nonce rather than a failure: one half of the nonces can cancel while the
+    other does not, and signing continues from it.
+    """
+    if bool(secp.is_identity(_CURVE, point)[0]):
+        return bytes(_PUBKEY_SIZE)
+    return _compressed(*secp.affine_ints(_CURVE, point)[0])
+
+
+def nonce_agg(pubnonces: Sequence[bytes]) -> bytes:
+    """The cosigners' public nonces summed into one, half by half.
+
+    A pubnonce is two points, and they aggregate independently — so the halves
+    are summed separately and either may come out as the identity.
+
+    Raises `InvalidContributionError` naming the cosigner whose nonce cannot be
+    parsed or does not lie on the curve. The halves are checked in order, so a
+    session with faults in both reports the one the specification reports.
+    """
+    if not pubnonces:
+        raise ValueError("nonce aggregation needs at least one nonce")
+
+    halves = []
+    for half in (0, 1):
+        parsed = []
+        for signer, pubnonce in enumerate(pubnonces):
+            if len(pubnonce) != _PUBNONCE_SIZE:
+                raise InvalidContributionError(signer, "pubnonce")
+            window = pubnonce[half * _PUBKEY_SIZE : (half + 1) * _PUBKEY_SIZE]
+            parsed.append(_parse_point(window, signer, "pubnonce"))
+        points = _lift_all(parsed, "pubnonce")
+        halves.append(secp.sum_points(_CURVE, points))
+    return b"".join(_serialize_ext(half) for half in halves)
+
+
 def key_sort(pubkeys: Sequence[bytes]) -> list[bytes]:
     """The cosigner keys in BIP-327's canonical order.
 
@@ -200,13 +381,10 @@ def key_agg(pubkeys: Sequence[bytes]) -> KeyAggContext:
     if not pubkeys:
         raise ValueError("key aggregation needs at least one key")
 
-    parsed = [_parse_pubkey(pubkey, signer) for signer, pubkey in enumerate(pubkeys)]
-    points, lifted = secp.lift_x_to_parity(
-        _CURVE, [x for x, _ in parsed], [parity for _, parity in parsed]
-    )
-    if not lifted.all():
-        raise InvalidContributionError(int(np.argmin(lifted)), "pubkey")
-
+    parsed = [
+        _parse_point(pubkey, signer, "pubkey") for signer, pubkey in enumerate(pubkeys)
+    ]
+    points = _lift_all(parsed, "pubkey")
     aggregate = secp.sum_points(
         _CURVE, secp.multiple(_CURVE, _coefficients(pubkeys), points)
     )

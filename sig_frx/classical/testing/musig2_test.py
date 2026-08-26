@@ -89,6 +89,133 @@ class KeySortTest(absltest.TestCase):
         self.assertEqual([k.hex().upper() for k in sorted_keys], near)
 
 
+def _optional(value: str | None) -> bytes | None:
+    """A vector's optional field. `None` and `""` are different inputs here:
+    an absent message and a present empty one take different prefixes, and the
+    published set pins both."""
+    return None if value is None else bytes.fromhex(value)
+
+
+class NonceGenTest(absltest.TestCase):
+    """BIP-327 `nonce_gen_vectors.json`.
+
+    Nonce generation is deterministic in `rand_`, which is what makes it
+    gateable at all — the deployed call draws `rand_` fresh, and the published
+    cases fix it so the derivation can be compared byte for byte.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.data = _load("bip327_nonce_gen_vectors", "nonce_gen_vectors.json")
+
+    def test_the_published_nonces(self) -> None:
+        cases = self.data["test_cases"]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index):
+                secnonce, pubnonce = musig2.nonce_gen(
+                    bytes.fromhex(case["rand_"]),
+                    public_key=bytes.fromhex(case["pk"]),
+                    secret_key=_optional(case["sk"]),
+                    aggregate_key=_optional(case["aggpk"]),
+                    message=_optional(case["msg"]),
+                    extra_input=_optional(case["extra_in"]),
+                )
+                self.assertEqual(
+                    secnonce.to_bytes().hex().upper(),
+                    case["expected_secnonce"].upper(),
+                )
+                self.assertEqual(
+                    pubnonce.hex().upper(), case["expected_pubnonce"].upper()
+                )
+
+    def test_an_absent_message_is_not_an_empty_one(self) -> None:
+        """The two take different prefixes, so a signer that conflated them
+        would derive one signer's nonce for two different sessions."""
+        case = self.data["test_cases"][0]
+        rand = bytes.fromhex(case["rand_"])
+        public_key = bytes.fromhex(case["pk"])
+        absent = musig2.nonce_gen(rand, public_key=public_key, message=None)
+        empty = musig2.nonce_gen(rand, public_key=public_key, message=b"")
+        self.assertNotEqual(absent[1], empty[1])
+
+    def test_the_secnonce_carries_the_key_it_was_drawn_for(self) -> None:
+        """Its tail is the signer's own public key, which is what lets signing
+        refuse a secnonce drawn for a different key rather than sign with it."""
+        case = self.data["test_cases"][0]
+        secnonce, _ = musig2.nonce_gen(
+            bytes.fromhex(case["rand_"]),
+            public_key=bytes.fromhex(case["pk"]),
+            secret_key=_optional(case["sk"]),
+            aggregate_key=_optional(case["aggpk"]),
+            message=_optional(case["msg"]),
+            extra_input=_optional(case["extra_in"]),
+        )
+        self.assertEqual(secnonce.public_key.hex().upper(), case["pk"].upper())
+
+
+class NonceAggTest(absltest.TestCase):
+    """BIP-327 `nonce_agg_vectors.json`.
+
+    The two halves of a pubnonce aggregate independently, and either can sum to
+    the identity without the other doing so — which is a value the wire format
+    has to carry rather than an error, so the published set pins it.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.data = _load("bip327_nonce_agg_vectors", "nonce_agg_vectors.json")
+
+    def _nonces(self, case: dict[str, Any]) -> list[bytes]:
+        return [bytes.fromhex(self.data["pnonces"][i]) for i in case["pnonce_indices"]]
+
+    def test_the_published_aggregations(self) -> None:
+        cases = self.data["valid_test_cases"]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, comment=case.get("comment", "")):
+                self.assertEqual(
+                    musig2.nonce_agg(self._nonces(case)).hex().upper(),
+                    case["expected"].upper(),
+                )
+
+    def test_a_half_summing_to_the_identity_is_a_value_not_a_failure(self) -> None:
+        """Serialized as 33 zero bytes, which no real point can occupy. A signer
+        that raised here would abort a session the specification continues."""
+        case = next(
+            c
+            for c in self.data["valid_test_cases"]
+            if "infinity" in c.get("comment", "")
+        )
+        aggregate = musig2.nonce_agg(self._nonces(case))
+        self.assertEqual(aggregate[33:], bytes(33))
+        self.assertNotEqual(aggregate[:33], bytes(33))
+
+    def test_an_invalid_contribution_names_its_signer(self) -> None:
+        cases = self.data["error_test_cases"]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, comment=case["comment"]):
+                with self.assertRaises(musig2.InvalidContributionError) as caught:
+                    musig2.nonce_agg(self._nonces(case))
+                self.assertEqual(caught.exception.signer, case["error"]["signer"])
+                self.assertEqual(caught.exception.contrib, "pubnonce")
+
+    def test_a_bad_nonce_is_named_at_whatever_position_it_sits(self) -> None:
+        """As with key aggregation, each published case fixes one position, so
+        the index has to be shown to follow the nonce rather than be a constant."""
+        good = bytes.fromhex(self.data["pnonces"][0])
+        for bad_index in (4, 5, 6):
+            bad = bytes.fromhex(self.data["pnonces"][bad_index])
+            for position in (0, 1, 2):
+                nonces = [good, good, good]
+                nonces[position] = bad
+                with self.subTest(bad_nonce=bad_index, position=position):
+                    with self.assertRaises(musig2.InvalidContributionError) as caught:
+                        musig2.nonce_agg(nonces)
+                    self.assertEqual(caught.exception.signer, position)
+
+
 class KeyAggTest(absltest.TestCase):
     """BIP-327 `key_agg_vectors.json`, every case."""
 

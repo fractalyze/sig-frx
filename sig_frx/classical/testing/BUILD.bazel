@@ -247,6 +247,8 @@ py_test(
     data = [
         "@bip327_key_agg_vectors//file",
         "@bip327_key_sort_vectors//file",
+        "@bip327_nonce_agg_vectors//file",
+        "@bip327_nonce_gen_vectors//file",
     ],
     deps = [
         "//sig_frx/classical:secp",
