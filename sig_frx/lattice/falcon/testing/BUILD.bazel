@@ -10,6 +10,20 @@ load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 # The workstation figure would have argued for `small` too, but it is not what
 # decided this: a CUDA-less box refuses `FRX_PLATFORMS=cuda` rather than falling
 # back, so the GPU leg was unmeasurable there and this waited for CI.
+# 2.7 s locally over the three degrees, so `small` covers it at well under half
+# even at the executor factor this repo records. The O(n^2) reference evaluation
+# at n = 1024 looks like it should cost more than it does.
+py_test(
+    name = "fft_test",
+    size = "small",
+    srcs = ["fft_test.py"],
+    deps = [
+        "//sig_frx/lattice/falcon:fft",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 py_test(
     name = "arith_test",
     size = "small",
