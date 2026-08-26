@@ -19,6 +19,13 @@ array operations over the whole batch.
 
 `low_bits` is where a number is allowed, and only because the values it reads are
 small by construction: a leaf index is `h'` bits, at most 9 at any defined set.
+
+**`big_endian` is the way in.** Everything above reads a byte string and none of
+them makes one, which left every caller that builds one from host numbers to
+spell the reinterpret itself — SHRINCS builds its whole FXMSS tree on the host,
+so it wanted the same conversion at two widths. It is the one function here that
+takes a number and it is host-only, which is what keeps the rule above intact: a
+value that arrives traced never reaches it.
 """
 
 from __future__ import annotations
@@ -56,6 +63,38 @@ def index_column(values: ArrayLike) -> ByteString:
     """
     xnp = namespace(values)
     return xnp.asarray(values, dtype=xnp.uint32).reshape(-1)
+
+
+def big_endian(values: ArrayLike, width: int) -> np.ndarray:
+    """Numbers as `[rows, width]` big-endian bytes — the way into a `ByteString`.
+
+    The counterpart of the readers below, which all take one and none of which
+    make one. Two callers wanted the same reinterpret at different widths: an
+    FXMSS node index at eight bytes, a WOTS+C grinding counter at two.
+
+    Reinterpreted rather than shifted apart, which is what `adrs_encoding` does to
+    an address field and for the same reason: shifting each byte out costs a
+    multiply per element, and these are built a whole batch at a time.
+
+    Host-only. A value that does not fit `width` wraps rather than raising, so a
+    caller passes one it has already bounded — both of this module's do, by the
+    format that gave them the width.
+    """
+    # The limit is this reinterpret's, not the encoding's — `adrs_encoding` writes
+    # FIPS 205's twelve-byte tree address big-endian one module away. A width
+    # numpy has no unsigned dtype for needs a different construction, not this
+    # function with a wider argument.
+    if width not in (1, 2, 4, 8):
+        raise ValueError(
+            f"a big-endian reinterpret needs a 1, 2, 4 or 8 byte unsigned dtype, "
+            f"got width {width}"
+        )
+    return (
+        np.asarray(values, dtype=np.uint64)
+        .astype(f">u{width}")
+        .view(np.uint8)
+        .reshape(-1, width)
+    )
 
 
 def is_bytes(value: int | ByteString) -> bool:

@@ -32,13 +32,17 @@ over to any SHRINCS key sharing the stateless half. And the first byte of a
 SHRINCS signature is the indicator: `255` selects this path, anything below it
 selects the stateful one.
 
-**Verification only, and it does not implement `Signature`.** A SHRINCS key pair
-cannot be generated without the stateful tree, since `sf_root` is one of the three
-values a public key is made of — so there is no `keygen` here to have, and no
-`sign` without one. Putting a half-built `Shrincs` on the seam would be worse than
-leaving it off: its `verify` would reject every valid *stateful* signature, which
-is a wrong answer rather than a missing one. The seam arrives with the stateful
-component.
+**It does not implement `Signature`, and there is no `keygen` here.** A SHRINCS
+key pair cannot be generated without the stateful tree, since `sf_root` is one of
+the three values a public key is made of — so key generation is
+[`shrincs.py`](shrincs.py)'s and this module has only the two operations the
+wrapper covers.
+
+`sign` takes the pieces it binds rather than a whole SHRINCS secret key, where
+`verify` splits a whole public key. That is not an inconsistency: the 48-byte
+public key is `PUBLIC_KEY_SIZE` here, so splitting it is this module's own
+format, while the 82-byte secret key carries the FXMSS structure bytes and is
+`shrincs.py`'s. Each module parses the format it names.
 
 That is also both halves of why the shared known-answer harness does not drive
 this — `testing.md` asks for both to be named. There is no published format
@@ -99,6 +103,48 @@ class Stateless:
 
     def __hash__(self) -> int:
         return hash((type(self), self.slh_dsa))
+
+    def sign(
+        self,
+        slh_dsa_secret_key: ArrayLike,
+        sf_root: ArrayLike,
+        message: ArrayLike,
+        *,
+        randomness: ArrayLike | None = None,
+        context: ArrayLike | None = None,
+    ) -> Array:
+        """A stateless SHRINCS signature: the indicator byte, then SLH-DSA's.
+
+        `slh_dsa_secret_key` is `SK.seed ‖ SK.prf ‖ PK.seed ‖ sl_root` and
+        `sf_root` is the stateful half of the public key, which binds the message
+        the way `verify` undoes. `randomness` is FIPS 205's `opt_rand`: this
+        instance is the hedged variant, so it is required — the deterministic
+        substitution of `PK.seed` for it would silently produce a different, still
+        valid signature, which nothing downstream would notice.
+
+        `[SIGNATURE_SIZE]` exactly, this path having no variable length; the seam's
+        padding is `shrincs.py`'s to apply because a stateful signature is shorter.
+        """
+        secret = fnp.asarray(slh_dsa_secret_key, dtype=fnp.uint8)
+        if secret.shape != (PARAMS.secret_key_size,):
+            raise ValueError(
+                f"an SLH-DSA secret key is [{PARAMS.secret_key_size}], got shape "
+                f"{tuple(secret.shape)}"
+            )
+        bound = fnp.concatenate(
+            [
+                fnp.asarray(sf_root, dtype=fnp.uint8),
+                fnp.asarray(message, dtype=fnp.uint8),
+            ]
+        )
+        return fnp.concatenate(
+            [
+                fnp.full(1, STATELESS_INDICATOR, dtype=fnp.uint8),
+                self.slh_dsa.sign(
+                    secret, bound, randomness=randomness, context=context
+                ),
+            ]
+        )
 
     def verify(
         self,

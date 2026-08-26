@@ -1,11 +1,23 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""The seam verifies both SHRINCS paths, and tells them apart per entry.
+"""The seam verifies both SHRINCS paths, tells them apart, and makes them.
 
 The component tests below this one gate the pieces — WOTS+C against the leaf it
 recovers, FXMSS against the root it climbs to, the stateless half against the
 SLH-DSA it wraps. What is left for this one is the assembly: the indicator byte
 that chooses a path, the variable-width field that says where the FXMSS signature
 starts, and the select that keeps one entry's verdict out of its neighbour's.
+
+**A signature made here is checked against the reference's bytes, not against
+this repo's own verifier.** A round trip proves that signing and verifying agree,
+which a self-consistently wrong implementation does forever; what the vectors say
+is that both halves are the specification's. So `SignerTest` compares whole
+signatures byte for byte and treats the round trip as the second check rather
+than the first.
+
+The counter is the other thing this file has to hold: a leaf that signs twice
+reveals its secret, so what is gated is that the value handed back is the one the
+caller must store, and that a counter past the tree's last leaf raises instead of
+quietly becoming a stateless signature five times the length.
 """
 
 from __future__ import annotations
@@ -328,20 +340,156 @@ class StatelessAtTheSeamTest(absltest.TestCase):
         )
 
 
-class SignerTest(absltest.TestCase):
-    def test_key_generation_says_what_it_needs(self) -> None:
-        with self.assertRaisesRegex(NotImplementedError, "FXMSS tree"):
-            shrincs.Shrincs().keygen(np.zeros(48, dtype=np.uint8))
+def _signer(case: vectors.StatefulVectors) -> shrincs.Shrincs:
+    """A scheme built over the tree this case's key was generated with."""
+    return shrincs.Shrincs(np.array([case.shape, case.depth], dtype=np.uint8))
 
-    def test_there_is_no_seam_shaped_sign(self) -> None:
-        """A stateful signer returns the advanced key too — see `signature.py`."""
-        self.assertFalse(hasattr(shrincs.Shrincs(), "sign"))
+
+def _seed(case: vectors.StatefulVectors) -> np.ndarray:
+    return np.frombuffer(case.seed, dtype=np.uint8)
+
+
+def _secret_key(seed: bytes, public_key: bytes, shape: int, depth: int) -> np.ndarray:
+    """The 82 bytes assembled from what a case records, rather than regenerated.
+
+    `test_every_reference_key_pair_is_regenerated` is what pins this layout
+    against `keygen`; every other test here is about signing, and building the key
+    rather than deriving it saves each of them a whole FXMSS tree.
+    """
+    return np.frombuffer(
+        seed + public_key[16:32] + bytes([shape, depth]) + public_key[32:],
+        dtype=np.uint8,
+    )
+
+
+class SignerTest(absltest.TestCase):
+    def test_every_reference_key_pair_is_regenerated(self) -> None:
+        """`pk_seed ‖ sl_root ‖ sf_root`, and the 82 bytes the reference serializes."""
+        for case in vectors.REFERENCE:
+            with self.subTest(case.label):
+                public, secret = _signer(case).keygen(_seed(case))
+                self.assertEqual(bytes(np.asarray(public)), case.public_key)
+                self.assertEqual(
+                    bytes(np.asarray(secret)),
+                    case.seed
+                    + case.sl_root
+                    + bytes([case.shape, case.depth])
+                    + case.sf_root,
+                )
+
+    def test_every_reference_signature_is_reproduced(self) -> None:
+        """From the recorded seed and counter — the stateful path draws nothing."""
+        for case in vectors.REFERENCE:
+            with self.subTest(case.label):
+                signature, counter = _signer(case).sign(
+                    _secret_key(case.seed, case.public_key, case.shape, case.depth),
+                    np.frombuffer(case.message, dtype=np.uint8),
+                    case.state_counter,
+                    context=_ctx(case.context),
+                )
+                made = bytes(np.asarray(signature))
+                self.assertEqual(made, _padded(case.signature))
+                self.assertEqual(counter, case.state_counter + 1)
+
+    def test_a_signature_this_made_verifies(self) -> None:
+        """The round trip, which is the second check and not the first.
+
+        Both paths under one key, at the batch width the rest of the file uses so
+        that it costs no further compile.
+        """
+        case = vectors.BOTH_PATHS
+        scheme = shrincs.Shrincs(np.array([case.shape, case.depth], dtype=np.uint8))
+        secret = _secret_key(case.seed, case.public_key, case.shape, case.depth)
+        message = np.frombuffer(case.message, dtype=np.uint8)
+        stateful, next_counter = scheme.sign(
+            secret, message, case.state_counter, context=_ctx(case.context)
+        )
+        stateless_signature, no_counter = scheme.sign(
+            secret,
+            message,
+            None,
+            randomness=np.frombuffer(case.stateless_opt_rand, dtype=np.uint8),
+            context=_ctx(case.context),
+        )
+        self.assertEqual(bytes(np.asarray(stateful)), _padded(case.stateful_signature))
+        self.assertEqual(
+            bytes(np.asarray(stateless_signature)), case.stateless_signature
+        )
+        self.assertEqual(next_counter, case.state_counter + 1)
+        # No counter in, no counter back: the stateless path spends no leaf, so
+        # there is nothing for the caller to store.
+        self.assertIsNone(no_counter)
+        self.assertEqual(
+            int(np.asarray(stateless_signature)[0]),
+            shrincs.stateless.STATELESS_INDICATOR,
+        )
+        self.assertEqual(
+            _verdicts(
+                scheme,
+                [
+                    (case.public_key, case.message, bytes(np.asarray(stateful))),
+                    (
+                        case.public_key,
+                        case.message,
+                        bytes(np.asarray(stateless_signature)),
+                    ),
+                ],
+                case.context,
+            ),
+            [True, True],
+        )
+
+    def test_a_spent_counter_raises_rather_than_falling_back(self) -> None:
+        """The reference signs statelessly here; a caller that lost count is told.
+
+        A silent fallback is a signature five times the length under a path the
+        caller did not choose, which is the sort of thing noticed in production
+        rather than in a test.
+        """
+        case = vectors.REFERENCE[0]
+        with self.assertRaisesRegex(ValueError, "no leaf left"):
+            _signer(case).sign(
+                _secret_key(case.seed, case.public_key, case.shape, case.depth),
+                np.frombuffer(case.message, dtype=np.uint8),
+                2**case.depth,
+                context=_ctx(case.context),
+            )
+
+    def test_a_salt_the_stateful_path_cannot_use_is_refused(self) -> None:
+        """Ignoring it would leave a caller believing it salted something."""
+        case = vectors.REFERENCE[0]
+        with self.assertRaisesRegex(ValueError, "nowhere to put"):
+            _signer(case).sign(
+                _secret_key(case.seed, case.public_key, case.shape, case.depth),
+                np.frombuffer(case.message, dtype=np.uint8),
+                case.state_counter,
+                randomness=np.zeros(16, dtype=np.uint8),
+                context=_ctx(case.context),
+            )
+
+    def test_a_verifier_cannot_generate_a_key(self) -> None:
+        """The shape is not something a verifier has, and not something to guess."""
+        with self.assertRaisesRegex(ValueError, "no tree structure"):
+            shrincs.Shrincs().keygen(np.zeros(48, dtype=np.uint8))
 
 
 class ValueTest(absltest.TestCase):
     def test_equality_and_hash_are_value_based(self) -> None:
         self.assertEqual(shrincs.Shrincs(), shrincs.Shrincs())
         self.assertEqual(hash(shrincs.Shrincs()), hash(shrincs.Shrincs()))
+
+    def test_two_trees_are_two_schemes(self) -> None:
+        """The structure rides pytree aux, so an instance that forgot it re-traces."""
+        balanced = np.array([fxmss.SHAPE_BALANCED, 4], dtype=np.uint8)
+        self.assertEqual(shrincs.Shrincs(balanced), shrincs.Shrincs(balanced))
+        self.assertEqual(
+            hash(shrincs.Shrincs(balanced)), hash(shrincs.Shrincs(balanced))
+        )
+        self.assertNotEqual(shrincs.Shrincs(balanced), shrincs.Shrincs())
+        self.assertNotEqual(
+            shrincs.Shrincs(balanced),
+            shrincs.Shrincs(np.array([fxmss.SHAPE_UNBALANCED, 4], dtype=np.uint8)),
+        )
 
 
 if __name__ == "__main__":

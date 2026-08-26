@@ -117,6 +117,33 @@ def _batched(value: ArrayLike, batch: int) -> Array:
     return array
 
 
+def hmac(
+    byte_hash: ByteHash,
+    key: ArrayLike,
+    message: ArrayLike,
+    *,
+    block_size: int | None = None,
+) -> Array:
+    """HMAC over `byte_hash` — FIPS 198-1, on one message.
+
+    A module function because the second caller is not a family. `PRF_msg` is one
+    of these keyed by `SK.prf` and `Sha2TweakableHash` owns it; SHRINCS's stateful
+    path keys the same construction with `sk_prf` filled out to a whole block,
+    which is that scheme's own construction and not a tweakable hash's.
+
+    The block size comes off the hash rather than from the caller, because a block
+    size that disagrees with its hash produces a self-consistent wrong MAC — one
+    that verifies against itself forever. `block_size` overrides it for the case
+    the table cannot name, which is the same case `Sha2TweakableHash` takes one
+    for: a hash built to count calls rather than to be looked up.
+    """
+    payload = fnp.asarray(message, dtype=fnp.uint8)
+    width = block_size if block_size is not None else block_size_of(byte_hash)
+    return fnp.asarray(
+        Hmac(byte_hash, width).mac(key, payload[None, :]), dtype=fnp.uint8
+    )[0]
+
+
 def repeat_per_entry(value: ArrayLike, times: int) -> Array:
     """Line a per-entry operand up with an entry-major batch of `times` rows each.
 
@@ -258,9 +285,8 @@ class Sha2TweakableHash:
         return fnp.asarray(Mgf1(self._byte_hash, length).digest(seed), dtype=fnp.uint8)
 
     def _hmac(self, key: ArrayLike, message: Array) -> Array:
-        """HMAC over the injected hash — FIPS 198-1, on one message."""
-        mac = Hmac(self._byte_hash, self._block_size).mac(key, message[None, :])
-        return fnp.asarray(mac, dtype=fnp.uint8)[0]
+        """This family's own block size, over `hmac`."""
+        return hmac(self._byte_hash, key, message, block_size=self._block_size)
 
     def _digest(self, messages: Array) -> Array:
         return fnp.asarray(self._byte_hash.digest(messages), dtype=fnp.uint8)

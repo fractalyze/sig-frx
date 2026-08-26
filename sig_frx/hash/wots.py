@@ -22,7 +22,7 @@ argument and XMSS supplies its own.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import cached_property, lru_cache
 
@@ -202,7 +202,7 @@ def chain(
     values: ArrayLike,
     start: ArrayLike,
     steps: ArrayLike,
-    step_addresses: Sequence[ArrayLike],
+    step_addresses: Iterable[ArrayLike],
 ) -> Array:
     """`chain` — FIPS 205 §5, Algorithm 5, for a whole batch of chains at once.
 
@@ -210,11 +210,13 @@ def chain(
     the standards agree here, and `ChainHash` is what lets both supply theirs.
 
     Entry `k` iterates `F` on `values[k]` for `steps[k]` applications beginning at
-    index `start[k]`. `step_addresses[j]` holds every entry's address for step
-    `j`, which the caller built on the host — the hash address advances with the
-    step, so the addresses differ per step and not just per chain.
+    index `start[k]`. `step_addresses` yields every entry's address for step `j`
+    in turn, which the caller built on the host — the hash address advances with
+    the step, so the addresses differ per step and not just per chain. It is read
+    once and forward, so a caller whose addresses are large may hand over a
+    generator rather than materializing every step at once.
 
-    The work is `len(step_addresses)` batched hashes regardless of the starts and
+    The work is one batched hash per step regardless of the starts and
     steps: an entry that has already stopped is hashed anyway and its result
     discarded by the select. That is the point — the alternative branches on
     secret-adjacent data.

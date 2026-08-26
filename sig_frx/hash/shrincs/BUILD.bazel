@@ -54,9 +54,11 @@ py_library(
     ],
 )
 
-# The FXMSS tree, verification side. The walk is not `//sig_frx/hash:tree`'s: the
-# leaf index is 64 bits where that one takes a lane-wide column, and the depth
-# varies per entry where that one is a fixed height.
+# The FXMSS tree. The verification walk is not `//sig_frx/hash:tree`'s: the leaf
+# index is 64 bits where that one takes a lane-wide column, and the depth varies
+# per entry where that one is a fixed height. Key generation is the other way
+# around — a balanced tree is an ordinary Merkle forest — so the dependency is
+# the signer's.
 py_library(
     name = "fxmss",
     srcs = [
@@ -68,6 +70,7 @@ py_library(
         ":adrs",
         ":wots_c",
         "//sig_frx/hash:bytestring",
+        "//sig_frx/hash:tree",
         "//sig_frx/hash:tweakable",
         requirement("frx"),
         requirement("numpy"),

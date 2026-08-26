@@ -14,14 +14,16 @@ py_library(
     ],
 )
 
-# `medium` on the executor rather than on this measurement. The CPU leg here is
-# 10.0 s — every verification shares one batch shape, so the suite pays one
-# compile of the verification program and not one per distinct `B` — and bazel
-# reports the size as oversized on that basis. It stays `medium` until CI says
-# otherwise: this package measures 2.1-2.7x slower on the executor and the GPU
-# leg is the one that compiles worst, which together put the worst run near
-# `small`'s 60 s. Sized from the slowest leg's worst run, per
-# ../../../../docs/reference/measurement.md.
+# `medium`, decided by the CPU leg: 105.1 s worst across this branch's three CI
+# runs against 89.6 s on the GPU leg, which is 35% of the 300 s budget. Signing
+# landed here since the last sizing and one stateless signature is 5776 bytes of
+# FORS and hypertree, which is why `SigningTest` makes one and not one per case;
+# every verification still shares one batch shape, so the suite pays one compile
+# of the verification program and not one per distinct `B`.
+#
+# The workstation reads 26.7 s and did not decide this. The executor factor is
+# per-target — 3.9x for this one — so a local CPU number cannot size a
+# CPU-decided budget, per ../../../../docs/reference/measurement.md.
 py_test(
     name = "stateless_test",
     size = "medium",
@@ -43,13 +45,11 @@ py_library(
     ],
 )
 
-# `medium`, decided by the GPU leg: 9.4 s to 26.4 s there across runs against
-# 4.4 s on CPU, and the top of that range is 44% of `small`'s 60 s before any
-# further spread. Sized from the worst run. This workstation's GPU
-# measures within a few percent of CI's for the targets whose numbers are
-# recorded — `slh_dsa_traced_test` is 182.2 s here against 177.7 s there — so the
-# 2.1-2.7x executor factor in this repo's other comments is the CPU leg's and
-# does not apply on top. Sized from the slowest leg's worst run, per
+# `medium`, decided by the GPU leg: 37.8 s worst across this branch's three CI
+# runs against 23.3 s on the CPU leg — 13% of the 300 s budget, and the cheapest
+# target in the package because the signer's tests here add one leaf per case.
+# It clears `small`'s 60 s by less than the CPU leg's spread across runs of one
+# commit, so it stays where it is. Sized from the slowest leg's worst run, per
 # ../../../../docs/reference/measurement.md.
 py_test(
     name = "wots_c_test",
@@ -65,10 +65,12 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
-# `medium` on the GPU leg's worst run, 53.7 s against 23.1 s on a quiet one
-# (9.7 s on CPU) — 18% of its 300 s. The walk
-# runs to the format's full 255 steps for every entry, so this is a floor rather
-# than a function of the cases.
+# `medium`, decided by the CPU leg: 86.2 s worst across this branch's three CI
+# runs against 81.7 s on the GPU leg — 29% of the 300 s budget. The verify walk
+# runs to the format's full 255 steps for every entry, so that half is a floor
+# rather than a function of the cases; the signer's half is not, and it is why
+# `SignerTest` builds every case's root but signs one case per shape. Sized from
+# the slowest leg's worst run, per ../../../../docs/reference/measurement.md.
 py_test(
     name = "fxmss_test",
     size = "medium",
@@ -76,6 +78,7 @@ py_test(
     deps = [
         ":stateful_vectors",
         "//sig_frx/hash:tweakable",
+        "//sig_frx/hash/shrincs",
         "//sig_frx/hash/shrincs:fxmss",
         "@hash_frx//hash_frx",
         requirement("absl_py"),
@@ -83,13 +86,23 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
-# `medium` on the GPU leg's worst run, 110.4 s against 63.1 s on a quiet one
-# (28.3 s on CPU) — 37% of its 300 s at the top, which clears the
-# half-a-budget rule. Every entry of every call runs both signing paths, so
-# the seam's test is the package's dearest by construction.
+# `large`, and the CPU leg is what decides it. Across this branch's three CI runs
+# the worst was 267.6 s against a `medium` budget of 300 s — 89% of it, where
+# ../../../../docs/reference/measurement.md moves a target up at half — and the
+# CPU leg's spread across runs of one commit is a median 2.2x, so the run that
+# times out is one that has not happened yet. The GPU leg is the quieter one
+# here, 114.7-162.6 s. A local measurement said 28% and would have kept this at
+# `medium`: the executor factor is per-target, which is why that page says a
+# local number does not size a CPU-decided budget.
+#
+# It is the package's dearest test by construction — every entry of every call
+# runs both signing paths — and the signer adds an FXMSS tree per case on top.
+# The tests that need only a secret key build the 82 bytes from what a case
+# records rather than calling `keygen`, which is a tree each; without that it
+# would be dearer still.
 py_test(
     name = "shrincs_test",
-    size = "medium",
+    size = "large",
     srcs = ["shrincs_test.py"],
     deps = [
         ":stateful_vectors",
