@@ -7,7 +7,7 @@ fixtures archive carries permutation vectors, SSZ container vectors and
 `PROD_CONFIG` keys, but its signature-shaped families are leanMultisig aggregate
 proofs rather than XMSS signatures, so nothing upstream pins a `compress` or a
 `sponge` call. That makes the reference implementation the authority — third in
-the order [`conventions.md`](../../../../docs/reference/conventions.md) fixes —
+the order [`testing.md`](../../../../docs/reference/testing.md) fixes —
 and gating on one costs the provenance below.
 
 ## Provenance
