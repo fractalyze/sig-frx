@@ -46,7 +46,7 @@ _CURVE = secp.SECP256K1
 # `SHA256(SHA256(tag) || SHA256(tag) || x)`).
 _AUX = hashlib.sha256(b"BIP0340/aux").digest()
 _NONCE = hashlib.sha256(b"BIP0340/nonce").digest()
-_CHALLENGE = hashlib.sha256(b"BIP0340/challenge").digest()
+CHALLENGE = hashlib.sha256(b"BIP0340/challenge").digest()
 
 
 def tagged(prefix: bytes, payload: bytes) -> bytes:
@@ -120,7 +120,7 @@ class Bip340:
         r_bytes = rx.to_bytes(32, "big")
 
         e = (
-            int.from_bytes(tagged(_CHALLENGE, r_bytes + p_bytes + message_bytes), "big")
+            int.from_bytes(tagged(CHALLENGE, r_bytes + p_bytes + message_bytes), "big")
             % n
         )
         scalar = _CURVE.scalar
@@ -278,7 +278,7 @@ class Bip340:
         return [
             int.from_bytes(
                 tagged(
-                    _CHALLENGE,
+                    CHALLENGE,
                     entry[:32].tobytes() + key.tobytes() + row.tobytes(),
                 ),
                 "big",

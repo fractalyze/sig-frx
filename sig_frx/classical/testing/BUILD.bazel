@@ -252,15 +252,22 @@ py_binary(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# `medium` rather than `small` because the signing stage made this real work:
+# 17 s locally, and `measurement.md` puts the CI executor at 1.6x to 3.4x a
+# workstation per target, which projects to 27-58 s against `small`'s 60 s
+# budget. That is at or past the half the page moves a target up at, and it
+# says plainly that a local number cannot size a CPU-decided budget — so the
+# cheap direction is the correct one until a CI run says otherwise.
 py_test(
     name = "musig2_test",
-    size = "small",
+    size = "medium",
     srcs = ["musig2_test.py"],
     data = [
         "@bip327_key_agg_vectors//file",
         "@bip327_key_sort_vectors//file",
         "@bip327_nonce_agg_vectors//file",
         "@bip327_nonce_gen_vectors//file",
+        "@bip327_sign_verify_vectors//file",
     ],
     deps = [
         "//sig_frx/classical:secp",

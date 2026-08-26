@@ -227,6 +227,163 @@ class NonceAggTest(absltest.TestCase):
                     self.assertEqual(caught.exception.signer, position)
 
 
+class _SignVectors(absltest.TestCase):
+    """Shared reading of `sign_verify_vectors.json`, whose cases index into six
+    shared corpora rather than carrying their own values."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.data = _load("bip327_sign_verify_vectors", "sign_verify_vectors.json")
+
+    def _keys(self, case: dict[str, Any]) -> list[bytes]:
+        return [bytes.fromhex(self.data["pubkeys"][i]) for i in case["key_indices"]]
+
+    def _pnonces(self, case: dict[str, Any]) -> list[bytes]:
+        return [bytes.fromhex(self.data["pnonces"][i]) for i in case["nonce_indices"]]
+
+    def _session(self, case: dict[str, Any]) -> Any:
+        return musig2.Session(
+            aggnonce=bytes.fromhex(self.data["aggnonces"][case["aggnonce_index"]]),
+            pubkeys=self._keys(case),
+            message=bytes.fromhex(self.data["msgs"][case["msg_index"]]),
+        )
+
+    def _secnonce(self, case: dict[str, Any]) -> Any:
+        index = case.get("secnonce_index", 0)
+        return musig2.SecNonce.from_bytes(bytes.fromhex(self.data["secnonces"][index]))
+
+
+class SignTest(_SignVectors):
+    """BIP-327 `sign_verify_vectors.json`, the signing half."""
+
+    def test_the_published_partial_signatures(self) -> None:
+        cases = self.data["valid_test_cases"]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, comment=case.get("comment", "")):
+                psig = musig2.sign(
+                    self._secnonce(case),
+                    bytes.fromhex(self.data["sk"]),
+                    self._session(case),
+                )
+                self.assertEqual(psig.hex().upper(), case["expected"].upper())
+
+    def test_an_aggregate_nonce_of_infinity_still_signs(self) -> None:
+        """`R'` at infinity falls back to the generator rather than aborting —
+        a session the specification carries on with, so a signer that raised
+        would strand every cosigner whose nonces happened to cancel."""
+        case = next(
+            c
+            for c in self.data["valid_test_cases"]
+            if "infinity" in c.get("comment", "")
+        )
+        aggnonce = bytes.fromhex(self.data["aggnonces"][case["aggnonce_index"]])
+        self.assertEqual(aggnonce, bytes(66))
+        psig = musig2.sign(
+            self._secnonce(case), bytes.fromhex(self.data["sk"]), self._session(case)
+        )
+        self.assertEqual(psig.hex().upper(), case["expected"].upper())
+
+    def test_a_faulty_cosigner_key_is_blamed_and_a_faulty_aggnonce_is_not(
+        self,
+    ) -> None:
+        """`signer` is `None` for an aggregate-nonce fault, and that is the
+        distinction rather than an omission: the aggregate is the coordinator's
+        own product, so no cosigner sent it and none can be excluded for it."""
+        cases = [
+            c
+            for c in self.data["sign_error_test_cases"]
+            if c["error"]["type"] == "invalid_contribution"
+        ]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, comment=case["comment"]):
+                with self.assertRaises(musig2.InvalidContributionError) as caught:
+                    musig2.sign(
+                        self._secnonce(case),
+                        bytes.fromhex(self.data["sk"]),
+                        self._session(case),
+                    )
+                self.assertEqual(caught.exception.signer, case["error"]["signer"])
+                self.assertEqual(caught.exception.contrib, case["error"]["contrib"])
+
+    def test_a_secnonce_out_of_range_refuses_to_sign(self) -> None:
+        """The specification's own comment on this case is that it may indicate
+        nonce reuse, which is the failure this scheme cannot recover from."""
+        case = next(
+            c
+            for c in self.data["sign_error_test_cases"]
+            if c["error"].get("message", "").startswith("first secnonce")
+        )
+        with self.assertRaises(ValueError):
+            musig2.sign(
+                self._secnonce(case),
+                bytes.fromhex(self.data["sk"]),
+                self._session(case),
+            )
+
+    def test_a_signer_outside_the_key_list_refuses_to_sign(self) -> None:
+        """Optional in BIP-327 and taken: a partial signature under a key the
+        session never aggregated cannot combine, so signing is the cheap place
+        to say so rather than leaving a silent aggregation failure."""
+        case = next(
+            c
+            for c in self.data["sign_error_test_cases"]
+            if "must be included" in c["error"].get("message", "")
+        )
+        with self.assertRaises(ValueError):
+            musig2.sign(
+                self._secnonce(case),
+                bytes.fromhex(self.data["sk"]),
+                self._session(case),
+            )
+
+    def test_the_secnonce_round_trips_through_its_bytes(self) -> None:
+        raw = bytes.fromhex(self.data["secnonces"][0])
+        self.assertEqual(musig2.SecNonce.from_bytes(raw).to_bytes(), raw)
+
+
+class PartialSigVerifyTest(_SignVectors):
+    """BIP-327 `sign_verify_vectors.json`, the verification half.
+
+    A wrong signature is a `False`, and an unusable contribution is a raise.
+    The split is the specification's and it matters: the first is a cosigner
+    who signed something else, the second is one who sent something that is
+    not a signature at all.
+    """
+
+    def _verify(self, case: dict[str, Any], sig: bytes) -> bool:
+        return musig2.partial_sig_verify(
+            sig,
+            self._pnonces(case),
+            self._keys(case),
+            bytes.fromhex(self.data["msgs"][case["msg_index"]]),
+            case["signer_index"],
+        )
+
+    def test_the_published_partial_signatures_verify(self) -> None:
+        for index, case in enumerate(self.data["valid_test_cases"]):
+            with self.subTest(case=index):
+                self.assertTrue(self._verify(case, bytes.fromhex(case["expected"])))
+
+    def test_a_wrong_partial_signature_is_false_not_an_error(self) -> None:
+        cases = self.data["verify_fail_test_cases"]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, comment=case["comment"]):
+                self.assertFalse(self._verify(case, bytes.fromhex(case["sig"])))
+
+    def test_an_unusable_contribution_raises_and_names_its_signer(self) -> None:
+        cases = self.data["verify_error_test_cases"]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, comment=case["comment"]):
+                with self.assertRaises(musig2.InvalidContributionError) as caught:
+                    self._verify(case, bytes.fromhex(case["sig"]))
+                self.assertEqual(caught.exception.signer, case["error"]["signer"])
+                self.assertEqual(caught.exception.contrib, case["error"]["contrib"])
+
+
 class KeyAggTest(absltest.TestCase):
     """BIP-327 `key_agg_vectors.json`, every case."""
 
