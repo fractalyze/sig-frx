@@ -159,12 +159,19 @@ class Structure:
         return HEIGHT - self.depth
 
     def holds(self, leaf_index: int, leaf_height: int) -> bool:
-        """Whether a WOTS+C leaf of this tree sits at that position.
+        """Whether a WOTS+C leaf of this tree can sign from that position.
+
+        Can sign, not merely exists. The two readings part at depth zero, where
+        the tree is one leaf standing at the root's height that no counter names,
+        and `sign` wants this one — a position `leaf` will never hand out is not a
+        position a signature may be made at.
 
         Asked rather than looked up: a balanced tree of depth 20 has a million
         leaves, and a signer should not walk them to find out that the one it was
         handed is among them.
         """
+        if self.leaf_count == 0:
+            return False
         if leaf_height == self.bottom and leaf_index == 0:
             return True
         if self.shape == SHAPE_BALANCED:

@@ -231,6 +231,9 @@ class StructureTest(absltest.TestCase):
                 self.assertEqual(structure.leaf_count, 0)
                 with self.assertRaisesRegex(ValueError, "no leaf left"):
                     structure.leaf(0)
+                # The leaf is built and still may not sign, so the two questions
+                # part here and `holds` answers the one `sign` asks.
+                self.assertFalse(structure.holds(0, fxmss.HEIGHT))
 
     def test_an_unknown_shape_is_refused(self) -> None:
         """Refused rather than defaulted — see `Structure.parse`."""
@@ -312,6 +315,31 @@ class SignerTest(absltest.TestCase):
                 case.leaf_height - 1,
                 case.leaf_index,
             )
+
+    def test_the_one_leaf_of_a_depth_zero_tree_cannot_be_signed_from(self) -> None:
+        """Built is not signable: `sign` refuses where `leaf` hands out nothing.
+
+        The position is the tree's only leaf, so a guard that asked whether a leaf
+        exists there would pass it through to an authentication path of no nodes.
+        """
+        case = vectors.DEPTH_ZERO
+        sk_seed = np.frombuffer(case.seed[:16], dtype=np.uint8)
+        pk_seed = np.frombuffer(case.seed[32:], dtype=np.uint8)
+        for shape in (fxmss.SHAPE_UNBALANCED, fxmss.SHAPE_BALANCED):
+            with self.subTest(shape=shape):
+                with self.assertRaisesRegex(ValueError, "no leaf of this tree"):
+                    fxmss.sign(
+                        _TWEAK,
+                        pk_seed,
+                        sk_seed,
+                        fxmss.Structure(shape=shape, depth=0),
+                        # Any digest: the guard fires before one is read.
+                        np.frombuffer(
+                            vectors.REFERENCE[0].message_digest, dtype=np.uint8
+                        ),
+                        fxmss.HEIGHT,
+                        0,
+                    )
 
 
 if __name__ == "__main__":
