@@ -478,6 +478,92 @@ class PartialSigAggTest(absltest.TestCase):
                 self.assertEqual(caught.exception.contrib, "psig")
 
 
+class DeterministicSignTest(absltest.TestCase):
+    """BIP-327 `det_sign_vectors.json`.
+
+    The two-round protocol collapsed into one for the last signer: given every
+    other cosigner's nonces already aggregated, this derives its own nonce from
+    the message and signs in a single step, so a signer with no state between
+    rounds can still take part.
+
+    It does not remove the reason nonces must not repeat — it removes the
+    *window*. The nonce is a function of the secret key, the other nonces and
+    the message, so signing the same session twice reproduces it harmlessly and
+    signing two different ones cannot collide.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.data = _load("bip327_det_sign_vectors", "det_sign_vectors.json")
+
+    def _call(self, case: dict[str, Any]) -> tuple[bytes, bytes]:
+        return musig2.deterministic_sign(
+            bytes.fromhex(self.data["sk"]),
+            bytes.fromhex(case["aggothernonce"]),
+            [bytes.fromhex(self.data["pubkeys"][i]) for i in case["key_indices"]],
+            bytes.fromhex(self.data["msgs"][case["msg_index"]]),
+            rand=_optional(case["rand"]),
+            tweaks=[
+                (bytes.fromhex(tw), xonly)
+                for tw, xonly in zip(case["tweaks"], case["is_xonly"], strict=True)
+            ],
+        )
+
+    def test_the_published_nonces_and_signatures(self) -> None:
+        cases = self.data["valid_test_cases"]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, comment=case.get("comment", "")):
+                pubnonce, psig = self._call(case)
+                self.assertEqual(pubnonce.hex().upper(), case["expected"][0].upper())
+                self.assertEqual(psig.hex().upper(), case["expected"][1].upper())
+
+    def test_it_is_deterministic_without_randomness(self) -> None:
+        """`rand` is optional here where `nonce_gen` requires it, because the
+        message and the other cosigners' nonces already make the derivation
+        unique to the session. The published set pins a `None` case."""
+        case = next(c for c in self.data["valid_test_cases"] if c["rand"] is None)
+        self.assertEqual(self._call(case), self._call(case))
+
+    def test_a_faulty_other_nonce_blames_nobody(self) -> None:
+        """`aggothernonce` is the coordinator's aggregate, so its contribution
+        name is its own and its signer is `None` — the same distinction the
+        session's aggregate nonce draws, and it must survive being produced by
+        a `nonce_agg` that would otherwise blame position one."""
+        cases = [
+            c
+            for c in self.data["error_test_cases"]
+            if c["error"].get("contrib") == "aggothernonce"
+        ]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, comment=case["comment"]):
+                with self.assertRaises(musig2.InvalidContributionError) as caught:
+                    self._call(case)
+                self.assertIsNone(caught.exception.signer)
+                self.assertEqual(caught.exception.contrib, "aggothernonce")
+
+    def test_a_faulty_cosigner_key_is_still_blamed_by_position(self) -> None:
+        case = next(
+            c
+            for c in self.data["error_test_cases"]
+            if c["error"].get("contrib") == "pubkey"
+        )
+        with self.assertRaises(musig2.InvalidContributionError) as caught:
+            self._call(case)
+        self.assertEqual(caught.exception.signer, case["error"]["signer"])
+
+    def test_the_value_errors_the_published_set_names(self) -> None:
+        cases = [
+            c for c in self.data["error_test_cases"] if c["error"]["type"] == "value"
+        ]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, comment=case["comment"]):
+                with self.assertRaises(ValueError):
+                    self._call(case)
+
+
 class KeyAggTest(absltest.TestCase):
     """BIP-327 `key_agg_vectors.json`, every case."""
 

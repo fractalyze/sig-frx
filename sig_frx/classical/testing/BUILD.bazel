@@ -263,6 +263,7 @@ py_test(
     size = "medium",
     srcs = ["musig2_test.py"],
     data = [
+        "@bip327_det_sign_vectors//file",
         "@bip327_key_agg_vectors//file",
         "@bip327_key_sort_vectors//file",
         "@bip327_nonce_agg_vectors//file",

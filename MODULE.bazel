@@ -279,3 +279,10 @@ http_file(
     sha256 = "15f14c034fb2a5739d7ce638be94c5b37ea675a2e01159092dd93b59d69c3439",
     urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/sig_agg_vectors.json"],
 )
+
+http_file(
+    name = "bip327_det_sign_vectors",
+    downloaded_file_path = "det_sign_vectors.json",
+    sha256 = "3d4fdb64b24e31762f20830036dc0c59d39fa896649131b54b87906ffdc6e9e8",
+    urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/det_sign_vectors.json"],
+)

@@ -68,6 +68,7 @@ _SECNONCE_SIZE = 2 * _SCALAR_SIZE + _POINT_SIZE
 _AUX_TAG = hashlib.sha256(b"MuSig/aux").digest()
 _NONCE_TAG = hashlib.sha256(b"MuSig/nonce").digest()
 _NONCECOEF_TAG = hashlib.sha256(b"MuSig/noncecoef").digest()
+_DETERMINISTIC_TAG = hashlib.sha256(b"MuSig/deterministic/nonce").digest()
 
 
 class InvalidContributionError(Exception):
@@ -622,6 +623,84 @@ def partial_sig_verify(
         np.concatenate([commitment, secp.multiple(_CURVE, [scaled], key_point)]),
     )
     return bool(np.asarray(left == right)[0])
+
+
+def deterministic_sign(
+    secret_key: bytes,
+    other_nonces: bytes,
+    pubkeys: Sequence[bytes],
+    message: bytes,
+    *,
+    rand: bytes | None = None,
+    tweaks: Sequence[tuple[bytes, bool]] = (),
+) -> tuple[bytes, bytes]:
+    """The last signer's two rounds collapsed into one.
+
+    Given every other cosigner's nonces already aggregated, this derives its own
+    nonce from the session and signs in a single step — so a signer that cannot
+    hold state between rounds can still take part, which is the shape a hardware
+    device or a stateless service has.
+
+    It does not lift the rule that a nonce must not repeat; it removes the
+    window in which repeating one is possible. The nonce is a function of the
+    secret key, the other nonces and the message, so signing one session twice
+    reproduces the same nonce harmlessly, and two different sessions cannot
+    collide. That is why `rand` is optional here and required by `nonce_gen`:
+    there, the caller's randomness is the only thing making the draw unique.
+
+    Returns this signer's public nonce alongside the partial signature, because
+    the coordinator needs both and there is no round in which to send them
+    separately.
+    """
+    signing_key = secret_key
+    if rand is not None:
+        mask = bip340.tagged(_AUX_TAG, rand)
+        signing_key = bytes(a ^ b for a, b in zip(secret_key, mask, strict=True))
+
+    context = key_agg(pubkeys)
+    for tweak, is_xonly in tweaks:
+        context = context.apply_tweak(tweak, is_xonly)
+
+    preimage = (
+        signing_key
+        + other_nonces
+        + context.xonly_bytes()
+        + len(message).to_bytes(8, "big")
+        + message
+    )
+    scalars = [
+        int.from_bytes(
+            bip340.tagged(_DETERMINISTIC_TAG, preimage + index.to_bytes(1, "big")),
+            "big",
+        )
+        % _CURVE.n
+        for index in (0, 1)
+    ]
+    if 0 in scalars:
+        raise ValueError("the deterministic nonce derivation produced a zero scalar")
+
+    points = [secp.host_multiple_of_g(_CURVE, scalar) for scalar in scalars]
+    pubnonce = b"".join(secp.compressed_bytes(_CURVE, x, y) for x, y in points)
+    own_key = secp.compressed_bytes(
+        _CURVE,
+        *secp.host_multiple_of_g(_CURVE, _secret_scalar(secret_key, "secret key")),
+    )
+
+    # `nonce_agg` blames by position, and position one here is the aggregate the
+    # coordinator supplied rather than a cosigner — so its verdict is renamed
+    # rather than passed through, which is what the published cases require.
+    try:
+        aggnonce = nonce_agg([pubnonce, other_nonces])
+    except InvalidContributionError as error:
+        if error.signer == 0:
+            raise
+        raise InvalidContributionError(None, "aggothernonce") from error
+
+    session = Session(
+        aggnonce=aggnonce, pubkeys=pubkeys, message=message, tweaks=tweaks
+    )
+    secnonce = SecNonce(scalars[0], scalars[1], own_key)
+    return pubnonce, sign(secnonce, secret_key, session)
 
 
 def key_sort(pubkeys: Sequence[bytes]) -> list[bytes]:
