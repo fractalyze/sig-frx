@@ -27,7 +27,6 @@ from sig_frx.hash.leansig import poseidon
 from sig_frx.hash.leansig.testing.mode_vectors import (
     COMPRESSION_VECTORS,
     DOMAIN_SEPARATOR_VECTORS,
-    PRIME,
     SPONGE_VECTORS,
     CompressionVector,
     DomainSeparatorVector,
@@ -218,27 +217,6 @@ class RejectionTest(absltest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "no rate lane"):
             poseidon.sponge([operands], capacity, width=16, output_length=8)
-
-
-class DecompositionTest(absltest.TestCase):
-    """The base-p decomposition the separator's packing rests on.
-
-    Pinned directly rather than only through a separator digest: a digest says
-    that something is wrong, not which limb.
-    """
-
-    def test_it_is_least_significant_first(self) -> None:
-        value = 7 + 11 * PRIME + 13 * PRIME**2
-
-        self.assertEqual(poseidon._int_to_base_p(value, 3), [7, 11, 13])
-
-    def test_it_pads_with_zeros(self) -> None:
-        self.assertEqual(poseidon._int_to_base_p(5, 4), [5, 0, 0, 0])
-
-    def test_a_short_decomposition_is_rejected_rather_than_truncated(self) -> None:
-        # Dropping the high part would silently change the hash.
-        with self.assertRaisesRegex(ValueError, "base-p limbs"):
-            poseidon._int_to_base_p(PRIME**3, 2)
 
 
 if __name__ == "__main__":

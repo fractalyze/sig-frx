@@ -17,6 +17,23 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# The prime, and the base-p decomposition of the wide host integers the sponge
+# capacity and the message hash both pack. Shared by them rather than owned by
+# either, the way leanSpec's own `xmss/field.py` is.
+py_library(
+    name = "field",
+    srcs = [
+        "__init__.py",
+        "field.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)
+
 # The two permutations those constants parameterize.
 py_library(
     name = "poseidon",
@@ -26,6 +43,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":field",
         ":poseidon_constants",
         "@hash_frx//hash_frx",
         requirement("frx"),
