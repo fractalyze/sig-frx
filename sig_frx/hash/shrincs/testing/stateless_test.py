@@ -28,7 +28,7 @@ import numpy as np
 from absl.testing import absltest
 
 from sig_frx.hash.shrincs import shrincs, stateless
-from sig_frx.hash.shrincs.testing import fixtures, vectors
+from sig_frx.hash.shrincs.testing import harness, vectors
 
 # Past the indicator byte and the randomizer, so inside the signature proper.
 _BODY = shrincs.INDEX_FIELD_START
@@ -37,12 +37,12 @@ _BODY = shrincs.INDEX_FIELD_START
 def _verdicts(
     scheme: stateless.Stateless, cases: list[vectors.StatelessVectors]
 ) -> list[bool]:
-    """`fixtures.verdicts` over recorded cases, which carry their own context.
+    """`harness.verdicts` over recorded cases, which carry their own context.
 
     The adapter is here and the batching is not: what a `StatelessVectors` looks
     like is this file's business, and one batch width per file is every file's.
     """
-    return fixtures.verdicts(
+    return harness.verdicts(
         scheme.verify,
         [(case.public_key, case.message, case.signature) for case in cases],
         cases[0].context,
@@ -107,12 +107,12 @@ class ReferenceTest(absltest.TestCase):
         for case in vectors.REFERENCE:
             with self.subTest(case.label):
                 got = scheme.slh_dsa.verify(
-                    fixtures.rows(*([case.pk_seed + case.sl_root] * fixtures.BATCH)),
-                    fixtures.rows(*([case.sf_root + case.message] * fixtures.BATCH)),
-                    fixtures.rows(*([case.signature[1:]] * fixtures.BATCH)),
-                    context=fixtures.context(case.context),
+                    harness.rows(*([case.pk_seed + case.sl_root] * harness.BATCH)),
+                    harness.rows(*([case.sf_root + case.message] * harness.BATCH)),
+                    harness.rows(*([case.signature[1:]] * harness.BATCH)),
+                    context=harness.context(case.context),
                 )
-                self.assertEqual(list(np.asarray(got)), [True] * fixtures.BATCH)
+                self.assertEqual(list(np.asarray(got)), [True] * harness.BATCH)
 
 
 class SigningTest(absltest.TestCase):
@@ -139,7 +139,7 @@ class SigningTest(absltest.TestCase):
             np.frombuffer(case.sf_root, dtype=np.uint8),
             np.frombuffer(case.message, dtype=np.uint8),
             randomness=np.frombuffer(case.opt_rand, dtype=np.uint8),
-            context=fixtures.context(case.context),
+            context=harness.context(case.context),
         )
         self.assertEqual(bytes(np.asarray(made)), case.signature)
 
@@ -156,7 +156,7 @@ class SigningTest(absltest.TestCase):
                 np.frombuffer(case.seed + case.sl_root, dtype=np.uint8),
                 np.frombuffer(case.sf_root, dtype=np.uint8),
                 np.frombuffer(case.message, dtype=np.uint8),
-                context=fixtures.context(case.context),
+                context=harness.context(case.context),
             )
 
 
@@ -260,10 +260,10 @@ class ComponentTest(absltest.TestCase):
         self, case: vectors.StatelessVectors
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
         return (
-            fixtures.rows(case.public_key),
-            fixtures.rows(case.message),
-            fixtures.rows(case.signature),
-            fixtures.context(case.context),
+            harness.rows(case.public_key),
+            harness.rows(case.message),
+            harness.rows(case.signature),
+            harness.context(case.context),
         )
 
     def test_it_agrees_with_the_public_verifier(self) -> None:
@@ -327,23 +327,23 @@ class ShapeTest(absltest.TestCase):
         with self.assertRaisesRegex(ValueError, r"public key batch is \[B, 48\]"):
             self.scheme.verify(
                 np.frombuffer(case.public_key, dtype=np.uint8),
-                fixtures.rows(case.message),
-                fixtures.rows(case.signature),
+                harness.rows(case.message),
+                harness.rows(case.signature),
             )
 
     def test_a_batch_that_does_not_line_up_raises(self) -> None:
         case = self.case
         with self.assertRaisesRegex(ValueError, "one signature per public key"):
             self.scheme.verify(
-                fixtures.rows(case.public_key, case.public_key),
-                fixtures.rows(case.message, case.message),
-                fixtures.rows(case.signature),
+                harness.rows(case.public_key, case.public_key),
+                harness.rows(case.message, case.message),
+                harness.rows(case.signature),
             )
         with self.assertRaisesRegex(ValueError, "one message per public key"):
             self.scheme.verify(
-                fixtures.rows(case.public_key, case.public_key),
-                fixtures.rows(case.message),
-                fixtures.rows(case.signature, case.signature),
+                harness.rows(case.public_key, case.public_key),
+                harness.rows(case.message),
+                harness.rows(case.signature, case.signature),
             )
 
 
