@@ -107,16 +107,21 @@ py_library(
 )
 
 # `small`, and unlike its siblings this one is sized from CI rather than argued
-# up for margin. Across two runs of this branch the worst was 11.2 s on the CPU
-# leg and 10.7 s on the GPU leg, against `small`'s 60 s — a fifth of the budget,
-# where ../../../../docs/reference/measurement.md moves a target up at half. That
-# threshold already carries the CPU leg's 2.2x run-to-run spread, which the two
-# runs here (11.2 s and 10.2 s) have plainly not sampled the slow end of.
+# up for margin. Three runs of this branch: 11.2 / 10.2 / 20.8 s on the CPU leg
+# and 10.6 / 10.7 / 9.2 s on the GPU leg. The worst is 20.8 s against `small`'s
+# 60 s — 35% of it, where ../../../../docs/reference/measurement.md moves a target
+# up at half.
 #
-# It sits well under `mode_test` beside it because its traced leg compiles two
+# Those CPU numbers are the 2.2x run-to-run spread that page describes, caught in
+# the act: the first two runs would have argued this was a fifth of its budget.
+# Do not re-derive the headroom from a subset of them — **a run past 30 s moves
+# this to `medium`**, and the honest reading today is 1.4x of margin rather than
+# the 5x the first two suggested.
+#
+# It sits under `mode_test` beside it because its traced leg compiles two
 # width-24 compressions rather than a 25-chunk sponge. A later slice adding
 # traced cases at the leaf shape should expect to pay what `mode_test` pays and
-# re-check this against a CI run, never against a workstation.
+# re-check against a CI run, never against a workstation.
 py_test(
     name = "encoding_test",
     size = "small",
