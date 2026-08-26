@@ -270,6 +270,7 @@ py_test(
         "@bip327_nonce_gen_vectors//file",
         "@bip327_sig_agg_vectors//file",
         "@bip327_sign_verify_vectors//file",
+        "@bip327_tweak_vectors//file",
     ],
     deps = [
         "//sig_frx/classical:secp",

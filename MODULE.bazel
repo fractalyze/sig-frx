@@ -286,3 +286,10 @@ http_file(
     sha256 = "3d4fdb64b24e31762f20830036dc0c59d39fa896649131b54b87906ffdc6e9e8",
     urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/det_sign_vectors.json"],
 )
+
+http_file(
+    name = "bip327_tweak_vectors",
+    downloaded_file_path = "tweak_vectors.json",
+    sha256 = "80ce6385ce062644ad1f4edcb9d4797f70ddb0b74769e4099f51b3c9e6ab4aff",
+    urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/tweak_vectors.json"],
+)

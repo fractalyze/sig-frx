@@ -564,6 +564,78 @@ class DeterministicSignTest(absltest.TestCase):
                     self._call(case)
 
 
+class TweakedSigningTest(absltest.TestCase):
+    """BIP-327 `tweak_vectors.json` — tweaking as signing sees it.
+
+    `key_agg_vectors.json` gates only what tweaking *refuses*; these gate what
+    it produces, through a partial signature, in chains up to four deep and in
+    both orders. Each case also reorders the key list, so the signer's own key
+    moves position between cases while the secret stays put.
+
+    The order matters because tweaks do not commute in effect: an x-only tweak
+    negates the accumulated key when it lands on odd `y`, so the same four
+    tweaks applied in a different order take different branches and reach
+    different signatures.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.data = _load("bip327_tweak_vectors", "tweak_vectors.json")
+
+    def _session(self, case: dict[str, Any]) -> Any:
+        return musig2.Session(
+            aggnonce=bytes.fromhex(self.data["aggnonce"]),
+            pubkeys=[
+                bytes.fromhex(self.data["pubkeys"][i]) for i in case["key_indices"]
+            ],
+            message=bytes.fromhex(self.data["msg"]),
+            tweaks=[
+                (bytes.fromhex(self.data["tweaks"][i]), xonly)
+                for i, xonly in zip(
+                    case["tweak_indices"], case["is_xonly"], strict=True
+                )
+            ],
+        )
+
+    def _sign(self, case: dict[str, Any]) -> bytes:
+        return musig2.sign(
+            musig2.SecNonce.from_bytes(bytes.fromhex(self.data["secnonce"])),
+            bytes.fromhex(self.data["sk"]),
+            self._session(case),
+        )
+
+    def test_the_published_tweaked_signatures(self) -> None:
+        cases = self.data["valid_test_cases"]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, comment=case.get("comment", "")):
+                self.assertEqual(
+                    self._sign(case).hex().upper(), case["expected"].upper()
+                )
+
+    def test_reordering_the_same_tweaks_changes_the_signature(self) -> None:
+        """Cases 3 and 4 apply the same four tweaks in different orders. If they
+        agreed, the accumulators would be order-blind and the x-only negation
+        would not be doing anything."""
+        four = [
+            c for c in self.data["valid_test_cases"] if len(c["tweak_indices"]) == 4
+        ]
+        self.assertLen(four, 2)
+        self.assertEqual(
+            sorted(four[0]["tweak_indices"]), sorted(four[1]["tweak_indices"])
+        )
+        self.assertNotEqual(four[0]["is_xonly"], four[1]["is_xonly"])
+        self.assertNotEqual(self._sign(four[0]), self._sign(four[1]))
+
+    def test_a_tweak_over_the_group_order_is_refused(self) -> None:
+        cases = self.data["error_test_cases"]
+        self.assertNotEmpty(cases)
+        for index, case in enumerate(cases):
+            with self.subTest(case=index, comment=case["comment"]):
+                with self.assertRaises(ValueError):
+                    self._sign(case)
+
+
 class KeyAggTest(absltest.TestCase):
     """BIP-327 `key_agg_vectors.json`, every case."""
 
