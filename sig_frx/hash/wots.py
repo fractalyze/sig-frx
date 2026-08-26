@@ -144,8 +144,8 @@ def base_2b(data: ArrayLike, b: int, out_len: int) -> Array:
         raise ValueError(
             f"a {b}-bit digit does not fit the {8 * _MAX_WINDOW_BYTES}-bit "
             f"window it is read out of, which has to hold it from any bit "
-            f"offset within a byte; the widest a defined parameter set asks "
-            f"for is 14"
+            f"offset within a byte, so the widest this converts is "
+            f"{MAX_DIGIT_BITS}"
         )
     values = fnp.asarray(data, dtype=fnp.uint32)
     if values.ndim == 1:

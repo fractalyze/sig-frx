@@ -1,6 +1,11 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """What a recorded case has to become before the seam will take it.
 
+Not `harness`: that name belongs to `sig_frx/testing/kat.py`, the one driver the
+known-answer tests run every scheme through, and `stateless.py`'s own docstring
+says outright that the shared harness does not drive it. This is package-local
+plumbing for tests that harness does not reach.
+
 Two jobs, both of which every SHRINCS test file was doing for itself.
 
 **A batch is one shape per file.** Verification compiles per input shape, so a

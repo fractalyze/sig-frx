@@ -2,7 +2,7 @@
 """Where SHRINCS verification spends its time, warm and cold.
 
 Run it before optimizing anything here, and again afterwards against the same
-harness. The sibling `//sig_frx/hash/slhdsa/testing:verify_bench` is the model;
+fixtures. The sibling `//sig_frx/hash/slhdsa/testing:verify_bench` is the model;
 what SHRINCS adds is a second path and a walk whose step count is fixed by the
 format rather than by the key, which is where both of the costs below come from.
 
@@ -56,7 +56,7 @@ from hash_frx import Sha256
 from sig_frx.hash import bytestring
 from sig_frx.hash.shrincs import adrs as sf_adrs
 from sig_frx.hash.shrincs import fxmss, shrincs
-from sig_frx.hash.shrincs.testing import harness
+from sig_frx.hash.shrincs.testing import fixtures
 from sig_frx.hash.shrincs.testing import stateful_vectors as vectors
 from sig_frx.hash.tweakable import Sha2TweakableHash
 
@@ -153,7 +153,7 @@ def _walk_inputs(
     randomizer and the leaf index come off the front, which is the parse
     `Shrincs.verify` performs before it reaches the walk.
     """
-    body = harness.fxmss_body(case)
+    body = fixtures.fxmss_body(case)
     pk_seed = np.frombuffer(case.public_key[:_N], dtype=np.uint8)
     signatures = _batched(body, batch, width=fxmss.SIGNATURE_SIZE_MAX)
     digests = _batched(case.message_digest, batch)

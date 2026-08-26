@@ -19,7 +19,7 @@ from absl.testing import absltest
 from hash_frx import Sha256
 
 from sig_frx.hash.shrincs import wots_c
-from sig_frx.hash.shrincs.testing import harness
+from sig_frx.hash.shrincs.testing import fixtures
 from sig_frx.hash.shrincs.testing import stateful_vectors as vectors
 from sig_frx.hash.tweakable import Sha2TweakableHash
 
@@ -27,13 +27,9 @@ _N = 16
 _TWEAK = Sha2TweakableHash(Sha256(), n=_N, m=24)
 
 
-def _rows(*values: bytes) -> np.ndarray:
-    return np.stack([np.frombuffer(v, dtype=np.uint8) for v in values])
-
-
 def _fxmss_signature(case: vectors.StatefulVectors) -> bytes:
     """The FXMSS signature, past the indicator, randomizer and leaf-index field."""
-    return harness.fxmss_body(case)
+    return fixtures.fxmss_body(case)
 
 
 def _structure(case: vectors.StatefulVectors) -> np.ndarray:
@@ -53,7 +49,7 @@ def _position(case: vectors.StatefulVectors) -> tuple[np.ndarray, np.ndarray]:
     """The leaf's height as a column and its index as an eight-byte string."""
     return (
         np.array([case.leaf_height], dtype=np.uint32),
-        _rows(case.leaf_index.to_bytes(8, "big")),
+        fixtures.rows(case.leaf_index.to_bytes(8, "big")),
     )
 
 
@@ -69,9 +65,9 @@ class ConstantSumTest(absltest.TestCase):
                 heights, indices = _position(case)
                 indexes, accepted = wots_c.map_digest(
                     _TWEAK,
-                    _rows(case.pk_seed),
-                    _rows(case.message_digest),
-                    _rows(_fxmss_signature(case)[:2]),
+                    fixtures.rows(case.pk_seed),
+                    fixtures.rows(case.message_digest),
+                    fixtures.rows(_fxmss_signature(case)[:2]),
                     heights,
                     indices,
                 )
@@ -95,11 +91,11 @@ class ConstantSumTest(absltest.TestCase):
         ]
         _, accepted = wots_c.map_digest(
             _TWEAK,
-            _rows(*([case.pk_seed] * len(wrong))),
-            _rows(*([case.message_digest] * len(wrong))),
-            _rows(*wrong),
+            fixtures.rows(*([case.pk_seed] * len(wrong))),
+            fixtures.rows(*([case.message_digest] * len(wrong))),
+            fixtures.rows(*wrong),
             np.full(len(wrong), case.leaf_height, dtype=np.uint32),
-            _rows(*([case.leaf_index.to_bytes(8, "big")] * len(wrong))),
+            fixtures.rows(*([case.leaf_index.to_bytes(8, "big")] * len(wrong))),
         )
         self.assertNotIn(True, list(np.asarray(accepted)))
 
@@ -111,9 +107,9 @@ class PublicKeyTest(absltest.TestCase):
                 heights, indices = _position(case)
                 keys, accepted = wots_c.pk_from_sig(
                     _TWEAK,
-                    _rows(case.pk_seed),
-                    _rows(_fxmss_signature(case)[: wots_c.SIGNATURE_SIZE]),
-                    _rows(case.message_digest),
+                    fixtures.rows(case.pk_seed),
+                    fixtures.rows(_fxmss_signature(case)[: wots_c.SIGNATURE_SIZE]),
+                    fixtures.rows(case.message_digest),
                     heights,
                     indices,
                 )
@@ -136,11 +132,11 @@ class PublicKeyTest(absltest.TestCase):
             with self.subTest(height=height, index=index):
                 keys, _ = wots_c.pk_from_sig(
                     _TWEAK,
-                    _rows(case.pk_seed),
-                    _rows(signature),
-                    _rows(case.message_digest),
+                    fixtures.rows(case.pk_seed),
+                    fixtures.rows(signature),
+                    fixtures.rows(case.message_digest),
                     np.array([height], dtype=np.uint32),
-                    _rows(index.to_bytes(8, "big")),
+                    fixtures.rows(index.to_bytes(8, "big")),
                 )
                 self.assertNotEqual(bytes(np.asarray(keys)[0]), case.wots_c_public_key)
 
@@ -148,11 +144,13 @@ class PublicKeyTest(absltest.TestCase):
         cases = [c for c in vectors.REFERENCE if c.leaf_index_size == 1]
         keys, accepted = wots_c.pk_from_sig(
             _TWEAK,
-            _rows(*(c.pk_seed for c in cases)),
-            _rows(*(_fxmss_signature(c)[: wots_c.SIGNATURE_SIZE] for c in cases)),
-            _rows(*(c.message_digest for c in cases)),
+            fixtures.rows(*(c.pk_seed for c in cases)),
+            fixtures.rows(
+                *(_fxmss_signature(c)[: wots_c.SIGNATURE_SIZE] for c in cases)
+            ),
+            fixtures.rows(*(c.message_digest for c in cases)),
             np.array([c.leaf_height for c in cases], dtype=np.uint32),
-            _rows(*(c.leaf_index.to_bytes(8, "big") for c in cases)),
+            fixtures.rows(*(c.leaf_index.to_bytes(8, "big") for c in cases)),
         )
         self.assertEqual(list(np.asarray(accepted)), [True] * len(cases))
         self.assertEqual(

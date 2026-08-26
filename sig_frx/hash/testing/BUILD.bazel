@@ -51,7 +51,6 @@ py_test(
         "//sig_frx/hash:adrs",
         "//sig_frx/hash:tweakable",
         "//sig_frx/hash:wots",
-        "//sig_frx/hash/slhdsa:slh_dsa",
         "@hash_frx//hash_frx",
         requirement("absl_py"),
         requirement("numpy"),
