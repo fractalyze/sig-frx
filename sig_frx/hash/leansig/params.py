@@ -17,10 +17,11 @@ from the technical note will get different numbers: the note gives `v = 64`, and
 the widely-quoted 3112-byte signature is that figure. `PROD` is `v = 46`.
 
 **Only the columns something here reads.** The preset upstream carries also
-fixes `LOG_LIFETIME`, `HASH_LENGTH_FIELD_ELEMENTS`, `CAPACITY` and `MAX_TRIES`,
-and none of them has a call site in this package yet — the tree, the tweakable
-hash family and the signer's rejection loop are what read them, and each arrives
-with the slice that does. That is
+fixes `LOG_LIFETIME` and `MAX_TRIES`, and neither has a call site in this package
+yet — the tree's bound on a slot and the signer's rejection loop are what read
+them, and each arrives with the slice that does. `HASH_LENGTH_FIELD_ELEMENTS` and
+`CAPACITY` arrived exactly that way, with the tweakable hash family
+([`tweakable.py`](tweakable.py)) that reads them. That is
 [`conventions.md`](../../../docs/reference/conventions.md#generalize-a-component-when-its-second-consumer-arrives)
 read from the data side: a column nothing reads is a number nothing can
 disagree with, so a wrong one is found by the slice that finally uses it rather
@@ -38,17 +39,24 @@ from typing import Final
 
 from sig_frx.hash.leansig.field import PRIME
 
-TWEAK_PREFIX_MESSAGE: Final = 0x02
-"""Separates the message hash from the chain and tree hashes — `TWEAK_PREFIX_MESSAGE`.
+TWEAK_PREFIX_CHAIN: Final = 0x00
+"""A Winternitz chain step — `TWEAK_PREFIX_CHAIN`.
 
-The chain (`0x00`) and tree (`0x01`) prefixes arrive with the family that hashes
-with them; this is the one [`encoding.py`](encoding.py) packs into its tweak.
+The low byte of a packed tweak, and the whole of what keeps three hashes at the
+same position from colliding: a chain step, a Merkle node and a message hash all
+compress a parameter and a tweak, and only this byte tells them apart.
 """
+
+TWEAK_PREFIX_TREE: Final = 0x01
+"""A Merkle node or leaf — `TWEAK_PREFIX_TREE`."""
+
+TWEAK_PREFIX_MESSAGE: Final = 0x02
+"""The message hash — the one [`encoding.py`](encoding.py) packs."""
 
 
 @dataclass(frozen=True)
 class LeanSigParams:
-    """One preset's parameters, as far as the encoding pipeline reads them."""
+    """One preset's parameters, as far as anything in this package reads them."""
 
     dimension: int
     """`DIMENSION`, the `v` of the papers: how many chains a signature commits to,
@@ -77,6 +85,14 @@ class LeanSigParams:
 
     randomness_length: int
     """`RAND_LENGTH_FIELD_ELEMENTS`: the per-attempt randomness, in field elements."""
+
+    hash_length: int
+    """`HASH_LENGTH_FIELD_ELEMENTS`: one digest, in field elements. The scheme's
+    collision resistance is set here."""
+
+    capacity: int
+    """`CAPACITY`: the leaf sponge's capacity, in field elements. The sponge's
+    security level is set here, and it is what the rate is `24 - capacity`."""
 
     def __post_init__(self) -> None:
         # Upstream's own validator. The decode's uniformity argument rests on it:
@@ -125,6 +141,8 @@ PROD: Final = LeanSigParams(
     tweak_length=2,
     message_length=9,
     randomness_length=7,
+    hash_length=8,
+    capacity=9,
 )
 """Upstream's `PROD_CONFIG` — what the pq-devnet series pins."""
 
@@ -138,5 +156,7 @@ TEST: Final = LeanSigParams(
     tweak_length=2,
     message_length=9,
     randomness_length=7,
+    hash_length=8,
+    capacity=9,
 )
 """Upstream's `TEST_CONFIG` — the same scheme at a codeword short enough to sign."""
