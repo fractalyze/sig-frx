@@ -21,7 +21,7 @@ hash-frx's last-lane convention, for the reason recorded on
   the commit the `latest` production fixtures were generated from. leanSig has
   no RFC/FIPS/EIP, so the authority is the reference implementation the spec
   points at, which is what
-  [`conventions.md`](../../../docs/reference/conventions.md) names third.
+  [`testing.md`](../../../docs/reference/testing.md) names third.
 - **Fixture:** `src/lean_spec/spec/crypto/poseidon.py`.
 - **The exact call each value came from:** none — these are source constants,
   read out of that module verbatim. What produced this file:

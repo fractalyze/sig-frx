@@ -3,7 +3,7 @@
 
 leanSig publishes no RFC/FIPS/EIP and no vector file of its own, so the authority
 is the reference implementation the spec points at — third in the order
-[`conventions.md`](../../../../docs/reference/conventions.md) fixes. leanSpec does
+[`testing.md`](../../../../docs/reference/testing.md) fixes. leanSpec does
 generate these, and they gate the permutation directly rather than through a
 whole signature, which is what the acceptance rule asks for.
 
@@ -19,7 +19,7 @@ whole signature, which is what the acceptance rule asks for.
 
 ## Why transcribed rather than fetched
 
-[`conventions.md`](../../../../docs/reference/conventions.md) has vector sets
+[`testing.md`](../../../../docs/reference/testing.md) has vector sets
 fetched and pinned, with the URL pinned to a commit — "a moving URL turns an
 upstream regeneration into a mystery failure here". leanSpec publishes its
 fixtures under a release tag literally named `latest`, regenerated in place on

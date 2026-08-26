@@ -28,3 +28,37 @@ py_test(
         requirement("zk_dtypes"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# The compression and sponge modes have no upstream vector file at all — the
+# fixtures archive pins the permutation but no scheme-level call — so these came
+# from running the reference implementation. The provenance and the recipe for
+# reproducing that run live in the module.
+py_library(
+    name = "mode_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "mode_vectors.py",
+    ],
+)
+
+# `medium` for the margin rather than the runtime. This measures 41.0 s on the
+# CPU leg and 31.2 s on the GPU leg, against 13 s on a workstation — `small`'s
+# 60 s is inside that spread, and an earlier revision proved it by timing out
+# there and taking the suite red. Nearly all of it is compiling the traced leg.
+# Sized from the worst run on the slowest leg, per
+# ../../../../docs/reference/measurement.md — re-check against a CI run, not a
+# workstation, before shrinking it.
+py_test(
+    name = "mode_test",
+    size = "medium",
+    srcs = ["mode_test.py"],
+    deps = [
+        ":mode_vectors",
+        "//sig_frx/hash/leansig:poseidon",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ] + GPU_PLUGIN_DEPS,
+)
