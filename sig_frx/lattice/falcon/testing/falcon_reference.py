@@ -9,7 +9,7 @@ Each is a change made for the compiler, and it is the only thing about
 `encoding.py` and `falcon.py` a reader has to take on trust — so this file takes
 it back, looping one coefficient and one bit at a time over Python integers, and
 the tests require the two to agree
-([`conventions.md`](../../../../docs/reference/conventions.md)).
+([`testing.md`](../../../../docs/reference/testing.md)).
 
 `Compress` is here as well as `Decompress`, even though the implementation has no
 encoder yet ([#27](https://github.com/fractalyze/sig-frx/issues/27) brings one).

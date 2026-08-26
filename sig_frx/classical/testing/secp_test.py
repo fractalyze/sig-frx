@@ -65,6 +65,62 @@ class SecpTest(absltest.TestCase):
         for curve in (secp.SECP256K1, secp.SECP256R1):
             self.assertTrue(secp.on_curve(curve, curve.gx, curve.gy))
 
+    def test_on_curve_rows_agrees_with_the_row_at_a_time_form(self) -> None:
+        # `on_curve_rows` exists for speed, so the thing to pin is that it
+        # bought nothing else. The batch mixes every rejection reason with
+        # real points so a form that answered `True` unconditionally — or
+        # dropped the range check and let the equation decide — fails here.
+        for curve in (secp.SECP256K1, secp.SECP256R1):
+            doubled = secp.affine_ints(
+                curve,
+                secp.multiple(
+                    curve,
+                    [2],
+                    np.array([curve.point((curve.gx, curve.gy))], dtype=curve.point),
+                ),
+            )[0]
+            cases = [
+                (curve.gx, curve.gy),  # on the curve
+                doubled,  # on the curve, not the generator
+                (curve.gx, (curve.gy + 1) % curve.p),  # off the curve
+                (curve.p, curve.gy),  # x at the modulus
+                (curve.gx, curve.p + 5),  # y above the modulus
+                (-1, curve.gy),  # negative x
+                (0, 0),  # the value a masked row rides
+            ]
+            xs = [x for x, _ in cases]
+            ys = [y for _, y in cases]
+
+            got = secp.on_curve_rows(curve, xs, ys)
+            want = [secp.on_curve(curve, x, y) for x, y in cases]
+
+            self.assertEqual(list(got), want, curve.point.__name__)
+            # Not vacuous in either direction.
+            self.assertTrue(any(want))
+            self.assertFalse(all(want))
+
+    def test_on_curve_rows_survives_a_coordinate_the_dtype_would_abort_on(self) -> None:
+        # The range check is not only the standard's §2.3.4 order — it is what
+        # keeps an out-of-range coordinate away from the field constructor,
+        # which aborts rather than reducing (fractalyze/zk_dtypes#179). A row
+        # that skipped the mask would raise here rather than answer `False`,
+        # so this fails loudly if the two are ever reordered.
+        curve = secp.SECP256K1
+        beyond = curve.p + 1
+
+        with self.assertRaises(Exception):
+            np.array([beyond], dtype=curve.field)
+
+        self.assertEqual(
+            list(secp.on_curve_rows(curve, [beyond, curve.gx], [beyond, curve.gy])),
+            [False, True],
+        )
+
+    def test_on_curve_rows_answers_an_empty_batch(self) -> None:
+        got = secp.on_curve_rows(secp.SECP256K1, [], [])
+        self.assertEqual(got.shape, (0,))
+        self.assertEqual(got.dtype, np.dtype(bool))
+
     def test_affine_ints_returns_residues_not_storage(self) -> None:
         # `affine_ints` is where a point stops being a dtype and becomes the
         # integers the standards define encodings on. A substrate whose

@@ -22,7 +22,7 @@ py_test(
 # of unchanged commits — so `small`'s 60 s was decided by executor load rather
 # than by the test, and one commit both passed and timed out under it. Sized
 # from the worst run on the slowest leg, per
-# ../../../../docs/reference/conventions.md.
+# ../../../../docs/reference/measurement.md.
 py_test(
     name = "xmss_test",
     size = "medium",
@@ -42,7 +42,7 @@ py_test(
 # `large` from the CPU leg's worst run: 114.3 s to 224.9 s across unchanged
 # commits, against `medium`'s 300 s. The GPU leg runs it in a steady ~120 s —
 # the slowest leg is what a budget covers, per
-# ../../../../docs/reference/conventions.md.
+# ../../../../docs/reference/measurement.md.
 py_test(
     name = "slh_dsa_test",
     size = "large",
@@ -124,7 +124,7 @@ py_test(
     # The CPU leg measures 301.7 s to 572.2 s across runs of unchanged commits,
     # so the worst run is over half of `large`'s 900 s. The deadline moves up a
     # bucket and `size` stays `large` — see "`size` moves two things and
-    # `timeout` moves one" in ../../../../docs/reference/conventions.md. The GPU
+    # `timeout` moves one" in ../../../../docs/reference/measurement.md. The GPU
     # leg runs the same target in a steady ~285 s.
     size = "large",
     timeout = "eternal",

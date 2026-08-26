@@ -45,7 +45,7 @@ format, while the 82-byte secret key carries the FXMSS structure bytes and is
 `shrincs.py`'s. Each module parses the format it names.
 
 That is also both halves of why the shared known-answer harness does not drive
-this — `conventions.md` asks for both to be named. There is no published format
+this — `testing.md` asks for both to be named. There is no published format
 for a loader to normalize, and this is not on the seam the harness signs through.
 """
 

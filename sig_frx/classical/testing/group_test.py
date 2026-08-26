@@ -128,5 +128,64 @@ class PowConstTest(parameterized.TestCase):
             group.pow_const(secp.SECP256K1, secp.SECP256K1.one, 5, window=0)
 
 
+class BatchInverseTest(parameterized.TestCase):
+    """Montgomery's trick, held against Python's own modular inverse."""
+
+    @parameterized.parameters(
+        (secp.SECP256K1,),
+        (secp.SECP256R1,),
+    )
+    def test_matches_python_pow_on_a_full_batch(self, curve: Any) -> None:
+        # The reference shares nothing with the substrate under test: `pow(x,
+        # -1, n)` is CPython's integer arithmetic, not the dtype's. A batch
+        # form that agreed with its own multiply on a wrong inverse fails here.
+        order = curve.n
+        values = [
+            int.from_bytes(bytes((i * 37 + 11) % 256 for i in range(32)), "big") % order
+            or 1,
+            1,
+            order - 1,
+            2,
+            (order - 1) // 2,
+        ]
+        got = np.asarray(group.batch_inverse(np.array(values, dtype=curve.scalar)))
+
+        self.assertEqual(
+            [int(v) for v in got.astype(object)],
+            [pow(v, -1, order) for v in values],
+        )
+
+    def test_a_single_row_is_its_own_inverse_batch(self) -> None:
+        # B = 1 makes both running products empty, which is the boundary the
+        # prefix/suffix padding exists for.
+        curve = secp.SECP256K1
+        got = np.asarray(group.batch_inverse(np.array([7], dtype=curve.scalar)))
+        self.assertEqual(int(got.astype(object)[0]), pow(7, -1, curve.n))
+
+    def test_an_empty_batch_answers_empty(self) -> None:
+        curve = secp.SECP256K1
+        got = group.batch_inverse(np.array([], dtype=curve.scalar))
+        self.assertEqual(np.asarray(got).shape, (0,))
+
+    def test_one_zero_destroys_every_row_not_just_its_own(self) -> None:
+        # This is why callers substitute a one for a masked row rather than
+        # letting it carry a zero, and it is pinned rather than described
+        # because the failure is silent: the dtype's division by zero answers
+        # zero instead of raising, so a poisoned batch returns plausible
+        # zeros. A caller that dropped the substitution would reject every
+        # valid signature sitting beside one rejected row.
+        curve = secp.SECP256K1
+        poisoned = np.array([7, 0, 9], dtype=curve.scalar)
+
+        got = np.asarray(group.batch_inverse(poisoned)).astype(object)
+
+        self.assertEqual([int(v) for v in got], [0, 0, 0])
+        # The same batch with the zero substituted leaves its neighbours alone.
+        healthy = np.array([7, 1, 9], dtype=curve.scalar)
+        got = np.asarray(group.batch_inverse(healthy)).astype(object)
+        self.assertEqual(int(got[0]), pow(7, -1, curve.n))
+        self.assertEqual(int(got[2]), pow(9, -1, curve.n))
+
+
 if __name__ == "__main__":
     absltest.main()

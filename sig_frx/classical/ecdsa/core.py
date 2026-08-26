@@ -33,6 +33,7 @@ because the curve defines it; Ethereum is merely its loudest consumer.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -41,7 +42,7 @@ from frx.typing import ArrayLike
 
 from sig_frx import context as context_rules
 from sig_frx import hashes
-from sig_frx.classical import secp
+from sig_frx.classical import group, secp
 from sig_frx.classical.ecdsa import rfc6979
 from sig_frx.signature import Signature
 
@@ -72,20 +73,48 @@ def _signature_bytes(r: int, s: int) -> np.ndarray:
     return np.frombuffer(packed, dtype=np.uint8).copy()
 
 
-def _masked_quotient_pair(
-    scalar: Any, valid: bool, u1_numerator: int, u2_numerator: int, denominator: int
-) -> tuple[int, int]:
-    """The two field quotients `(a/d, b/d)` a batch row rides, as ints.
+def _masked_quotient_pairs(
+    scalar: Any,
+    valid: Sequence[bool] | np.ndarray,
+    u1_numerators: Sequence[int],
+    u2_numerators: Sequence[int],
+    denominators: Sequence[int],
+) -> tuple[list[int], list[int]]:
+    """The two field quotients `(a/d, b/d)` each batch row rides, as ints.
 
-    A rejected row's wire values may exceed `n`, and a field op on such an
-    operand aborts rather than reducing (fractalyze/zk_dtypes#179) — so a
-    masked row rides zero scalars on its placeholder point instead; its
-    verdict is already sealed.
+    Both verification equations reduce to two quotients over one denominator,
+    so the batch needs one inverse per row and `group.batch_inverse` supplies
+    all of them for the price of one — 0.14 ms at B=1024 against 1.91 ms for
+    the row-at-a-time form this replaces, which built three 0-d scalar arrays
+    and took an inversion per row.
+
+    Masked rows carry substitutes rather than their wire values, for two
+    independent reasons that happen to want the same thing. A rejected row's
+    `r` or `s` may exceed `n`, and the field constructor aborts on such a
+    value rather than reducing it (fractalyze/zk_dtypes#179). And a zero
+    denominator would poison `batch_inverse`'s product chain, which is not a
+    per-row failure: the dtype's division by zero answers zero, so one
+    rejected row would zero every *valid* row's quotients and reject the whole
+    batch. The numerators go to zero because that is what a masked row is
+    meant to ride; the denominator goes to **one** because that is what keeps
+    it out of the chain.
     """
-    if not valid:
-        return 0, 0
-    w = scalar(denominator) ** -1
-    return int(scalar(u1_numerator) * w), int(scalar(u2_numerator) * w)
+    ok = np.asarray(valid, dtype=bool)
+    if not ok.any():
+        return [0] * len(ok), [0] * len(ok)
+    numerator_a = np.array(
+        [v if k else 0 for v, k in zip(u1_numerators, ok)], dtype=scalar
+    )
+    numerator_b = np.array(
+        [v if k else 0 for v, k in zip(u2_numerators, ok)], dtype=scalar
+    )
+    denominator = np.array(
+        [v if k else 1 for v, k in zip(denominators, ok)], dtype=scalar
+    )
+    w = group.batch_inverse(denominator)
+    u1 = np.asarray(numerator_a * w).astype(object)
+    u2 = np.asarray(numerator_b * w).astype(object)
+    return [int(v) for v in u1], [int(v) for v in u2]
 
 
 def is_low_s(curve: secp.Curve, signature: ArrayLike) -> np.ndarray:
@@ -268,11 +297,19 @@ class Ecdsa:
         The per-entry rejections are the standard's: a key must be the
         `04 ‖ X ‖ Y` encoding of a point on the curve with in-field
         coordinates (§2.3.4 — range and equation both live in
-        `secp.on_curve`, since the dtypes construct off-curve coordinates
-        without complaint), and
+        `secp.on_curve_rows`, since the dtypes construct off-curve
+        coordinates without complaint), and
         `r, s` must sit in `[1, n-1]`. Rejected rows carry the generator as
         a placeholder so the batch stays rectangular; their verdict is
         already sealed.
+
+        The key check runs over the whole batch before the loop while the
+        rest stays per-row, and the split is where the measurement put it
+        rather than where the shape suggests: at B=1024 the curve equation
+        was 19% of this call as `on_curve` per row and is 2% as one
+        expression over `[B]`, while the `int.from_bytes` decode it sits
+        behind is 4%. The remaining per-row work — the quotient pair's
+        modular inverse and the point construction — is tracked separately.
         """
         curve = self.curve
         n = curve.n
@@ -283,26 +320,34 @@ class Ecdsa:
 
         qlen = n.bit_length()
         placeholder = curve.point((curve.gx, curve.gy))
-        checks, points, u1_scalars, u2_scalars, r_scalars = [], [], [], [], []
-        for key, entry, sig in zip(keys, digest, signature):
-            qx = int.from_bytes(key[1:33].tobytes(), "big")
-            qy = int.from_bytes(key[33:65].tobytes(), "big")
+
+        # The coordinates are parsed once for the whole batch so the curve
+        # equation can be checked as one expression over `[B]` rather than a
+        # 0-d field array per coordinate — see `secp.on_curve_rows`, which is
+        # 9x the row-at-a-time form at B=1024. The parse itself stays here:
+        # `int.from_bytes` beats a field-arithmetic weighted sum on bytes by
+        # an order of magnitude, so it is the batching that pays, not moving
+        # the decode into the field.
+        qxs = [int.from_bytes(key[1:33].tobytes(), "big") for key in keys]
+        qys = [int.from_bytes(key[33:65].tobytes(), "big") for key in keys]
+        key_ok = secp.on_curve_rows(curve, qxs, qys)
+
+        checks, points, r_scalars, e_scalars, s_scalars = [], [], [], [], []
+        for i, (key, entry, sig) in enumerate(zip(keys, digest, signature)):
+            qx, qy = qxs[i], qys[i]
             r = int.from_bytes(sig[:32].tobytes(), "big")
             s = int.from_bytes(sig[32:64].tobytes(), "big")
             e = rfc6979.bits2int(entry.tobytes(), qlen) % n
-            ok = (
-                int(key[0]) == 4
-                and secp.on_curve(curve, qx, qy)
-                and 1 <= r < n
-                and 1 <= s < n
-            )
-            u1, u2 = _masked_quotient_pair(scalar, ok, e, r, s)
-            u1_scalars.append(u1)
-            u2_scalars.append(u2)
+            ok = int(key[0]) == 4 and bool(key_ok[i]) and 1 <= r < n and 1 <= s < n
             r_scalars.append(r)
+            e_scalars.append(e)
+            s_scalars.append(s)
             checks.append(ok)
             points.append(curve.point((qx, qy)) if ok else placeholder)
 
+        u1_scalars, u2_scalars = _masked_quotient_pairs(
+            scalar, checks, e_scalars, r_scalars, s_scalars
+        )
         q_points = np.array(points, dtype=curve.point)
         big_r = secp.double_multiple(curve, u1_scalars, u2_scalars, q_points)
         gone = secp.is_identity(curve, big_r)
@@ -403,14 +448,11 @@ class Ecdsa:
         # Q = r⁻¹(sR - eG), taken as u₁G + u₂R with u₁ = -e/r, u₂ = s/r
         # (mod n): the scalar field for the algebra, the curve's kernels for
         # the points.
-        scalar = curve.scalar
-        u1_scalars, u2_scalars = [], []
-        for e, r, s, valid in zip(digest_scalars, r_scalars, s_scalars, ok):
-            # -e % n: the field constructor rejects a negative int outright
-            # (OverflowError), so the negation arrives already canonical.
-            u1, u2 = _masked_quotient_pair(scalar, bool(valid), -e % n, s, r)
-            u1_scalars.append(u1)
-            u2_scalars.append(u2)
+        # -e % n: the field constructor rejects a negative int outright
+        # (OverflowError), so the negation arrives already canonical.
+        u1_scalars, u2_scalars = _masked_quotient_pairs(
+            curve.scalar, ok, [-e % n for e in digest_scalars], s_scalars, r_scalars
+        )
 
         public = secp.double_multiple(curve, u1_scalars, u2_scalars, point_r)
 

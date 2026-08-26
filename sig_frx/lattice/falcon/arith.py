@@ -35,7 +35,7 @@ same verdict, and the opcode's default is one. Pinning a root here would import
 a convention no standard states, and reproducing a particular reference's
 intermediate values would gate this repo on that implementation's private
 choice — the thing
-[the byte-exactness rule](../../../docs/reference/conventions.md) refuses when it
+[the byte-exactness rule](../../../docs/reference/testing.md) refuses when it
 declines to pin against another implementation.
 
 What is left to gate on is the property that *is* the specification: the

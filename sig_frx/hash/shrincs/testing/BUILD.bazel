@@ -21,7 +21,7 @@ py_library(
 # pays one compile of the verification program and not one per distinct `B`. At
 # the 2.1-2.7x this package measures slower on the executor that puts the worst
 # run past `small`'s 60 s. Sized from the slowest leg's worst run, per
-# ../../../../docs/reference/conventions.md.
+# ../../../../docs/reference/measurement.md.
 py_test(
     name = "stateless_test",
     size = "medium",
@@ -51,7 +51,7 @@ py_library(
 # recorded — `slh_dsa_traced_test` is 182.2 s here against 177.7 s there — so the
 # 2.1-2.7x executor factor in this repo's other comments is the CPU leg's and
 # does not apply on top. Sized from the slowest leg's worst run, per
-# ../../../../docs/reference/conventions.md.
+# ../../../../docs/reference/measurement.md.
 py_test(
     name = "wots_c_test",
     size = "medium",

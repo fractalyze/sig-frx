@@ -54,7 +54,11 @@ runs 7.3x the host at B=256 and 105x at B=4096, where it still costs the same
 Everything that turns a point into integers is host by nature and stays there —
 `affine_ints`, `uncompressed_rows`, `on_curve`, `secret_scalar` — because the
 standards define those on integers and Python has no width, which is why
-`lift_x_to_parity` places its ladder and not its readback. `is_identity` is
+`lift_x_to_parity` places its ladder and not its readback. Host is not the
+same as row-at-a-time, though, and the two get conflated: `on_curve_rows` is
+the same host arithmetic as `on_curve` over a `[B]` array instead of a 0-d one
+per row, and that alone is 9x at B=1024. A function stays on the host because
+its *result* is integers, not because its work has to be scalar. `is_identity` is
 the one exception on the wrong side of that line, and its docstring carries
 the reason (fractalyze/xla#594).
 
@@ -96,6 +100,7 @@ the wire encodings defined on residues.
 from __future__ import annotations
 
 import functools
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -472,6 +477,49 @@ def on_curve(curve: Curve, x: int, y: int) -> bool:
     x_field = np.array(x, dtype=curve.field)
     y_field = np.array(y, dtype=curve.field)
     return bool(y_field * y_field == _weierstrass_rhs(curve, x_field))
+
+
+def on_curve_rows(curve: Curve, xs: Sequence[int], ys: Sequence[int]) -> np.ndarray:
+    """`on_curve` over a whole batch of integer coordinates: `bool[B]`.
+
+    Same answer as calling `on_curve` per row, and the reason it exists is
+    that the per-row form's cost is not the curve equation. `on_curve` builds
+    a *0-d field array per coordinate*, so a batch pays `2B` dtype
+    constructions and `4B` scalar field ops to evaluate what is one
+    expression over `[B]`. Measured at B=1024 on an RTX 5090, the row-at-a-
+    time form costs 2.42 ms against 0.26 ms here — the arithmetic is the same
+    and the overhead is all that leaves.
+
+    The range check runs first and is load-bearing beyond the standard's
+    reason for it. SEC 1 §2.3.4 checks `[0, p)` before the equation because
+    an out-of-range pair is not a point encoding; here it also keeps such a
+    coordinate away from the field constructor, which **aborts** rather than
+    reducing (fractalyze/zk_dtypes#179). A rejected row therefore rides a
+    zero coordinate through the equation, exactly as a masked row rides zero
+    scalars in `Ecdsa._masked_quotient_pair`, and its verdict is already
+    sealed by the same mask.
+
+    Coordinates arrive as Python integers rather than bytes because that is
+    what the callers have already parsed, and because `group.field_from_bytes`
+    is the wrong tool for this: measured, it costs 1.61 ms per coordinate
+    against 0.14 ms for `int.from_bytes` plus one `[B]` construction, since it
+    evaluates a 32-wide weighted sum in field arithmetic where the host has a
+    C path over 32 bytes.
+    """
+    in_range = np.array(
+        [0 <= x < curve.p and 0 <= y < curve.p for x, y in zip(xs, ys)],
+        dtype=bool,
+    )
+    if not in_range.any():
+        return in_range
+    x_field = np.array(
+        [x if ok else 0 for x, ok in zip(xs, in_range)], dtype=curve.field
+    )
+    y_field = np.array(
+        [y if ok else 0 for y, ok in zip(ys, in_range)], dtype=curve.field
+    )
+    satisfied = np.asarray(y_field * y_field == _weierstrass_rhs(curve, x_field))
+    return in_range & satisfied
 
 
 def sqrt(curve: Curve, value: ArrayLike) -> Any:

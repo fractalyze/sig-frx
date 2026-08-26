@@ -1,11 +1,11 @@
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
 # Sized from the executor: 4.0 s on the CPU leg against 2.9 s on the GPU one, so
 # CPU is the leg that decides and `small`'s 60 s covers it at 7%. The CPU leg's
 # run-to-run spread is around 2.2x, which leaves a bad run near 15% — well
-# inside the half-a-budget rule in ../../../../docs/reference/conventions.md.
+# inside the half-a-budget rule in ../../../../docs/reference/measurement.md.
 #
 # The workstation figure would have argued for `small` too, but it is not what
 # decided this: a CUDA-less box refuses `FRX_PLATFORMS=cuda` rather than falling
@@ -61,7 +61,7 @@ py_library(
 #
 # Sized from the executor, and the GPU leg decides here too: 172.1 s against the
 # CPU leg's 81.3 s. `medium` would be 57% of its 300 s — past the half-a-budget
-# rule in ../../../../docs/reference/conventions.md before any spread is counted
+# rule in ../../../../docs/reference/measurement.md before any spread is counted
 # — so it takes the same bucket as `falcon_test`, at 19% of 900 s. The harness
 # derives a tampering and a batch pass per vector, each its own traced shape.
 py_test(
@@ -83,7 +83,7 @@ py_test(
 # so CPU is the leg that decides — and that 31.4 is itself the CPU leg's spread
 # showing, against 17.7 s for the same content on an earlier run. `small` would
 # put the worse of those at 52% of its 60 s, past the half-a-budget rule in
-# ../../../../docs/reference/conventions.md; `medium` covers it at 10%.
+# ../../../../docs/reference/measurement.md; `medium` covers it at 10%.
 py_test(
     name = "encoding_test",
     size = "medium",
@@ -99,7 +99,7 @@ py_test(
 
 # Sized from the executor, and **the GPU leg is the one that decides** — 272.9 s
 # against the CPU leg's 122.5 s. That inverts the sibling `arith_test`, where CPU
-# is slower, and the cause is the cost `conventions.md` attributes to distinct
+# is slower, and the cause is the cost `testing.md` attributes to distinct
 # shapes rather than to vectors: each case carries its own message length, so
 # nearly every one traces its own program, and a compile is what the GPU leg is
 # worst at.
@@ -116,6 +116,25 @@ py_test(
         ":falcon_vectors",
         "//sig_frx:signature",
         "//sig_frx/lattice/falcon",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# What the decoder's GPU share is made of. Beside Falcon rather than beside the
+# shared compaction's harness in //sig_frx/lattice/testing: that one is there
+# because it reaches both schemes, and this reaches one. It takes the vectors
+# for the reason that one does — Falcon cannot sign here yet, so a published
+# signature is the only thing a `verify` measurement can be driven with.
+py_binary(
+    name = "decoder_bench",
+    testonly = True,
+    srcs = ["decoder_bench.py"],
+    deps = [
+        ":falcon_vectors",
+        "//sig_frx/lattice/falcon",
+        "//sig_frx/lattice/falcon:encoding",
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),

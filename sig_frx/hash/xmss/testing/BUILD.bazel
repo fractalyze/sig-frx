@@ -88,7 +88,7 @@ py_test(
 #
 # `large` because the CPU leg measures 105.4 s to 268.5 s across runs of
 # unchanged commits, and the top of that range leaves no margin under `medium`'s
-# 300 s. See ../../../../docs/reference/conventions.md.
+# 300 s. See ../../../../docs/reference/measurement.md.
 py_test(
     name = "xmssmt_test",
     size = "large",

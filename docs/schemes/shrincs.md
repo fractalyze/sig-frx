@@ -18,7 +18,7 @@ leaf that signed.
 SHRINCS publishes no test vectors — its specification says they are still
 outstanding and required before it can leave Draft — and no validation program
 covers it. So this is the third case in
-[`../reference/conventions.md`](../reference/conventions.md#a-standard-that-publishes-no-vectors-still-gets-gated):
+[`../reference/testing.md`](../reference/testing.md#a-standard-that-publishes-no-vectors-still-gets-gated):
 the reference implementation the standard points at, which that document names
 as normative in as many words. The vectors modules under
 [`testing/`](../../sig_frx/hash/shrincs/testing/) carry the pinned commit and the
