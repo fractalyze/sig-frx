@@ -26,7 +26,7 @@ import frx.numpy as fnp
 import hash_frx
 import numpy as np
 from absl.testing import absltest
-from hash_frx import ByteHash, HostSha256, Sha256
+from hash_frx import ByteHash, Sha256
 
 # Equal length, because `digest` takes a batch of equal-length messages.
 _MESSAGES = (b"abcdefgh", b"sig-frx\n", b"\x00" * 8)
@@ -49,20 +49,10 @@ class HashFrxDependencyTest(absltest.TestCase):
             [hashlib.sha256(m).digest() for m in _MESSAGES],
         )
 
-    def test_both_implementations_agree(self) -> None:
-        # hash-frx ships a device and a host SHA-256 of the identical FIPS 180-4
-        # bytes. A scheme picks by deployment, so the two must never diverge.
-        batch = _batch()
-        self.assertEqual(
-            [bytes(row) for row in np.asarray(Sha256().digest(batch))],
-            [bytes(row) for row in np.asarray(HostSha256().digest(batch))],
-        )
-
-    def test_both_implementations_satisfy_the_seam(self) -> None:
+    def test_the_row_satisfies_the_seam(self) -> None:
         # `ByteHash` is runtime_checkable, so this is the structural check a
         # scheme's constructor gets for free when it takes the seam.
         self.assertIsInstance(Sha256(), ByteHash)
-        self.assertIsInstance(HostSha256(), ByteHash)
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ import frx
 import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
-from hash_frx import HostShake128, HostShake256, Shake128, Shake256
+from hash_frx import Shake128, Shake256
 
 from sig_frx import hashes
 from sig_frx.lattice.mldsa import ml_dsa, sampling
@@ -39,44 +39,46 @@ _Chooser: TypeAlias = Callable[..., hashes.Xof]
 
 
 class SelectionTest(absltest.TestCase):
-    """`shake128` / `shake256` against the namespace of what they are handed."""
+    """`shake128` / `shake256` name one row each, whatever they are handed.
 
-    def test_a_host_value_picks_the_host_sponge(self) -> None:
+    The cases sweep the argument shapes the old dispatcher branched on — a host
+    array, a tracer, a mixed call, no values at all, a Python scalar — because
+    those are exactly the inputs a re-introduced branch would differ on. They
+    now all have to give the same answer.
+    """
+
+    def test_a_host_value_names_the_device_sponge(self) -> None:
         seed = np.zeros(32, dtype=np.uint8)
-        self.assertIs(hashes.shake128(seed), HostShake128)
-        self.assertIs(hashes.shake256(seed), HostShake256)
+        self.assertIs(hashes.shake128(seed), Shake128)
+        self.assertIs(hashes.shake256(seed), Shake256)
 
-    def test_a_traced_value_picks_the_device_sponge(self) -> None:
+    def test_a_traced_value_names_the_device_sponge(self) -> None:
         seed = fnp.zeros(32, dtype=fnp.uint8)
         self.assertIs(hashes.shake128(seed), Shake128)
         self.assertIs(hashes.shake256(seed), Shake256)
 
-    def test_one_traced_value_decides_for_the_call(self) -> None:
-        """The same rule `namespace` applies: a mixed call is a traced call.
-
-        Hashing the concatenation of a host part and a traced one has to happen
-        where the traced part is, since it cannot be read.
-        """
+    def test_a_mixed_call_names_the_device_sponge(self) -> None:
         self.assertIs(
             hashes.shake256(np.zeros(4, dtype=np.uint8), fnp.zeros(4, dtype=fnp.uint8)),
             Shake256,
         )
 
-    def test_nothing_at_all_is_a_host_call(self) -> None:
-        """A hash over no values is concrete — there is nothing to be traced."""
-        self.assertIs(hashes.shake256(), HostShake256)
+    def test_no_values_at_all_names_the_device_sponge(self) -> None:
+        self.assertIs(hashes.shake256(), Shake256)
 
-    def test_a_python_scalar_is_not_a_tracer(self) -> None:
+    def test_a_python_scalar_names_the_device_sponge(self) -> None:
         """The counter `expand_mask` takes is an `int`, and it decides nothing."""
-        self.assertIs(hashes.shake256(0, b"bytes", None), HostShake256)
+        self.assertIs(hashes.shake256(0, b"bytes", None), Shake256)
 
 
 class ConcretePathTest(absltest.TestCase):
-    """That signing and key generation reach the host sponge, not merely select it.
+    """WHICH sponge each step of a scheme reaches for, in order.
 
-    Driven through the schemes rather than through `hashes` directly: the
-    selection being right and a call site not using it is exactly the gap a unit
-    test of the selector alone leaves open.
+    Driven through the schemes rather than through `hashes` directly: the module
+    naming the right row and a call site not using it is exactly the gap a unit
+    test of the names alone leaves open. The substrate is no longer a variable,
+    but which of the two sponges runs at each step still is, and getting that
+    wrong is a wrong signature rather than a slow one.
     """
 
     def _sponges(self, call: Callable[[], object]) -> list[hashes.Xof]:
@@ -111,55 +113,44 @@ class ConcretePathTest(absltest.TestCase):
                 setattr(module, name, original)
         return taken
 
-    def test_keygen_hashes_on_the_host_until_the_transform_has_run(self) -> None:
-        """Algorithm 6's four hashes, and the one the rule leaves on the device.
+    def test_keygen_reaches_the_four_sponges_of_algorithm_6(self) -> None:
+        """Algorithm 6's four hashes, in order, and which sponge each is.
 
-        The first three are over `ξ` and what was expanded from it, which never
-        left the host. The fourth is `tr = H(pk)`, and `pk` carries `t1` — which
-        came out of `arith.intt`, so it is a device array and hashing it is a
-        device hash. That is the rule reaching its limit rather than failing at
-        it: `frx.lax.ntt` has no host form, so nothing about the seed's namespace
-        can put `t1` anywhere else.
-
-        Pinned as the exact sequence because the interesting content is where the
-        boundary falls, and an assertion that merely counted host calls would not
-        notice it moving.
+        `G` is the 128-bit XOF and serves `ExpandA` alone; everything else is
+        `H`. Pinned as the exact sequence because a step reaching for the wrong
+        one of the two produces a well-formed key nobody else computes, and an
+        assertion that merely counted calls would not notice.
         """
         scheme = ml_dsa.named("ML-DSA-44")
         seed = np.arange(32, dtype=np.uint8)
         self.assertEqual(
             self._sponges(lambda: scheme.keygen(seed)),
             [
-                HostShake256,  # line 1: ρ ‖ ρ′ ‖ K from ξ
-                HostShake128,  # ExpandA, from ρ
-                HostShake256,  # ExpandS, from ρ′
-                Shake256,  # tr = H(pk), and pk carries t1 from the transform
+                Shake256,  # line 1: ρ ‖ ρ′ ‖ K from ξ
+                Shake128,  # ExpandA, from ρ
+                Shake256,  # ExpandS, from ρ′
+                Shake256,  # tr = H(pk)
             ],
         )
 
-    def test_keygen_from_a_traced_seed_stays_on_the_device(self) -> None:
-        """The seam takes `ξ` as it arrives, so a lifted seed keeps the tracer."""
+    def test_keygen_from_a_traced_seed_reaches_the_same_sponges(self) -> None:
+        """The seam takes `ξ` as it arrives, and the sequence does not move."""
         scheme = ml_dsa.named("ML-DSA-44")
         seed = fnp.asarray(np.arange(32, dtype=np.uint8))
-        taken = self._sponges(lambda: scheme.keygen(seed))
-        self.assertNotEmpty(taken)
-        self.assertNotIn(HostShake128, taken)
-        self.assertNotIn(HostShake256, taken)
+        self.assertEqual(
+            self._sponges(lambda: scheme.keygen(seed)),
+            [Shake256, Shake128, Shake256, Shake256],
+        )
 
-    def test_expand_a_from_a_host_seed_hashes_on_the_host(self) -> None:
-        """The widest batch the scheme hashes, and it is still a host call."""
+    def test_expand_a_reaches_g_alone(self) -> None:
+        """The widest batch the scheme hashes, and the only `G` call in it."""
         taken = self._sponges(
             lambda: sampling.expand_a(np.arange(32, dtype=np.uint8), 8, 7)
         )
-        self.assertEqual(taken, [HostShake128])
+        self.assertEqual(taken, [Shake128])
 
-    def test_verification_keeps_the_device_sponge_throughout(self) -> None:
-        """Under `vmap` every value is a tracer, so no host row is reachable.
-
-        The property that makes the whole change safe by construction rather than
-        by review: a host hash reads the message bytes, so selecting one here
-        would raise rather than return a wrong answer.
-        """
+    def test_verification_reaches_the_device_sponge_throughout(self) -> None:
+        """Under `vmap` every value is a tracer, and every row takes one."""
         scheme = ml_dsa.named("ML-DSA-44", deterministic=True)
         seed = np.arange(32, dtype=np.uint8)
         public_key, secret_key = scheme.keygen(seed)
@@ -172,8 +163,7 @@ class ConcretePathTest(absltest.TestCase):
         )
         taken = self._sponges(lambda: frx.jit(scheme.verify)(*batch))
         self.assertNotEmpty(taken)
-        self.assertNotIn(HostShake128, taken)
-        self.assertNotIn(HostShake256, taken)
+        self.assertContainsSubset(set(taken), {Shake128, Shake256})
 
 
 if __name__ == "__main__":
