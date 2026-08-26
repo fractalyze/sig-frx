@@ -106,18 +106,20 @@ py_library(
     ],
 )
 
-# `medium` from the start, and the number below is not a CI one yet. This
-# measures 5.2 s on a workstation CPU and 10.1 s on its GPU; the sibling
-# `mode_test` runs the same shapes at 13 s locally against 41.0 s and 31.2 s on
-# the two CI legs, so the executor factors to carry over are about 3.2x and
-# 2.4x — putting this near 17 s and 24 s, with the CPU leg's own run-to-run
-# spread on top. `small`'s 60 s is inside that, which is exactly how `mode_test`
-# went red before its own bump. Replace these with the measured CI numbers after
-# the first run, per ../../../../docs/reference/measurement.md — and size from
-# the worst run on the slowest leg, never from the workstation.
+# `small`, and unlike its siblings this one is sized from CI rather than argued
+# up for margin. Across two runs of this branch the worst was 11.2 s on the CPU
+# leg and 10.7 s on the GPU leg, against `small`'s 60 s — a fifth of the budget,
+# where ../../../../docs/reference/measurement.md moves a target up at half. That
+# threshold already carries the CPU leg's 2.2x run-to-run spread, which the two
+# runs here (11.2 s and 10.2 s) have plainly not sampled the slow end of.
+#
+# It sits well under `mode_test` beside it because its traced leg compiles two
+# width-24 compressions rather than a 25-chunk sponge. A later slice adding
+# traced cases at the leaf shape should expect to pay what `mode_test` pays and
+# re-check this against a CI run, never against a workstation.
 py_test(
     name = "encoding_test",
-    size = "medium",
+    size = "small",
     srcs = ["encoding_test.py"],
     deps = [
         ":encoding_vectors",
