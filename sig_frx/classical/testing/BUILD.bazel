@@ -250,5 +250,5 @@ py_test(
         "//sig_frx/classical/schnorr:musig2",
         "@rules_python//python/runfiles",
         requirement("absl_py"),
-    ],
+    ] + GPU_PLUGIN_DEPS,
 )

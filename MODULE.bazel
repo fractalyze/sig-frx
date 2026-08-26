@@ -234,59 +234,13 @@ http_file(
 # factor and a wrong partial signature are different bugs, and gating only the
 # final signature would report both as the same failure. Each file carries its
 # own `error_test_cases` beside `valid_test_cases`, so the negative half of the
-# gate arrives with the positive half instead of being invented here.
+# gate arrives with the positive half instead of being invented here. Each file
+# is declared by the change that first reads it, all from upstream commit
+# ccb5415095c5b096abc9bd72384a6db4b7c34bce: a pin nothing depends on is a
+# sha256 the build never checks against a byte of real data.
 http_file(
     name = "bip327_key_agg_vectors",
     downloaded_file_path = "key_agg_vectors.json",
     sha256 = "03c02a97e4ef3f2edfbc8e6013c127496dfcfd5889cfca60ddf009a4e9091cab",
     urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/key_agg_vectors.json"],
-)
-
-http_file(
-    name = "bip327_key_sort_vectors",
-    downloaded_file_path = "key_sort_vectors.json",
-    sha256 = "2389fa0c146cfd7455c643ca240ec32835dcfc916f430f50dd94d0b49c9ea16c",
-    urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/key_sort_vectors.json"],
-)
-
-http_file(
-    name = "bip327_nonce_gen_vectors",
-    downloaded_file_path = "nonce_gen_vectors.json",
-    sha256 = "2e823580fc072427f0db0f000212cc9124ad2b9dca2b58357eb65088aee4358d",
-    urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/nonce_gen_vectors.json"],
-)
-
-http_file(
-    name = "bip327_nonce_agg_vectors",
-    downloaded_file_path = "nonce_agg_vectors.json",
-    sha256 = "8409e87b81ea769759598ad3ce53b277a78afffb3a490a86ce02c4d69984524b",
-    urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/nonce_agg_vectors.json"],
-)
-
-http_file(
-    name = "bip327_sign_verify_vectors",
-    downloaded_file_path = "sign_verify_vectors.json",
-    sha256 = "692eecc101f3e515c29137f05031935e1210d2a01bab91e674eb0234f095c15c",
-    urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/sign_verify_vectors.json"],
-)
-
-http_file(
-    name = "bip327_tweak_vectors",
-    downloaded_file_path = "tweak_vectors.json",
-    sha256 = "80ce6385ce062644ad1f4edcb9d4797f70ddb0b74769e4099f51b3c9e6ab4aff",
-    urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/tweak_vectors.json"],
-)
-
-http_file(
-    name = "bip327_sig_agg_vectors",
-    downloaded_file_path = "sig_agg_vectors.json",
-    sha256 = "15f14c034fb2a5739d7ce638be94c5b37ea675a2e01159092dd93b59d69c3439",
-    urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/sig_agg_vectors.json"],
-)
-
-http_file(
-    name = "bip327_det_sign_vectors",
-    downloaded_file_path = "det_sign_vectors.json",
-    sha256 = "3d4fdb64b24e31762f20830036dc0c59d39fa896649131b54b87906ffdc6e9e8",
-    urls = ["https://raw.githubusercontent.com/bitcoin/bips/ccb5415095c5b096abc9bd72384a6db4b7c34bce/bip-0327/vectors/det_sign_vectors.json"],
 )

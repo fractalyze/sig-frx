@@ -436,6 +436,16 @@ def affine_ints(curve: Curve, points: ArrayLike) -> list[tuple[int, int]]:
     return [(int(coords[2 * i]), int(coords[2 * i + 1])) for i in range(affine.size)]
 
 
+def sum_points(curve: Curve, points: ArrayLike) -> np.ndarray:
+    """The sum of a `[K]` point batch — `group.sum_points` with this curve's
+    identity as the pad, which on a short Weierstrass curve is a zero-filled
+    Jacobian buffer (see the shared function, which makes the choice the
+    caller's because padding wrongly agrees rather than raises).
+    """
+    points = np.asarray(points)
+    return group.sum_points(points, np.zeros([1], dtype=points.dtype))
+
+
 def is_identity(curve: Curve, points: ArrayLike) -> np.ndarray:
     """Whether each entry is the group identity, elementwise.
 

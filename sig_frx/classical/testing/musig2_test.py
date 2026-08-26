@@ -20,6 +20,7 @@ rather than just asserting a raise.
 
 from __future__ import annotations
 
+import functools
 import json
 from typing import Any
 from unittest import mock
@@ -33,6 +34,7 @@ from sig_frx.classical.schnorr import musig2
 _RUNFILES = Runfiles.Create()
 
 
+@functools.cache
 def _load(repo: str, file_name: str) -> dict[str, Any]:
     path = _RUNFILES.Rlocation(f"{repo}/file/{file_name}")
     assert path is not None
@@ -40,13 +42,13 @@ def _load(repo: str, file_name: str) -> dict[str, Any]:
         return json.load(handle)
 
 
-def _aggregate(data: dict[str, Any], case: dict[str, Any]) -> Any:
+def _aggregate(data: dict[str, Any], case: dict[str, Any]) -> musig2.KeyAggContext:
     """A case's `key_indices` and `tweak_indices` applied in published order."""
     pubkeys = [bytes.fromhex(data["pubkeys"][i]) for i in case["key_indices"]]
     context = musig2.key_agg(pubkeys)
-    tweaks = case.get("tweak_indices", [])
-    xonly_flags = case.get("is_xonly", [])
-    for index, is_xonly in zip(tweaks, xonly_flags, strict=True):
+    for index, is_xonly in zip(
+        case.get("tweak_indices", []), case.get("is_xonly", []), strict=True
+    ):
         context = context.apply_tweak(bytes.fromhex(data["tweaks"][index]), is_xonly)
     return context
 
@@ -70,11 +72,11 @@ class KeyAggTest(absltest.TestCase):
 
     def test_key_order_changes_the_aggregate(self) -> None:
         """Not a permutation-invariant sum: the coefficients bind the order."""
-        forward, reversed_ = self.data["valid_test_cases"][0:2]
-        self.assertEqual(
-            sorted(forward["key_indices"]), sorted(reversed_["key_indices"])
+        keys = [bytes.fromhex(k) for k in self.data["pubkeys"][:3]]
+        self.assertNotEqual(
+            musig2.key_agg(keys).xonly_bytes(),
+            musig2.key_agg(keys[::-1]).xonly_bytes(),
         )
-        self.assertNotEqual(forward["expected"], reversed_["expected"])
 
     def test_an_invalid_contribution_names_its_signer(self) -> None:
         cases = [
@@ -123,33 +125,26 @@ class KeyAggTest(absltest.TestCase):
                 with self.assertRaises(ValueError):
                     _aggregate(self.data, case)
 
-    def test_a_cosigner_count_past_the_device_threshold_agrees_with_the_host(
-        self,
-    ) -> None:
-        """The published cases top out at four keys; the batch seam moves at 64.
+    def test_the_aggregate_does_not_depend_on_where_the_batch_ran(self) -> None:
+        """Forced, not reached — and each side held against the published value.
 
-        `secp` places a batch on the device once it reaches `DEVICE_MIN_BATCH`,
-        so every published vector aggregates below that line and none of them
-        can say whether the placed path agrees. Raising the threshold past the
-        batch runs the identical call on the host, which makes the comparison a
-        differential on placement alone rather than a second implementation of
-        the aggregation.
+        `secp` places a batch on the device from `DEVICE_MIN_BATCH`, and every
+        published aggregation is far below it, so the placed path would ship
+        untested. Moving the threshold out from under the call is how
+        `secp_device_test` exercises the same seam.
 
-        This is the shape `secp._place` warns about — a threshold the gate's
-        own batches never cross — and a ceremony is where it gets crossed.
+        Both legs are compared to the vector's own `expected` rather than to
+        each other, which is the stronger statement: two paths that agree while
+        both being wrong pass a parity check and fail this one.
         """
-        pubkeys = [
-            bytes.fromhex(self.data["pubkeys"][i % 3])
-            for i in range(secp.DEVICE_MIN_BATCH + 1)
-        ]
-        placed = musig2.key_agg(pubkeys).xonly_bytes()
-
-        # A threshold no batch can reach keeps the identical call on the host,
-        # so the two differ in where the point sum ran and in nothing else.
-        with mock.patch.object(secp, "DEVICE_MIN_BATCH", len(pubkeys) + 1):
-            on_host = musig2.key_agg(pubkeys).xonly_bytes()
-
-        self.assertEqual(placed, on_host)
+        for threshold, where in ((1 << 30, "host"), (0, "device")):
+            for index, case in enumerate(self.data["valid_test_cases"]):
+                with self.subTest(ran_on=where, case=index):
+                    with mock.patch.object(secp, "DEVICE_MIN_BATCH", threshold):
+                        context = _aggregate(self.data, case)
+                    self.assertEqual(
+                        context.xonly_bytes().hex().upper(), case["expected"].upper()
+                    )
 
     def test_every_published_case_runs(self) -> None:
         """The counts the file ships with, so a regenerated set fails loudly."""

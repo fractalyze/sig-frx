@@ -48,21 +48,18 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from sig_frx.classical import group, secp
+from sig_frx.classical import secp
+from sig_frx.classical.schnorr import bip340
 
 _CURVE = secp.SECP256K1
 
-# The tagged-hash prefixes, doubled at use as in BIP-340's
-# `SHA256(SHA256(tag) || SHA256(tag) || x)`.
+# The tag prefixes are BIP-327's own; the construction they feed is
+# `bip340.tagged`, which BIP-327 incorporates by reference.
 _KEYAGG_LIST = hashlib.sha256(b"KeyAgg list").digest()
 _KEYAGG_COEFF = hashlib.sha256(b"KeyAgg coefficient").digest()
 
 _PUBKEY_SIZE = 33
 _TWEAK_SIZE = 32
-
-
-def _tagged(prefix: bytes, payload: bytes) -> bytes:
-    return hashlib.sha256(prefix + prefix + payload).digest()
 
 
 class InvalidContributionError(Exception):
@@ -104,24 +101,20 @@ def _second_key(pubkeys: Sequence[bytes]) -> bytes | None:
     return None
 
 
+def _coefficient(digest: bytes, second: bytes | None, pubkey: bytes) -> int:
+    """One key's weight. `second` compares unequal when it is `None`, which is
+    the all-keys-identical case the specification's zero sentinel also covers."""
+    if pubkey == second:
+        return 1
+    return (
+        int.from_bytes(bip340.tagged(_KEYAGG_COEFF, digest + pubkey), "big") % _CURVE.n
+    )
+
+
 def _coefficients(pubkeys: Sequence[bytes]) -> list[int]:
-    digest = _tagged(_KEYAGG_LIST, b"".join(pubkeys))
+    digest = bip340.tagged(_KEYAGG_LIST, b"".join(pubkeys))
     second = _second_key(pubkeys)
-    return [
-        (
-            1
-            if second is not None and pubkey == second
-            else int.from_bytes(_tagged(_KEYAGG_COEFF, digest + pubkey), "big")
-            % _CURVE.n
-        )
-        for pubkey in pubkeys
-    ]
-
-
-def _sum(points: np.ndarray) -> np.ndarray:
-    """The sum of a `[K]` point batch — a zero-filled Jacobian buffer is this
-    curve's infinity, so it is what pads an odd length."""
-    return group.sum_points(points, np.zeros([1], dtype=points.dtype))
+    return [_coefficient(digest, second, pubkey) for pubkey in pubkeys]
 
 
 @dataclass(frozen=True)
@@ -139,15 +132,15 @@ class KeyAggContext:
     gacc: int
     tacc: int
 
-    def affine(self) -> tuple[int, int]:
+    def _affine(self) -> tuple[int, int]:
         return secp.affine_ints(_CURVE, self.point)[0]
 
     def has_even_y(self) -> bool:
-        return self.affine()[1] % 2 == 0
+        return self._affine()[1] % 2 == 0
 
     def xonly_bytes(self) -> bytes:
         """The 32-byte x-only aggregate key, which is a BIP-340 public key."""
-        return self.affine()[0].to_bytes(32, "big")
+        return self._affine()[0].to_bytes(32, "big")
 
     def apply_tweak(self, tweak: bytes, is_xonly: bool) -> KeyAggContext:
         """One tweak applied, returning the context it produces.
@@ -165,10 +158,9 @@ class KeyAggContext:
         if value >= _CURVE.n:
             raise ValueError("the tweak must be less than the group order")
 
-        negate = is_xonly and not self.has_even_y()
-        parity = -1 if negate else 1
+        parity = -1 if is_xonly and not self.has_even_y() else 1
         tweaked = secp.double_multiple(_CURVE, [value], [parity % _CURVE.n], self.point)
-        if bool(np.asarray(secp.is_identity(_CURVE, tweaked))[0]):
+        if bool(secp.is_identity(_CURVE, tweaked)[0]):
             raise ValueError("the result of tweaking cannot be the identity")
 
         return KeyAggContext(
@@ -193,12 +185,13 @@ def key_agg(pubkeys: Sequence[bytes]) -> KeyAggContext:
     points, lifted = secp.lift_x_to_parity(
         _CURVE, [x for x, _ in parsed], [parity for _, parity in parsed]
     )
-    for signer, ok in enumerate(np.asarray(lifted)):
-        if not bool(ok):
-            raise InvalidContributionError(signer, "pubkey")
+    if not lifted.all():
+        raise InvalidContributionError(int(np.argmin(lifted)), "pubkey")
 
-    aggregate = _sum(secp.multiple(_CURVE, _coefficients(pubkeys), points))
-    if bool(np.asarray(secp.is_identity(_CURVE, aggregate))[0]):
+    aggregate = secp.sum_points(
+        _CURVE, secp.multiple(_CURVE, _coefficients(pubkeys), points)
+    )
+    if bool(secp.is_identity(_CURVE, aggregate)[0]):
         raise ValueError("the aggregate key cannot be the identity")
 
     return KeyAggContext(point=aggregate, gacc=1, tacc=0)
