@@ -116,8 +116,10 @@ py_test(
 
 # Verification under `frx.jit`. Its own target for the reason
 # `slh_dsa_traced_test` is: the cost here is compilation rather than hashing, and
-# it is most of this target's runtime. Size is provisional until CI measures it —
-# a local number cannot size a CPU-decided budget.
+# it is most of this target's runtime. `large`, decided by the CPU leg: 180.1 s
+# against 65.3 s on the GPU leg, which is 20% of the 900 s budget. The local
+# number was 77 s and could not have sized this — the executor factor is the CPU
+# leg's, per `measurement.md`.
 py_test(
     name = "shrincs_traced_test",
     size = "large",
