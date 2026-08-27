@@ -298,3 +298,41 @@ def is_invertible(f: list[int]) -> bool:
         sum(int(f[j]) * powers[(2 * i + 1) * j % (2 * n)] for j in range(n)) % Q
         for i in range(n)
     )
+
+
+def lift(lower: list[int], other: list[int]) -> list[int]:
+    """`lower(x²) · other(-x)`, Algorithm 6's step back up out of the recursion.
+
+    The counterpart to [`field_norm`](#field_norm) above: the descent halves the
+    degree and this doubles it back. `f(x)·f(-x)` is `N(f)(x²)`, so setting
+    `F = F'(x²)·g(-x)` turns the half-degree solution into a full-degree one
+    without touching the equation it satisfies.
+
+    Two substitutions and no arithmetic of its own. `lower(x²)` spreads the
+    coefficients over the even positions and leaves the odd ones empty;
+    `other(-x)` flips the sign of the odd ones. The product is the same
+    negacyclic one every other step here uses.
+    """
+    degree = len(other)
+    squared = [0] * degree
+    for i, value in enumerate(lower):
+        squared[2 * i] = value
+    negated = [value if i % 2 == 0 else -value for i, value in enumerate(other)]
+    return exact_negacyclic_mul(squared, negated)
+
+
+def ntru_equation(
+    f: list[int], g: list[int], big_f: list[int], big_g: list[int]
+) -> list[int]:
+    """`f·G − g·F`, which Algorithm 6 exists to make equal `q`.
+
+    Exact and at full degree, which is the only form of this check worth
+    running: every step of the recursion preserves the equation, so a version
+    that held only approximately would be evidence of nothing.
+    """
+    return [
+        left - right
+        for left, right in zip(
+            exact_negacyclic_mul(f, big_g), exact_negacyclic_mul(g, big_f)
+        )
+    ]

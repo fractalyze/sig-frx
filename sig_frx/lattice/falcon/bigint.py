@@ -21,10 +21,12 @@ and the CRT bridges them:
   them, since a residue says nothing about magnitude.
 
 **No positional multiply exists and none should be added.** Splitting the work
-this way is what keeps the limb narrow: the binary GCD at the base of the
-recursion is shifts and adds, and Babai's `k*f` is a product, which goes back
-through residues. A positional multiply would be the one operation that forces a
-wider accumulator than anything else here needs.
+this way is what keeps the limb narrow: a positional multiply would be the one
+operation that forces a wider accumulator than anything else here needs. The
+callers bear this out from both directions — the binary GCD at the base of the
+recursion is shifts and adds, and Babai's `k·f` above it is a wide value times
+a *small* one, which [`mul_small`](#mul_small) already covers a limb at a time.
+A product of two wide values is what goes back through residues.
 
 ## Everything is 15 bits wide, and that is one decision rather than two
 
@@ -285,10 +287,13 @@ def mul_small(a: ArrayLike, scalar: ArrayLike) -> Any:
 def shift_right(a: ArrayLike, bits: int) -> Any:
     """`a >> bits` over limbs, for a `bits` known at trace time.
 
-    A data-dependent shift is deliberately absent. Babai's reduction wants one
-    and will need it, but it is not written here until that caller exists —
-    a traced shift amount costs a gather per limb, which is not a price this
-    module's current callers should pay for a generality none of them uses.
+    A data-dependent shift *right* is still deliberately absent, and the caller
+    that was expected to need one turned out not to. Babai's reduction scales
+    its correction up to meet `F` rather than scaling `F` down to meet the
+    correction, so what it wanted was
+    [`shift_left_dynamic`](#shift_left_dynamic) — which is written, and which
+    carries the cost this docstring used to warn about. Nothing asks for the
+    right-hand form, so it stays unwritten rather than being added for symmetry.
     """
     values = fnp.asarray(a)
     limbs = values.shape[-1]
@@ -354,6 +359,52 @@ def shift_left(a: ArrayLike, bits: int) -> Any:
         [fnp.zeros((*moved.shape[:-1], 1), np.uint32), moved[..., :-1]], axis=-1
     )
     return ((moved << np.uint32(part)) & MASK) | (lower >> np.uint32(LIMB_BITS - part))
+
+
+def shift_left_dynamic(a: ArrayLike, bits: ArrayLike) -> Any:
+    """`a << bits` over limbs, for a `bits` that arrives as a value.
+
+    The one operation here whose shift amount is not a Python integer, and it
+    exists because Babai's reduction's is not one: the correction it subtracts
+    sits wherever the remaining quotient sits, which follows the widths of a
+    particular key rather than the budgets they were allocated from.
+
+    A shift is a slide, so a traced amount turns the whole-limb part of it into
+    a gather. That is the price this module warned about and it is genuinely
+    paid; what buys it back is that a traced amount is also a *loop invariant*
+    shape, so a caller compiles its step once and runs it a few hundred times,
+    where a Python integer would have compiled a new program per step. Only one
+    gather is needed rather than the two the pair of straddling limbs suggests:
+    the lower limb of each pair is the upper one slid down a place, which is a
+    slice by a constant.
+
+    `bits` broadcasts against the leading axes the way every other operation
+    here does, so one amount serves a whole array and an amount per value also
+    works. It is indexed against the limb axis explicitly for that reason —
+    left implicit, an amount shaped like the values' leading axis would
+    broadcast against the *limbs* instead and quietly return a wrong answer
+    wherever the two happened to agree in length.
+
+    No branch is needed for a zero intra-limb offset. A limb is under `2^15`
+    and the low half of the pair is shifted by `15 - part`, which at `part = 0`
+    is a shift by the whole limb width and yields zero on its own.
+    """
+    values = fnp.asarray(a)
+    limbs = values.shape[-1]
+    amount = fnp.asarray(bits).astype(np.int32)
+    whole, part = amount // LIMB_BITS, amount % LIMB_BITS
+    source = fnp.arange(limbs, dtype=np.int32) - whole[..., None]
+
+    inside = (source >= 0) & (source < limbs)
+    index = fnp.broadcast_to(fnp.clip(source, 0, limbs - 1), values.shape)
+    moved = fnp.where(
+        inside, fnp.take_along_axis(values, index.astype(np.int32), axis=-1), 0
+    )
+    lower = fnp.concatenate(
+        [fnp.zeros((*moved.shape[:-1], 1), np.uint32), moved[..., :-1]], axis=-1
+    )
+    offset = part[..., None].astype(np.uint32)
+    return ((moved << offset) & MASK) | (lower >> (np.uint32(LIMB_BITS) - offset))
 
 
 def at_least(a: ArrayLike, b: ArrayLike) -> Any:

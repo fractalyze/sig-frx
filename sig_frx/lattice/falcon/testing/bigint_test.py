@@ -164,6 +164,56 @@ class PositionalTest(parameterized.TestCase):
                 )
 
     @parameterized.parameters(*WIDTHS)
+    def test_the_dynamic_shift_matches_the_one_that_knows_its_amount(
+        self, bits: int
+    ) -> None:
+        """Same answers as [`shift_left`](../bigint.py), off a traced amount.
+
+        The two exist for different reasons — one is cheaper and the other
+        compiles once for a whole loop — so the property that matters is that
+        they cannot disagree. Both ends of the range are in the sweep: an
+        amount of zero takes the intra-limb path with nothing to carry across,
+        and one past the budget has to shift the value away rather than wrap it.
+        """
+        limbs = bigint.limb_count(bits)
+        modulus = _modulus(limbs)
+        value = random.Random(bits + 7).getrandbits(bits) % modulus
+        packed = bigint.to_limbs(value, limbs)
+        amounts = (0, 1, 14, 15, 16, 29, 30, 37, bits // 2, limbs * bigint.LIMB_BITS)
+        for amount in amounts:
+            with self.subTest(amount=amount):
+                got = bigint.shift_left_dynamic(packed, np.int32(amount))
+                self.assertEqual(bigint.from_limbs(got), (value << amount) % modulus)
+                np.testing.assert_array_equal(
+                    np.asarray(got), np.asarray(bigint.shift_left(packed, amount))
+                )
+
+    def test_the_dynamic_shift_broadcasts_over_a_whole_polynomial(self) -> None:
+        """One amount against `[m, L]`, and one amount *per* value.
+
+        The first is how the reduction asks — a single exponent scales the
+        whole correction. The second is not asked for yet and is tested anyway,
+        because the amount is indexed against the limb axis and a shape that
+        broadcast against the wrong axis would answer rather than raise. The
+        row count here is deliberately *not* the limb count, which is the case
+        where such a mistake would go unnoticed.
+        """
+        limbs = bigint.limb_count(120)
+        modulus = _modulus(limbs)
+        values = [0, 1, (1 << 100) - 1, 1 << 100]
+        stacked = np.stack([bigint.to_limbs(v, limbs) for v in values])
+        self.assertNotEqual(len(values), limbs)
+
+        shared = bigint.shift_left_dynamic(stacked, np.int32(17))
+        for row, value in zip(np.asarray(shared), values):
+            self.assertEqual(bigint.from_limbs(row), (value << 17) % modulus)
+
+        amounts = np.array([0, 15, 29, 44], dtype=np.int32)
+        per_value = bigint.shift_left_dynamic(stacked, amounts)
+        for row, value, amount in zip(np.asarray(per_value), values, amounts.tolist()):
+            self.assertEqual(bigint.from_limbs(row), (value << amount) % modulus)
+
+    @parameterized.parameters(*WIDTHS)
     def test_the_signed_shift_fills_from_the_sign_not_from_zero(
         self, bits: int
     ) -> None:
