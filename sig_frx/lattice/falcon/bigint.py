@@ -335,8 +335,14 @@ def at_least(a: ArrayLike, b: ArrayLike) -> Any:
     Decided at the most significant limb where the two differ, found with a
     reduction rather than a scan: place value means every less significant limb
     is irrelevant once one differs, so there is nothing to propagate.
+
+    The operands are broadcast first. Every other operation here broadcasts for
+    free, being elementwise; this one gathers at an index derived from *both*,
+    so a bare `[..., L]` against a `[L]` constant — comparing a whole polynomial
+    against one bound, which is what the callers do — would otherwise fail on
+    the gather rather than answer.
     """
-    left, right = fnp.asarray(a), fnp.asarray(b)
+    left, right = fnp.broadcast_arrays(fnp.asarray(a), fnp.asarray(b))
     positions = fnp.arange(left.shape[-1], dtype=np.int32)
     top = fnp.max(fnp.where(left != right, positions, np.int32(-1)), axis=-1)
     index = fnp.maximum(top, np.int32(0))[..., None]
@@ -387,20 +393,71 @@ def _place_values(channels: int, limbs: int) -> np.ndarray:
     return _frozen(table)
 
 
-def to_rns(a: ArrayLike, channels: int) -> Any:
+@lru_cache(maxsize=None)
+def _limb_span(channels: int, limbs: int) -> np.ndarray:
+    """`BASE^L mod m_i` — what a two's-complement value is offset by.
+
+    Limbs wrap modulo `BASE^L` and residues reduce modulo a product of primes,
+    so the two forms disagree about a negative value by exactly this. It is the
+    whole content of the `signed` flag on both bridge directions.
+    """
+    mods = moduli(channels).astype(np.int64)
+    place = np.ones(channels, dtype=np.int64)
+    for _ in range(limbs):
+        place = (place << LIMB_BITS) % mods
+    return _frozen(place.astype(np.uint32))
+
+
+def is_negative(a: ArrayLike) -> Any:
+    """Whether limbs read as two's complement are negative — the top bit."""
+    values = fnp.asarray(a)
+    return (values[..., -1] >> np.uint32(LIMB_BITS - 1)) & np.uint32(1) != 0
+
+
+def to_rns(a: ArrayLike, channels: int, *, signed: bool = False) -> Any:
     """Positional limbs to `[..., channels]` residues.
 
     Each limb is reduced against its own place value *before* the sum, which is
     what keeps the accumulator in a lane: a limb times a place value is under
     `2^30` and would overflow after two additions, while the reduced form is
     under `2^15` and survives every limb this module can hold.
+
+    `signed` reads the limbs as two's complement. Without it a negative value
+    arrives as `x + BASE^L`, which is a perfectly good residue of the wrong
+    number — no operation downstream can tell, which is why the flag exists
+    rather than a convention.
     """
     values = fnp.asarray(a)
     _check_bridgeable(values.shape[-1])
     mods = moduli(channels)
     table = _place_values(channels, values.shape[-1])
     terms = (values[..., None, :] * table) % mods[:, None]
-    return fnp.sum(terms, axis=-1, dtype=np.uint32) % mods
+    residues = fnp.sum(terms, axis=-1, dtype=np.uint32) % mods
+    if not signed:
+        return residues
+    span = _limb_span(channels, values.shape[-1])
+    return fnp.where(
+        is_negative(values)[..., None],
+        (residues + mods - span) % mods,
+        residues,
+    )
+
+
+@lru_cache(maxsize=None)
+def signed_shape(bits: int) -> tuple[int, int]:
+    """Channels and limbs a signed value of magnitude under `2^bits` needs.
+
+    Two requirements, and only the first is obvious. The channel product has to
+    exceed `2^(bits+1)`, because a signed value occupies twice the classes an
+    unsigned one of the same magnitude does. The **limb** budget then has to hold
+    that product rather than the value — `from_rns(signed=True)` centers by
+    subtracting `M`, and a budget sized to the value has nowhere to put it.
+    """
+    channels = channel_count(bits + 1)
+    product = 1
+    for modulus in moduli(channels).tolist():
+        product *= modulus
+    return channels, limb_count(product.bit_length() + 1)
 
 
 @lru_cache(maxsize=None)
@@ -422,7 +479,26 @@ def _garner_tables(channels: int, limbs: int) -> tuple[np.ndarray, np.ndarray]:
     return _frozen(prefix), _frozen(inverse)
 
 
-def from_rns(residues: ArrayLike, channels: int, limbs: int) -> Any:
+@lru_cache(maxsize=None)
+def _product_limbs(channels: int, limbs: int) -> tuple[np.ndarray, np.ndarray]:
+    """The modulus product and its half, as limbs — where `signed` splits.
+
+    Garner lands in `[0, M)`, and the centered representative of that class is
+    what a value that was ever negative has to come back as. `M/2` is the
+    boundary and `M` is what crossing it costs.
+    """
+    product = 1
+    for modulus in moduli(channels).tolist():
+        product *= modulus
+    span = 1 << (limbs * LIMB_BITS)
+    return _frozen(to_limbs(product % span, limbs)), _frozen(
+        to_limbs((product // 2) % span, limbs)
+    )
+
+
+def from_rns(
+    residues: ArrayLike, channels: int, limbs: int, *, signed: bool = False
+) -> Any:
     """Residues back to positional limbs, by Garner's mixed-radix reconstruction.
 
     Garner rather than the explicit `Σ r_i * M_i * y_i`: the explicit form lands
@@ -436,6 +512,12 @@ def from_rns(residues: ArrayLike, channels: int, limbs: int) -> Any:
     order the reference implementation's `zint_rebuild_CRT` pays, and no caller
     has yet measured it as a pole; a tree-shaped form exists and is not written
     for that reason.
+
+    `signed` returns the **centered** representative — Garner lands in `[0, M)`,
+    and a value that was negative before it became residues comes back as
+    `x + M`, which is the right class and the wrong integer. The limb budget has
+    to hold `M` for that subtraction to mean anything, which is a stronger
+    requirement than merely holding the value.
     """
     values = fnp.asarray(residues)
     _check_bridgeable(limbs)
@@ -457,4 +539,8 @@ def from_rns(residues: ArrayLike, channels: int, limbs: int) -> Any:
         return add(total, mul_small(fnp.take(prefix, index, axis=0), digit[..., None]))
 
     start = fnp.zeros((*values.shape[:-1], limbs), np.uint32)
-    return lax.fori_loop(0, channels, step, start)
+    total = lax.fori_loop(0, channels, step, start)
+    if not signed:
+        return total
+    product, half = _product_limbs(channels, limbs)
+    return fnp.where(at_least(total, half)[..., None], sub(total, product), total)

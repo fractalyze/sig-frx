@@ -38,6 +38,25 @@ py_library(
     ],
 )
 
+# §3.8.2's tower-of-fields descent, over `:bigint`. Named for the operation it
+# will become rather than for the descent alone: the base case, the lift and
+# Babai's reduction land here too. Depends on no hash and on no seam yet — the
+# recursion is gated against Python integers, which is the only oracle a step
+# inside key generation has.
+py_library(
+    name = "keygen",
+    srcs = [
+        "__init__.py",
+        "keygen.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":bigint",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
 # `Z_q` arithmetic and the NTT over q = 12289. Depends on no hash and on no
 # scheme logic: the transform is testable against exact integer arithmetic
 # before any of keygen, sign or verify exists, which is why it lands on its own.
