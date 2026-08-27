@@ -68,10 +68,10 @@ one, and for a compile-bound target that is usually the GPU.
 
 What a local GPU number is worth is an order of magnitude, not a tenth. The same
 four targets against the CI figures this page records, measured on one
-workstation in two sessions and carried as a ratio to CI rather than as the
-local durations themselves, which are the machine's and not the target's. The
-sessions stay in separate columns because a ratio and its denominator have to
-come from one of them:
+workstation in two sessions and carried as a ratio to CI rather than as local
+durations, which are the machine's and not the target's — the sessions stay in
+separate columns because a ratio and its denominator have to come from one of
+them:
 
 | target | CI, as recorded | one session | another |
 |---|---|---|---|
@@ -178,8 +178,8 @@ from it can cite it:
 | the rule it anchors | measured here |
 |---|---|
 | an A/B is interleaved | sequential blocks read **1.07x** where interleaved medians read **1.38x**; a three-sample smoke run read **1.75x** on a Falcon `verify` whose median is **1.01x** — the honest answer was "no difference", which is the answer a sloppy A/B is least likely to return |
-| a share comes from one session | the decoder stage moved **25%** across two sessions on unchanged code while `verify` and `HashToPoint`, measured in the same two, held to 4% |
-| an isolated stage is a bound | `rejection.first_accepted`'s scatter wins its stage by 1.3-6.3x on CPU and 1.0-4.6x on GPU while `verify` stays flat at 0.96-1.04x, and the `ExpandA` compaction times **1.8x the `verify` it sits inside** |
+| a share comes from one session | the decoder stage moved **25%** across two sessions on unchanged code while `verify` and `HashToPoint` held to 4% across the same two |
+| an isolated stage is a bound | `rejection.first_accepted`'s scatter wins its stage by 1.3-6.3x on CPU and 1.0-4.6x on GPU while `verify` stays flat at 0.96-1.04x, and the `ExpandA` compaction measures **1.8x the `verify` it sits inside** |
 | a fused prefix does not repair it | [`decoder_bench`](../../sig_frx/lattice/falcon/testing/decoder_bench.py) prices each step as the whole decoder *stopped* there; collapsing the 48% within-byte chain to a `[256, 9]` lookup takes the step 1.84-2.54x and moves `verify` 0.98-1.00x, at 12% on CPU `sig_decode` |
 
 Two of those decide something a reader would otherwise have to guess at.
@@ -190,6 +190,26 @@ that was 15% of the decoder onto the chain that was 48%, ranking correctly and
 unable to price the fix, which is the whole rule in one example.
 
 **A docstring stating a stage ratio says so in those words.**
+
+### A recorded number is a ratio or a share, not a local duration
+
+A duration measured on a workstation is that machine's, and nobody rechecks it
+because nobody can — the same four targets above read 0.8x to 1.4x of CI across
+two sessions on *one* box, so a reader who reruns one and gets something else
+has learned nothing about the code. Write what survives the machine instead: a
+**ratio** between two forms timed in one session, or a **share** whose total came
+from that same session. Both are what the argument rested on anyway; the
+milliseconds were only ever how they were computed.
+
+Seconds belong in a BUILD comment, where they are CI's and they size something.
+
+Two things this asks for that a raw pair gave away for free, so they have to be
+written deliberately:
+
+- **Name the direction.** `19x` alone does not say which side is faster — say
+  "19x faster than a Python loop", not "19x a Python loop".
+- **Name the anchor.** A table of ratios says which row is `1.00x`, and the
+  anchor is the shipped form unless there is a reason to pick another.
 
 ### Two shapes the "prove the experiment fired" rule takes here
 

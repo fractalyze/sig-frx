@@ -161,7 +161,8 @@ py_test(
 #
 # It stays `eternal` past the emitter fix for that regression
 # (fractalyze/xla#572, on this repo's pin since hash-frx 9d86ae73): the fix cuts
-# the compile, but a local compile is not what the budget covers, and on CI at
+# the compile 1.6x locally against the 2.0x the regression added, but a local
+# compile is not what the budget covers, and on CI at
 # that pin this target measures **950.9s**, still over `large`'s 900s. The GPU
 # leg runs the same target in 177.7s; the CPU runner's sharing is most of the
 # gap, which is why a local figure cannot decide this. Re-check against a CI
@@ -186,14 +187,14 @@ py_test(
 # back: it is the standards-exactness gate, and it is too slow to sit in review.
 #
 # Sharded rather than given a bigger budget, because no budget holds the whole
-# sweep for long: it is tens of minutes on a dev workstation, and this package
-# measures 2.1-2.7x slower on the CI executor, so an undivided run spends most of
-# `enormous`'s hour with four more parameter sets still to become constructible.
-# The test cuts at the published operation, the longest of which is under a tenth
-# of the whole, and names its cases so that a shard draws the operations of one
-# parameter set. At thirty-two the worst shard is 121.6 s — a third of `large`
-# once the executor factor is paid — and every shard compiles one set's kernels
-# rather than several shards each compiling the same set's.
+# sweep for long: undivided on the CI executor — where this package measures
+# 2.1-2.7x a workstation — it spends most of `enormous`'s hour, with four more
+# parameter sets still to become constructible. The test cuts at the published
+# operation, the longest of which is under a tenth of the whole, and names its
+# cases so that a shard draws the operations of one parameter set. At thirty-two
+# the worst shard is a third of `large` once the executor factor is paid, and
+# every shard compiles one set's kernels rather than several shards each
+# compiling the same set's.
 py_test(
     name = "slh_dsa_sweep_test",
     size = "large",

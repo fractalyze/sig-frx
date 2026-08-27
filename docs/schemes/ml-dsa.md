@@ -117,8 +117,8 @@ entries.
 
 **`Â` is per public key, and that is the cost worth naming.** Sampling the matrix
 is over half of a compiled `B = 64` verification at ML-DSA-65 on this repo's CPU
-path — and because the seam hands every entry its
-own public key, a batch genuinely holds `B` distinct matrices. The deployment that
+path — and because the seam hands every entry its own public key, a batch
+genuinely holds `B` distinct matrices. The deployment that
 verifies many signatures under *one* key can sample it once and close over it, but
 that needs a surface which says the keys are equal; the seam cannot, and inferring
 it would be a data-dependent branch. So it is a surface below the seam and it

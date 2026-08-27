@@ -68,9 +68,8 @@ most expensive stage of verification. Measured on a workstation CPU at
 Falcon-1024, `B = 256`, warm, over a published signature, with `verify` timed
 around each form and the transition table kept in `uint8` throughout — nine
 states fit in a byte, and this table is what every combine step moves, which
-`_ON_ZERO` prices on its own:
-
-The two cost columns are relative to the shipped form, which is the last row:
+`_ON_ZERO` prices on its own. `decompress` and `verify` are relative to the
+shipped form, the last row:
 
 | walk | ranking | `decompress` | share | `verify` |
 |---|---|---|---|---|
@@ -225,8 +224,8 @@ SK_F_BITS = 8
 # and in the unary run a `1` is what ends the coefficient.
 # uint8 rather than a lane-width integer: nine states fit in a byte, and this
 # table is what the scan below moves on every combine step, so the width is the
-# scan's bandwidth. Measured at Falcon-1024 B=256 it is 3.0x as int32 against
-# uint8, for bit-identical output.
+# scan's bandwidth. Measured at Falcon-1024 B=256, int32 costs 3.0x what uint8
+# does, for bit-identical output.
 _ON_ZERO = np.array([1, 2, 3, 4, 5, 6, 7, 8, 8], dtype=np.uint8)
 _ON_ONE = np.array([1, 2, 3, 4, 5, 6, 7, 8, 0], dtype=np.uint8)
 _UNARY_STATE = 8

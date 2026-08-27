@@ -114,9 +114,9 @@ py_test(
 # ../../../../docs/reference/measurement.md moves a target up at half — and the
 # CPU leg's spread across runs of one commit is a median 2.2x, so the run that
 # times out is one that has not happened yet. The GPU leg is the quieter one
-# here, 114.7-162.6 s. A local measurement would have kept this at `medium`:
-# the executor factor is per-target, which is why that page says a local number
-# does not size a CPU-decided budget.
+# here, 114.7-162.6 s. A local measurement said 28% and would have kept this at
+# `medium`: the executor factor is per-target, which is why that page says a
+# local number does not size a CPU-decided budget.
 #
 # It is the package's dearest test by construction — every entry of every call
 # runs both signing paths — and the signer adds an FXMSS tree per case on top.
@@ -141,9 +141,9 @@ py_test(
 # Verification under `frx.jit`. Its own target for the reason
 # `slh_dsa_traced_test` is: the cost here is compilation rather than hashing, and
 # it is most of this target's runtime. `large`, decided by the CPU leg: 180.1 s
-# against 65.3 s on the GPU leg, which is 20% of the 900 s budget. A local
-# number could not have sized this — the executor factor is the CPU leg's, per
-# `measurement.md`.
+# against 65.3 s on the GPU leg, which is 20% of the 900 s budget. A local run
+# reads 2.34x under the CPU leg and could not have sized this — the executor
+# factor is the CPU leg's, per `measurement.md`.
 py_test(
     name = "shrincs_traced_test",
     size = "large",

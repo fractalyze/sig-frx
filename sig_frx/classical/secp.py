@@ -48,8 +48,8 @@ pinned wheel P-256's field is admitted while its points are not, and a seam
 that asked the point question on the square root's behalf would strand it on
 the host over a gap in a type it never touches. It is worth deciding:
 measured on an RTX 5090 with full-size scalars, the device form of `multiple`
-runs 7.3x the host at B=256 and 105x at B=4096, where its cost is still flat in
-the batch — the same there as at B=64.
+runs 7.3x the host at B=256 and 105x at B=4096, where it costs no more than it
+does at B=64.
 
 Everything that turns a point into integers is host by nature and stays there —
 `affine_ints`, `uncompressed_rows`, `on_curve`, `secret_scalar` — because the
@@ -68,11 +68,9 @@ measured identical to running it eagerly while adding a compile per batch
 shape. The square root is ~325 *chained* multiplications instead, so eager it
 is a chain of that many sequential launches — launch-bound, not
 compute-bound, which is visible in a steady state that does not move with the
-batch: flat at B = 24, 64, 256 and 1024 alike. Compiled it is one kernel, an
-order of magnitude cheaper and also flat. See `sqrt` for the trade that buys —
-a compile the first time a process meets a batch shape, and a small fraction of
-it once a persistent cache holds it — and for why shrinking the ladder is the
-wrong response to that trade.
+batch across B = 24, 64, 256 and 1024 alike. Compiled it is one kernel, ~19x
+cheaper and also flat. See `sqrt` for what that compile costs, and for why
+shrinking the ladder is the wrong response to it.
 
 The GPU story for these curves remains EC kernels over these same dtypes
 (fractalyze/sig-frx#139), not a traced re-derivation of the group law.
@@ -275,8 +273,8 @@ def _place(values: ArrayLike) -> Any:
     against is a fixed one. Measured on an RTX 5090 with full-size scalars,
     lifting a batch, multiplying and reading it back costs the same on CUDA
     regardless of size, so it loses badly to the host on a single signature —
-    27x slower there — and wins from roughly a batch of 64 up, 1.7x there and
-    26x at 1 024. The CPU backend has no such floor and is ahead from a
+    27x slower — and wins from roughly a batch of 64 up, 1.7x there and 26x at
+    1 024. The CPU backend has no such floor and is ahead from a
     batch of 2, so one threshold picked for CUDA is safe for both: below it
     nothing moves and nothing regresses, above it both backends gain. One
     number covers all three seams because two that drifted apart would be two
@@ -527,7 +525,7 @@ def on_curve_rows(curve: Curve, xs: Sequence[int], ys: Sequence[int]) -> np.ndar
 
     Coordinates arrive as Python integers rather than bytes because that is
     what the callers have already parsed, and because `group.field_from_bytes`
-    is the wrong tool for this: measured, it costs 11x per coordinate what
+    is the wrong tool for this: per coordinate it costs 12x what
     `int.from_bytes` plus one `[B]` construction does, since it evaluates a
     32-wide weighted sum in field arithmetic where the host has a C path over
     32 bytes.
@@ -574,23 +572,22 @@ def sqrt(curve: Curve, value: ArrayLike) -> Any:
     sequential kernel launches — launch-bound rather than compute-bound, which
     shows up as a steady state that does not move with the batch: it holds to
     1.3% across B = 24, 64, 256 and 1024 on secp256k1, a 43-fold range of batch
-    sizes, which is the claim rather than an average standing in for it.
-    Compiled it is one kernel, also flat, so the win is ~19x wherever the batch
-    is placed. Both curves land there
-    (secp256k1 18.7-19.0x, secp256r1 18.9-19.6x for B >= 24); an earlier
-    reading that made them differ was five reps against this one's twenty-one,
-    and the difference did not survive.
+    sizes — that is the spread across the four, not a mean over them. Compiled
+    it is one kernel, also flat, so the win is ~19x wherever the batch is
+    placed. Both curves land there (secp256k1 18.7-19.0x, secp256r1 18.9-19.6x
+    for B >= 24); an earlier reading that made them differ was five reps against
+    this one's twenty-one, and the difference did not survive.
 
     **The cost is a compile per batch shape, and it is not small.** Measured on
-    an RTX 5090 it is thousands of times one call's steady state the first time
-    a process sees a shape, and a small fraction of that once a persistent
-    compile cache holds it — so break-even moves from a few hundred calls at a
-    shape to single figures. A deployment that verifies more than a handful of
-    batches wants `FRX_COMPILATION_CACHE_DIR` set; one that verifies a single
-    signature and exits pays the whole compile to save one call's work and
-    would rather not. That trade is stated here
-    because it is invisible to every benchmark in this repo: they all warm each
-    shape before timing it, so none of them can see a first-call cost at all.
+    an RTX 5090 it is ~440-750x one eager call the first time a process sees a
+    shape, and a small fraction of that once a persistent compile cache holds
+    it — so break-even moves from a few hundred calls at a shape to single
+    figures. A deployment that verifies more than a handful of batches wants
+    `FRX_COMPILATION_CACHE_DIR` set; one that verifies a single signature and
+    exits pays the whole compile to save one call's work and would rather not.
+    That trade is stated here because it is invisible to every benchmark in this
+    repo: they all warm each shape before timing it, so none of them can see a
+    first-call cost at all.
 
     Shrinking the ladder does not help the compile, which is the
     counter-intuitive part and worth recording so it is not retried. Compile
@@ -598,11 +595,11 @@ def sqrt(curve: Curve, value: ArrayLike) -> Any:
     328 and varying only how many stay live moved the compile 12x between one
     live value and 64 — and the window's `2^w - 1` table is what is live here.
     So `window=1` emits ~499 multiplies with no table, `window=4` emits ~328
-    with a 15-entry table, and the second is the ~1.4x slower compile: the
-    fewer-multiplication form is the slower one. `window=4` stays because it
-    wins the steady state by 1.6x, which is what is paid on every call rather
-    than once. The structural fix is outlining, which is
-    the same finding as fractalyze/prime-ir#405 and belongs there.
+    with a 15-entry table — and the fewer-multiplication form is the ~1.4x
+    slower compile. `window=4` stays because it wins the steady state by 1.6x,
+    which is what is paid on every call rather than once. The structural fix is
+    outlining, which is the same finding as fractalyze/prime-ir#405 and belongs
+    there.
     """
     if curve.p % 4 != 3:
         raise ValueError("sqrt shortcut requires p ≡ 3 (mod 4)")

@@ -89,8 +89,8 @@ MAX_LEAVES = 2**20
 # The walk is `HEIGHT` levels whatever a tree's depth, and unrolling all of them
 # is most of what a traced verifier compiles. Measured at `B = 4`, same process,
 # interleaved — a compiled `Shrincs.verify` end to end, and the eager walk on its
-# own, because the suite still runs eager. Every column is relative to the
-# Python loop:
+# own, because the suite still runs eager. Each cost column is relative to the
+# Python loop's reading of it:
 #
 #     walk form          verify compile   verify warm   eager walk
 #     a Python loop               1.00x         1.00x        1.00x
@@ -106,8 +106,8 @@ MAX_LEAVES = 2**20
 # which is more than the eager cases lose.
 #
 # 15 divides 255, so the last step is whole. The floor under all of this is the
-# stateless leg, which is two-thirds of that compile on its own — cutting the
-# walk further buys correspondingly less.
+# stateless leg, which is two-thirds of the unroll-15 compile on its own —
+# cutting the walk further buys correspondingly less.
 _WALK_UNROLL = 15
 
 

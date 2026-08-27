@@ -73,9 +73,10 @@ py_library(
 )
 
 # `medium` for the margin rather than the runtime. This measures 41.0 s on the
-# CPU leg and 31.2 s on the GPU leg — `small`'s
-# 60 s is inside that spread, and an earlier revision proved it by timing out
-# there and taking the suite red. Nearly all of it is compiling the traced leg.
+# CPU leg and 31.2 s on the GPU leg, and a workstation reads 0.32x the CPU leg
+# — `small`'s 60 s is inside that spread, and an earlier revision proved it by
+# timing out there and taking the suite red. Nearly all of it is compiling the
+# traced leg.
 # Sized from the worst run on the slowest leg, per
 # ../../../../docs/reference/measurement.md — re-check against a CI run, not a
 # workstation, before shrinking it.
