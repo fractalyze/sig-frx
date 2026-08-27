@@ -157,3 +157,21 @@ py_binary(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# Provisionally sized, because no leg has recorded this target yet and
+# ../../../../docs/reference/measurement.md says a workstation number sizes
+# nothing. What the workstation does say is which leg will decide: the GPU one
+# runs it at roughly twice the CPU one, the ratio the sibling `arith_test`
+# shows and `falcon_test` inverts, and both are far enough inside `small` that
+# no other bucket is arguable. Revisit against the first CI run — if the GPU leg
+# lands past half of 60 s, this wanted `medium`.
+py_test(
+    name = "bigint_test",
+    size = "small",
+    srcs = ["bigint_test.py"],
+    deps = [
+        "//sig_frx/lattice/falcon:bigint",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
