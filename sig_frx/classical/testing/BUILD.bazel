@@ -252,9 +252,16 @@ py_binary(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# `medium`, decided by the CPU leg: 51.7 s against 9.1 s on the GPU leg. That is
+# 86% of `small`'s 60 s, well past the half-budget rule in
+# ../../../docs/reference/measurement.md, and the next run of unchanged content
+# spent the remaining 14% and timed out. 51.7 s is 17% of `medium`'s 300 s.
+#
+# Two local runs of this target read 2.5x apart from each other, which is why
+# neither sized it — the CPU leg is the one that decides.
 py_test(
     name = "musig2_test",
-    size = "small",
+    size = "medium",
     srcs = ["musig2_test.py"],
     data = [
         "@bip327_key_agg_vectors//file",
