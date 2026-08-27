@@ -127,3 +127,30 @@ py_library(
         requirement("zk_dtypes"),
     ],
 )
+
+# The scheme: the verifier over every layer below it. Depends on the shared
+# hash-based machinery rather than restating it — `tree.root_from_path` is the
+# Merkle climb, `wots.chain` the Winternitz walk, and `tweakable` the operand
+# widening they both need.
+py_library(
+    name = "leansig",
+    srcs = [
+        "__init__.py",
+        "leansig.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":encoding",
+        ":field",
+        ":params",
+        ":ssz",
+        ":tweakable",
+        "//sig_frx:batch",
+        "//sig_frx:context",
+        "//sig_frx/hash:tree",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash:wots",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

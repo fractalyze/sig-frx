@@ -64,7 +64,9 @@ def _verdicts(name: str) -> dict[int, bool]:
     verdicts = {}
     for batch in cctv.by_message_length():
         public_key, message, signature = cctv.as_arrays(batch)
-        got = np.asarray(scheme.verify(public_key, message, signature, context=None))
+        got = np.asarray(
+            scheme.verify(public_key, message, signature, context=None, position=None)
+        )
         for vector, verdict in zip(batch, got):
             verdicts[vector.number] = bool(verdict)
     return verdicts
@@ -105,6 +107,7 @@ class AcceptSetTest(parameterized.TestCase):
             _hex(_RFC_8032_MESSAGE)[None, :],
             _hex(_RFC_8032_SIGNATURE)[None, :],
             context=None,
+            position=None,
         )
         self.assertTrue(bool(np.asarray(verdict)[0]))
 
@@ -132,6 +135,7 @@ class BatchAxisTest(absltest.TestCase):
                 np.frombuffer(vector.message, dtype=np.uint8)[None, :],
                 np.frombuffer(vector.signature, dtype=np.uint8)[None, :],
                 context=None,
+                position=None,
             )
             self.assertEqual(
                 bool(np.asarray(alone)[0]),

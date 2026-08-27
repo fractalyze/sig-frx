@@ -788,6 +788,11 @@ def _verify_batch(scheme: Signature, group: Sequence[KatVector]) -> list[bool]:
         messages,
         signatures,
         context=None if context is None else _as_array(context),
+        # The harness drives the seam, so it names every per-call field. No
+        # published set here carries a position: the one scheme that reads it
+        # is gated on its own vectors, which are whole `(key, slot, root,
+        # signature)` objects rather than this shape.
+        position=None,
     )
     return [bool(v) for v in np.asarray(verdicts)]
 

@@ -82,6 +82,7 @@ from frx.typing import ArrayLike
 
 from sig_frx import context as context_rules
 from sig_frx.arrays import namespace
+from sig_frx.batch import require_no_position
 from sig_frx.classical import edwards, group
 from sig_frx.signature import Signature
 
@@ -264,8 +265,10 @@ class Ed25519:
         signature: ArrayLike,
         *,
         context: ArrayLike | None,
+        position: ArrayLike | None = None,
     ) -> Any:
         """The batched verdict, `bool[B]`, under this construction's rule."""
+        require_no_position(position, "EdDSA")
         curve = self.curve
         parsed = self._parsed(public_key, message, signature, context)
 

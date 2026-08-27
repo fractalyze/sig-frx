@@ -42,6 +42,7 @@ from frx.typing import ArrayLike
 
 from sig_frx import context as context_rules
 from sig_frx import hashes
+from sig_frx.batch import require_no_position
 from sig_frx.classical import group, secp
 from sig_frx.classical.ecdsa import rfc6979
 from sig_frx.signature import Signature
@@ -280,8 +281,10 @@ class Ecdsa:
         signature: ArrayLike,
         *,
         context: ArrayLike | None,
+        position: ArrayLike | None = None,
     ) -> Any:
         """The batched verdict, `bool[B]`, over the record's message hash."""
+        require_no_position(position, "ECDSA")
         context_rules.require_empty(context, "ECDSA")
         digest = self.hash.byte_hash(message).digest(message)
         return self.verify_digest(public_key, digest, signature)

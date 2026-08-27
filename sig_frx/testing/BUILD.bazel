@@ -13,6 +13,7 @@ py_library(
     ],
     visibility = ["//sig_frx:__subpackages__"],
     deps = [
+        "//sig_frx:batch",
         "//sig_frx:signature",
         requirement("frx"),
     ],
@@ -49,6 +50,7 @@ py_library(
     visibility = ["//sig_frx:__subpackages__"],
     deps = [
         ":kat",
+        "//sig_frx:batch",
         "//sig_frx:prehash",
         "//sig_frx:signature",
         requirement("frx"),

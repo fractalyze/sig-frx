@@ -144,6 +144,7 @@ class _AlwaysAccepts(ChecksumScheme):
         signature: ArrayLike,
         *,
         context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
     ) -> Array:
         return fnp.ones(np.shape(public_key)[0], dtype=fnp.bool_)
 
@@ -158,6 +159,7 @@ class _AlwaysRejects(ChecksumScheme):
         signature: ArrayLike,
         *,
         context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
     ) -> Array:
         return fnp.zeros(np.shape(public_key)[0], dtype=fnp.bool_)
 
@@ -172,8 +174,11 @@ class _VerdictForTheWholeBatch(ChecksumScheme):
         signature: ArrayLike,
         *,
         context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
     ) -> Array:
-        per_entry = super().verify(public_key, message, signature, context=context)
+        per_entry = super().verify(
+            public_key, message, signature, context=context, position=position
+        )
         return fnp.full(np.shape(public_key)[0], fnp.all(per_entry))
 
 

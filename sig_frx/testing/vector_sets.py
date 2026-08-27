@@ -59,6 +59,7 @@ from frx import Array
 from frx.typing import ArrayLike
 
 from sig_frx import prehash
+from sig_frx.batch import require_no_position
 from sig_frx.signature import Signature
 from sig_frx.testing import kat
 
@@ -394,8 +395,10 @@ class InternalInterface(_Adapter):
         signature: ArrayLike,
         *,
         context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
     ) -> Array:
         _reject_context(context)
+        require_no_position(position, "the internal interface")
         return self._scheme.verify_internal(public_key, message, signature)
 
 
@@ -442,7 +445,9 @@ class PreHashVariant(_Adapter):
         signature: ArrayLike,
         *,
         context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
     ) -> Array:
+        require_no_position(position, "the pre-hash variant")
         return self._scheme.hash_verify(
             public_key, message, signature, self._pre_hash, context=context
         )

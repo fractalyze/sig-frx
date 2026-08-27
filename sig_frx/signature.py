@@ -139,6 +139,7 @@ class Signature(Protocol):
         signature: ArrayLike,
         *,
         context: ArrayLike | None,
+        position: ArrayLike | None,
     ) -> Array:
         """Verify a batch: uint8 `[B, public_key_size]`, uint8 `[B, L]`, uint8
         `[B, signature_max_size]` -> bool `[B]`.
@@ -151,6 +152,22 @@ class Signature(Protocol):
 
         `context` applies to the whole batch, matching how a verifier is deployed:
         one protocol domain, many signatures.
+
+        `position` is the one thing that is per entry and is not an operand: the
+        position within a stateful key's lifetime that a signature was made at.
+        A scheme that encodes it inside the signature (RFC 8391 XMSS) or has no
+        such notion (every stateless scheme here) requires it empty and refuses
+        otherwise, through `batch.require_no_position` — accepting one to ignore
+        it would verify at a position other than the one the caller named. It is
+        not folded into `message` because the message is what a protocol signs
+        and a verifier compares; a scheme whose message space is a hash would
+        then have two things in it, and a caller passing the hash alone would get
+        a shape error rather than a verdict.
+
+        leanSig is what put it on the seam and what reads it
+        ([`hash/leansig/leansig.py`](hash/leansig/leansig.py)): its verifier
+        takes the slot as an input, upstream leaves it off the wire, and a batch
+        spans slots — so `context`, which is one value per call, cannot carry it.
 
         A wrong rank, or a batch whose parts do not line up, is a caller mistake
         and raises; a wrong *width* is every entry's answer at once, and whether

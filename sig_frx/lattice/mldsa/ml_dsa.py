@@ -68,7 +68,7 @@ from frx.typing import ArrayLike
 from sig_frx import context as ctx
 from sig_frx import prehash
 from sig_frx.arrays import namespace
-from sig_frx.batch import require_batch
+from sig_frx.batch import require_batch, require_no_position
 from sig_frx.hashes import shake256
 from sig_frx.lattice import rejection
 from sig_frx.lattice.mldsa import arith, encoding, sampling
@@ -449,8 +449,10 @@ class MlDsa:
         signature: ArrayLike,
         *,
         context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
     ) -> Array:
         """`ML-DSA.Verify` — Algorithm 3 over Algorithm 8, for the whole batch."""
+        require_no_position(position, "ML-DSA")
         return self.verify_internal(
             public_key,
             ctx.prepend(ctx.prefix(_PURE_DOMAIN, context), message),
