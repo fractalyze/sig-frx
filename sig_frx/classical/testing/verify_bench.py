@@ -56,17 +56,28 @@ started. The bucket shares are against `work`.
 Both columns are needed because a single one of them lies. Without the wait,
 a placed seam is timed for its *enqueue* and its arithmetic is billed to
 whichever later seam first reads the array — on every secp lane that is
-`affine_ints`, inside `readback`. Measured at B=1024, `secp.double_multiple`
-returns in about a fifth of the time the multiplication it queued then takes:
-timed without the wait, that reads as a 2% `mult` and a 45% `readback`, and
-the ranking it produces is the dispatch order rather than the profile. With
-the wait, `mult` is a third of these lanes and `readback` is the smallest
-bucket in all three. Below `DEVICE_MIN_BATCH` nothing is placed and the two
-columns agree, which is the check that the wait is not itself the cost.
+`affine_ints`, inside `readback`. Measured at B=1024 before the square-root
+ladder was fused, `secp.double_multiple` returned in about a fifth of the
+time the multiplication it queued then took: timed without the wait, that
+read as a 2% `mult` and a 45% `readback`, and the ranking it produces is the
+dispatch order rather than the profile.
 
-`work` is the larger of the two by 10-20% at B=1024, and that gap is real
-rather than overhead: it is the overlap the queue buys back, which `wall`
-keeps and `work` gives up in exchange for honest attribution.
+With the wait, `mult` is what these lanes are made of: 58.4-68.8% at B=1024,
+against `readback`'s 4.6-7.2% — the smallest of the point-substrate buckets
+in all three. Each share is against its own lane's `work` in the same run;
+the ranges span three five-rep sessions. `mult` was a third of a lane when
+this paragraph was first written, and the difference is not a regression but
+a denominator: fusing the square-root ladder cut `lift` to 7.5-9.5% and what
+it stopped spending is now everyone else's share. Below `DEVICE_MIN_BATCH`
+nothing is placed and the two columns agree, which is the check that the
+wait is not itself the cost.
+
+`work` is the larger of the two by 3-8% at B=1024 across the same three
+sessions, and that gap is real rather than overhead: it is the overlap the
+queue buys back, which `wall` keeps and `work` gives up in exchange for
+honest attribution. It was 10-20% before the ladder was fused — a fused
+`lift` queues one kernel where the eager one queued ~325, so there is that
+much less in flight for the wait to give up.
 
 Every batch size is run once before it is timed, so what this reports is
 steady state. That makes it blind by construction to any change that moves
