@@ -20,10 +20,16 @@ encoder is the test's, and what it buys is `Decompress(Compress(s)) = s` over
 coefficients drawn to stress the unary run rather than over the two that
 upstream happened to publish.
 
-Transcribed from the published document (§3.9, §3.10, §3.11), not from memory and
+Transcribed from the published document (§3.8 through §3.11), not from memory and
 not from another implementation. Nothing here is written for speed: Python
 integers have no width, which is exactly why this side is trustworthy and the
 other side delegates its arithmetic to a field dtype.
+
+The rational half — §3.8's transform, its splitting operator, and Algorithms 8
+and 9 — cannot be exact, since the quantities are irrational before any
+implementation touches them. There the independence is structural instead: the
+transform is direct evaluation rather than a recursion, and the splitting
+operator is written from the identity that defines it rather than from an index.
 
 The hashing half takes the standard library's SHAKE — the point being that
 squeezing here asks for more bytes whenever it needs them, so the reference never
@@ -44,13 +50,20 @@ Q = 12289
 # its own. `sbytelen` and the key lengths are the standard's stated values rather
 # than the implementation's formulas — checking a formula against itself proves
 # nothing.
-PARAMETER_SETS: dict[str, dict[str, int]] = {
+#
+# The column type is `Any` because the table's is: `n` and the lengths are
+# integers and the three standard deviations are not, and a union would be read
+# back with a cast at every use site for no property anyone checks.
+PARAMETER_SETS: dict[str, dict[str, Any]] = {
     "Falcon-512": {
         "n": 512,
         "squared_norm_bound": 34034726,
         "public_key_size": 897,
         "secret_key_size": 1281,
         "signature_size": 666,
+        "sigma": 165.736617183,
+        "sigma_min": 1.277833697,
+        "sigma_max": 1.8205,
     },
     "Falcon-1024": {
         "n": 1024,
@@ -58,6 +71,9 @@ PARAMETER_SETS: dict[str, dict[str, int]] = {
         "public_key_size": 1793,
         "secret_key_size": 2305,
         "signature_size": 1280,
+        "sigma": 168.388571447,
+        "sigma_min": 1.298280334,
+        "sigma_max": 1.8205,
     },
 }
 
@@ -253,6 +269,101 @@ def field_norm(a: list[int]) -> list[int]:
     return out
 
 
+def fft_roots(n: int) -> np.ndarray:
+    """The `n` roots of `x^n = −1`: `ζ_k = e^(iπ(2k+1)/n)`, in natural order.
+
+    The one place this file fixes an order for the rational transform. §3.6
+    leaves the convention to the implementer and asks only that `FFT`, `invFFT`,
+    `splitfft` and `mergefft` agree on it — so a second copy here would be a
+    second chance for two oracles to disagree about what index means what.
+    """
+    return np.exp(1j * np.pi * (2 * np.arange(n) + 1) / n)
+
+
+def evaluate(f: list[int] | list[float] | np.ndarray) -> np.ndarray:
+    """`FFT(f)` — the polynomial at each of [`fft_roots`](#fft_roots).
+
+    Direct evaluation rather than a transform, which is what makes this
+    independent of [`fft.py`](../fft.py): it shares neither the twiddle table
+    nor the recursion, only the roots themselves.
+    """
+    coefficients = np.asarray(f, dtype=float)
+    return np.polyval(coefficients[::-1], fft_roots(len(coefficients)))
+
+
+def split_fft(f_fft: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Algorithm 1, from the identity that defines it rather than by index.
+
+    `f(x) = f0(x²) + x·f1(x²)` evaluated at `ζ` and at `−ζ` gives
+
+        f0(ζ²) = (f(ζ) + f(−ζ))/2        f1(ζ²) = (f(ζ) − f(−ζ))/2ζ
+
+    so the pairing follows from the ordering instead of being transcribed
+    alongside it: in [`fft_roots`](#fft_roots)'s order `−ζ_k` is `ζ_(k + n/2)`,
+    and `ζ_k²` is the `k`-th root of the ring below, so the two halves come out
+    in that same natural order. The reference implementation pairs *adjacent*
+    indices, correctly, because its representation is bit-reversed — which is
+    exactly the sort of detail a transcription of the index arithmetic would
+    import by accident.
+    """
+    n = f_fft.shape[-1]
+    half = n // 2
+    lo, hi = f_fft[..., :half], f_fft[..., half:]
+    return 0.5 * (lo + hi), 0.5 * (lo - hi) / fft_roots(n)[:half]
+
+
+def gram(
+    f: list[int], g: list[int], big_f: list[int], big_g: list[int]
+) -> list[list[np.ndarray]]:
+    """Algorithm 4 lines 2-4 — `B̂ × B̂*` for `B = [[g, −f], [G, −F]]`.
+
+    The matrix product written out, negations and all four entries included,
+    where [`keygen.gram`](../keygen.py) folds `(−f)·(−f)* = f·f*` and returns
+    three entries because `G10` is `conj(G01)`. Both of those are the things a
+    test of it should have to check rather than share.
+
+    An adjoint is elementwise conjugation in this domain, since a root lies on
+    the unit circle and `f*(ζ) = conj(f(ζ))`.
+    """
+    rows = [[evaluate(g), -evaluate(f)], [evaluate(big_g), -evaluate(big_f)]]
+    return [
+        [sum(a * np.conj(b) for a, b in zip(left, right)) for right in rows]
+        for left in rows
+    ]
+
+
+def ldl(matrix: list[list[np.ndarray]]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Algorithm 8 at the 2×2 shape ffLDL always hands it — `(L10, D00, D11)`."""
+    (g00, g01), (g10, g11) = matrix
+    d00 = g00
+    l10 = g10 / g00
+    d11 = g11 - l10 * np.conj(l10) * g00
+    return l10, d00, d11
+
+
+def ffldl(matrix: list[list[np.ndarray]]) -> tuple[Any, Any, Any]:
+    """Algorithm 9 as the `(value, leftchild, rightchild)` tree it describes.
+
+    One call per node, where [`keygen.ffldl`](../keygen.py) runs one array
+    operation per depth. A leaf is `D00` or `D11` at ring degree 2 and is kept
+    whole — the length-2 evaluation of what the algebra says is a rational
+    constant — so a test can check that its two entries agree rather than being
+    handed the number they agree on.
+    """
+    l10, d00, d11 = ldl(matrix)
+    if d00.shape[-1] == 2:
+        return l10, d00, d11
+    even_from_d00, odd_from_d00 = split_fft(d00)
+    even_from_d11, odd_from_d11 = split_fft(d11)
+    # Line 10: `D` self-adjoint makes its multiplication map `[[d0, d1],
+    # [d1*, d0]]` over the ring below — (3.30).
+    return (
+        l10,
+        ffldl([[even_from_d00, odd_from_d00], [np.conj(odd_from_d00), even_from_d00]]),
+        ffldl([[even_from_d11, odd_from_d11], [np.conj(odd_from_d11), even_from_d11]]),
+    )
+
+
 def gram_schmidt_squared_norm(f: list[int], g: list[int]) -> float:
     """Algorithm 5 line 5, written the way the specification states it.
 
@@ -263,9 +374,8 @@ def gram_schmidt_squared_norm(f: list[int], g: list[int]) -> float:
     module's, which is the independence that makes it an oracle.
     """
     n = len(f)
-    roots = np.exp(1j * np.pi * (2 * np.arange(n) + 1) / n)
-    f_hat = np.polyval(np.asarray(f, float)[::-1], roots)
-    g_hat = np.polyval(np.asarray(g, float)[::-1], roots)
+    roots = fft_roots(n)
+    f_hat, g_hat = evaluate(f), evaluate(g)
     energy = (f_hat * np.conj(f_hat) + g_hat * np.conj(g_hat)).real
     # Back to coefficients by solving the Vandermonde system the roots define,
     # which is the inverse transform written as what it is.

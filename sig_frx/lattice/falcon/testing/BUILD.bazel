@@ -211,6 +211,12 @@ py_test(
 # it adds two compiled programs per level and about 330 reduction steps at
 # `n = 1024`. 2.1x on the 107 s above is ~224 s, which is 75% of `medium` and so
 # past the half-a-budget threshold; `large` puts it at 25%.
+#
+# The ffLDL tree is the one slice that did not move any of this, which is worth
+# recording because every slice before it did: its four cases run 1.2 s against
+# the target's 130-146 s over two CPU runs on one workstation, about 1% either
+# way. Nothing there compiles per level the way the integer half does — the tree
+# is host `float64` — and its single traced case is one small program.
 py_test(
     name = "keygen_test",
     size = "large",
