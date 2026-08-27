@@ -34,14 +34,13 @@ from zk_dtypes import koalabear_mont as F
 from sig_frx.hash.leansig import params
 from sig_frx.hash.leansig.params import LeanSigParams
 
-PRESETS: Final[dict[str, LeanSigParams]] = {"prod": params.PROD, "test": params.TEST}
+PRESETS: Final[dict[str, LeanSigParams]] = params.PRESETS
 """The preset a vector names, by the key its module spells.
 
-Shared for the reason the conversions below are: two suites already carry cases
-at both presets and a third would have been the second copy of the mapping. A
-dict rather than a helper that picks by some property of the case — an unknown
-key raises here, where a fallback would silently run the wrong preset and report
-a digest mismatch instead.
+Re-exported rather than restated: `params.py` owns the map now that the scheme
+resolves a caller's preset string through the same one. Kept as a name here
+because four suites already resolve through `harness.PRESETS`, and the
+indirection is what let it move without touching them.
 """
 
 

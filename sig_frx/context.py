@@ -14,6 +14,16 @@ shape ([`docs/reference/conventions.md`](../docs/reference/conventions.md)); the
 cost of two copies is not the lines but that a fix to one is never looked for in
 the other.
 
+The module also owns the **refusals**, which is what widened it past the framing
+its name is for. A seam field a scheme cannot use has exactly one honest value,
+and saying so is one predicate however many fields there are: `context` for a
+standard that defines none, `position` for a scheme whose signature carries its
+own index or has no notion of one ([`signature.py`](signature.py)). They arrived
+one apiece and the second is what made the shared `_refuse` below, per
+[`conventions.md`](../docs/reference/conventions.md#generalize-a-component-when-its-second-consumer-arrives)
+— a refinement to either (a traced value, an empty of the wrong rank) now lands
+once rather than in whichever copy the reader happened to open.
+
 A third arrived since, from a different decade and a different body: RFC 8032's
 `dom2(F, C)` is this exact framing — `octet(F) ‖ octet(OLEN(C)) ‖ C`, one length
 byte and the same 255-octet ceiling — behind a 32-octet ASCII constant that the
@@ -34,6 +44,18 @@ from frx.typing import ArrayLike
 MAX_SIZE = 255
 
 
+def _refuse(value: ArrayLike | None, scheme: str, cannot: str) -> None:
+    """Reject a non-empty `value` for a scheme that has no use for it.
+
+    `np.size` rather than `np.asarray(...).size`: only the shape is wanted, and
+    a value that arrived on a device would otherwise be copied back to read it.
+    """
+    if value is None:
+        return
+    if np.size(value) != 0:
+        raise ValueError(f"{scheme} {cannot}; pass None or empty")
+
+
 def require_empty(context: ArrayLike | None, scheme: str) -> None:
     """Refuse a context for a scheme whose standard defines none.
 
@@ -42,10 +64,22 @@ def require_empty(context: ArrayLike | None, scheme: str) -> None:
     honest value (`signature.py`). Shared because every classical scheme
     enforces the same sentence.
     """
-    if context is None:
-        return
-    if np.asarray(context).size != 0:
-        raise ValueError(f"{scheme} defines no application context; pass None or empty")
+    _refuse(context, scheme, "defines no application context")
+
+
+def require_no_position(position: ArrayLike | None, scheme: str) -> None:
+    """Refuse a per-entry position for a scheme that verifies without one.
+
+    Most schemes take everything they need from the three operands: the position
+    is either inside the signature (RFC 8391 XMSS encodes the index) or absent
+    from the construction entirely. leanSig is the exception the seam field
+    exists for, and it is the one that reads it (`signature.py`).
+
+    The same sentence `require_empty` enforces, about the seam's other per-call
+    field — accepting one to ignore it would verify at a position other than the
+    one the caller named.
+    """
+    _refuse(position, scheme, "verifies without a per-entry position")
 
 
 def prefix(domain: int, context: ArrayLike | None) -> np.ndarray:

@@ -59,7 +59,7 @@ from hash_frx import Sha256, Sha512, Shake256
 
 from sig_frx import context as ctx
 from sig_frx import prehash
-from sig_frx.batch import WrongWidth, require_batch, require_no_position
+from sig_frx.batch import WrongWidth, require_batch
 from sig_frx.hash import bytestring, tree, wots
 from sig_frx.hash.slhdsa import fors, hypertree, xmss
 from sig_frx.hash.tweakable import (
@@ -444,7 +444,7 @@ class SlhDsa:
         position: ArrayLike | None = None,
     ) -> Array:
         """`slh_verify` — Algorithm 24 over Algorithm 20, for the whole batch."""
-        require_no_position(position, "SLH-DSA")
+        ctx.require_no_position(position, "SLH-DSA")
         return self.verify_internal(
             public_key,
             ctx.prepend(ctx.prefix(_PURE_DOMAIN, context), message),

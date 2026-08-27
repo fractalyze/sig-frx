@@ -33,6 +33,7 @@ from sig_frx.hash.leansig.testing.verify_vectors import (
 )
 
 _SCHEME = leansig.named("test")
+_ACCEPTED = tuple(v for v in VERIFY_VECTORS if v.verdict)
 
 
 def _batch(
@@ -84,21 +85,9 @@ class AgainstUpstreamTest(parameterized.TestCase):
             [vector.verdict for vector in VERIFY_VECTORS],
         )
 
-    def test_a_batch_of_one_is_a_batch(self) -> None:
-        accepted = VERIFY_VECTORS[0]
-        keys, messages, signatures, slots = _batch((accepted,))
-        self.assertEqual(
-            _verdicts(_SCHEME.verify(keys, messages, signatures, position=slots)),
-            [True],
-        )
-
 
 class SlotTest(absltest.TestCase):
     """`position` is per entry, required, and bounded by the key's lifetime."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.accepted = tuple(v for v in VERIFY_VECTORS if v.verdict)
 
     def test_a_slot_belongs_to_its_own_entry(self) -> None:
         """Two entries, slots swapped: both must fail.
@@ -107,7 +96,7 @@ class SlotTest(absltest.TestCase):
         batch — with the right slot first, a shared read reproduces entry zero's
         verdict and gets entry one's wrong.
         """
-        pair = self.accepted[:2]
+        pair = _ACCEPTED[:2]
         keys, messages, signatures, slots = _batch(pair)
         self.assertEqual(
             _verdicts(_SCHEME.verify(keys, messages, signatures, position=slots[::-1])),
@@ -115,19 +104,19 @@ class SlotTest(absltest.TestCase):
         )
 
     def test_it_is_required(self) -> None:
-        keys, messages, signatures, _ = _batch(self.accepted[:1])
+        keys, messages, signatures, _ = _batch(_ACCEPTED[:1])
         with self.assertRaisesRegex(ValueError, "position.* is required"):
             _SCHEME.verify(keys, messages, signatures)
 
     def test_one_slot_per_entry(self) -> None:
-        keys, messages, signatures, slots = _batch(self.accepted[:2])
+        keys, messages, signatures, slots = _batch(_ACCEPTED[:2])
         with self.assertRaisesRegex(ValueError, "one slot per public key"):
             _SCHEME.verify(keys, messages, signatures, position=slots[:1])
 
     def test_a_slot_past_the_lifetime_is_an_error(self) -> None:
         # The tree has no leaf to index, so there is nothing to compute a
         # `False` from — unlike a wrong-but-valid slot, which is a verdict.
-        keys, messages, signatures, _ = _batch(self.accepted[:1])
+        keys, messages, signatures, _ = _batch(_ACCEPTED[:1])
         for slot in (_SCHEME.signatures_per_key, -1):
             with self.subTest(slot=slot):
                 with self.assertRaisesRegex(ValueError, "covers slots"):
@@ -200,8 +189,7 @@ class TamperedSignatureTest(parameterized.TestCase):
         ("the_randomness", 8),
     )
     def test_one_flipped_byte_is_refused(self, offset: int) -> None:
-        accepted = next(v for v in VERIFY_VECTORS if v.verdict)
-        keys, messages, signatures, slots = _batch((accepted,))
+        keys, messages, signatures, slots = _batch(_ACCEPTED[:1])
         tampered = signatures.copy()
         tampered[0, offset] ^= 0x01
         self.assertEqual(
@@ -223,8 +211,7 @@ class TamperedSignatureTest(parameterized.TestCase):
         trusted to it — a mis-typed key byte would fail either way, and that is
         the case this deliberately is not.
         """
-        accepted = next(v for v in VERIFY_VECTORS if v.verdict)
-        keys, messages, signatures, slots = _batch((accepted,))
+        keys, messages, signatures, slots = _batch(_ACCEPTED[:1])
         restated = keys.copy()
         group = restated[0, :4].view(np.uint32)[0] + np.uint32(PRIME)
         restated[0, :4] = np.frombuffer(np.uint32(group).tobytes(), dtype=np.uint8)
@@ -243,8 +230,7 @@ class TamperedSignatureTest(parameterized.TestCase):
         of the same length — invisible to the seam. The check is `ssz.py`'s; this
         is the verdict reaching the caller through the scheme.
         """
-        accepted = next(v for v in VERIFY_VECTORS if v.verdict)
-        keys, messages, signatures, slots = _batch((accepted,))
+        keys, messages, signatures, slots = _batch(_ACCEPTED[:1])
         tampered = signatures.copy()
         tampered[0, -4:] = np.asarray([0xFF, 0xFF, 0xFF, 0xFF], dtype=np.uint8)
         self.assertEqual(

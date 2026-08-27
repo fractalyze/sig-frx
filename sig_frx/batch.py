@@ -25,13 +25,6 @@ disagreement follows the standards rather than being an accident:
 - RFC 8391 defines no such verdict at all, which is why XMSS takes both as
   caller mistakes.
 
-This module also holds the refusal for the seam's other per-entry operand.
-`position` is the slot a stateful scheme verifies at, and exactly one scheme
-reads it — so the rule for every other one is the same sentence, and
-`require_no_position` is it. Accepting a position only to ignore it would verify
-at a slot other than the one the caller named, which is `context`'s failure
-under a different name ([`context.py`](context.py)).
-
 So the reading is per operand and per scheme, and `WrongWidth` is how a call site
 states the one its standard gave it. `VERDICT` is the default because it is what
 both FIPS standards ask for wherever they speak; a scheme whose standard is
@@ -46,7 +39,6 @@ import enum
 from typing import NamedTuple
 
 import frx.numpy as fnp
-import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
@@ -134,24 +126,3 @@ def require_batch(
         size,
         keys.shape[1] == public_key_size and signatures.shape[1] == signature_size,
     )
-
-
-def require_no_position(position: ArrayLike | None, scheme: str) -> None:
-    """Refuse a per-entry position for a scheme that verifies without one.
-
-    Most schemes take everything they need from the three operands: the position
-    is either inside the signature (RFC 8391 XMSS encodes the index) or absent
-    from the construction entirely. leanSig is the exception the seam field
-    exists for, and it is the one that reads it (`signature.py`).
-
-    Empty is the only honest value for the rest, by the seam's own rule for a
-    field a scheme cannot use — the same sentence `context.require_empty`
-    enforces, and shared for the same reason: every scheme that refuses one
-    refuses it identically.
-    """
-    if position is None:
-        return
-    if np.asarray(position).size != 0:
-        raise ValueError(
-            f"{scheme} verifies without a per-entry position; pass None or empty"
-        )

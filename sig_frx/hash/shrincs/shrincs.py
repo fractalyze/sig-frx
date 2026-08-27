@@ -76,7 +76,7 @@ from hash_frx import block_size as block_size_of
 
 from sig_frx import context as ctx
 from sig_frx import hashes
-from sig_frx.batch import WrongWidth, require_batch, require_no_position
+from sig_frx.batch import WrongWidth, require_batch
 from sig_frx.hash import bytestring, tweakable
 from sig_frx.hash.shrincs import fxmss, stateless
 
@@ -342,7 +342,7 @@ class Shrincs:
         `[B, L]`, and the result is `bool[B]`. `context` applies to the whole
         batch.
         """
-        require_no_position(position, "SHRINCS")
+        ctx.require_no_position(position, "SHRINCS")
         # SLH-DSA's reading, which this scheme inherits along with the leg that
         # reaches it: the signature's width is a verdict, the key's is not.
         operands = require_batch(

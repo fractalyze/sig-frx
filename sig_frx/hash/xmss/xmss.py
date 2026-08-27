@@ -71,7 +71,7 @@ from frx.typing import ArrayLike
 from hash_frx import Sha256
 
 from sig_frx import context as context_rules
-from sig_frx.batch import WrongWidth, require_batch, require_no_position
+from sig_frx.batch import WrongWidth, require_batch
 from sig_frx.hash import tree
 from sig_frx.hash.wots import WotsParams
 from sig_frx.hash.xmss import adrs, wots
@@ -520,7 +520,7 @@ class Xmss:
         another index climbs to a different root and is rejected — the index is not
         a hint the verifier may take on trust.
         """
-        require_no_position(position, "XMSS (RFC 8391)")
+        context_rules.require_no_position(position, "XMSS (RFC 8391)")
         context_rules.require_empty(context, "XMSS (RFC 8391)")
         params = self.params
         # RFC 8391 defines no verdict for a mis-sized key or signature the way

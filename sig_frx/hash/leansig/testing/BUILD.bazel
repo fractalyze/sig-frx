@@ -234,7 +234,6 @@ py_test(
     size = "medium",
     srcs = ["leansig_test.py"],
     deps = [
-        ":harness",
         ":verify_vectors",
         "//sig_frx/hash/leansig",
         requirement("absl_py"),

@@ -83,7 +83,6 @@ class VerifyVector(NamedTuple):
     message: str
     signature: str
     verdict: bool
-    note: str = ""
 
 
 PUBLIC_KEY: Final = (
@@ -260,7 +259,6 @@ VERIFY_VECTORS: Final[tuple[VerifyVector, ...]] = (
             "e0582d6c848bdd4c51aa66493c8e563db69c5e18b3ebb20c3f43ad7d"
         ),
         verdict=False,
-        note="digit sum 16 against a target of 6",
     ),
 )
 """Five signatures upstream accepts and three it refuses, all under `PUBLIC_KEY`."""

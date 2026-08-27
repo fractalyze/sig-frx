@@ -18,7 +18,7 @@ import frx.numpy as fnp
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.batch import require_no_position
+from sig_frx import context as context_rules
 from sig_frx.signature import Signature
 
 KEY_SIZE = 8
@@ -65,7 +65,7 @@ class ChecksumScheme:
         context: ArrayLike | None = None,
         position: ArrayLike | None = None,
     ) -> Array:
-        require_no_position(position, "the checksum stand-in")
+        context_rules.require_no_position(position, "the checksum stand-in")
         secret_key = 255 - fnp.asarray(public_key)
         return fnp.all(self._mask(secret_key, message, context) == signature, axis=-1)
 

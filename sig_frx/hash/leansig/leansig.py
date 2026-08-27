@@ -50,8 +50,8 @@ refuse.
 
 from __future__ import annotations
 
-from functools import lru_cache
-from typing import Callable
+from collections.abc import Callable
+from functools import lru_cache, partial
 
 import frx
 import frx.numpy as fnp
@@ -64,19 +64,8 @@ from sig_frx.batch import require_batch
 from sig_frx.hash import tree, wots
 from sig_frx.hash import tweakable as shared_tweakable
 from sig_frx.hash.leansig import encoding, ssz, tweakable
-from sig_frx.hash.leansig import params as leansig_params
 from sig_frx.hash.leansig.field import F
-from sig_frx.hash.leansig.params import LeanSigParams
-
-PRESETS: dict[str, LeanSigParams] = {
-    "prod": leansig_params.PROD,
-    "test": leansig_params.TEST,
-}
-"""The two presets upstream ships, by the name `PROD_CONFIG` / `TEST_CONFIG` give.
-
-`prod` is what the devnets pin and what the published fixtures are generated at;
-`test` is `LOG_LIFETIME = 8`, which is what makes a round trip affordable to gate.
-"""
+from sig_frx.hash.leansig.params import PRESETS, LeanSigParams
 
 
 @lru_cache(maxsize=None)
@@ -104,21 +93,7 @@ def _codeword(params: LeanSigParams) -> Callable[..., tuple[Array, Array]]:
     batch-shaped copy is a second thing to keep in agreement with the first.
     """
 
-    def one(
-        message_elements: Array,
-        parameter: Array,
-        epoch_elements: Array,
-        randomness: Array,
-    ) -> tuple[Array, Array]:
-        return encoding.target_sum_encode(
-            message_elements,
-            parameter,
-            epoch_elements,
-            randomness,
-            params=params,
-        )
-
-    return frx.vmap(one)
+    return frx.vmap(partial(encoding.target_sum_encode, params=params))
 
 
 class LeanSig:
@@ -194,14 +169,14 @@ class LeanSig:
             signature_size=self.signature_max_size,
         )
         slots = self._slots(position, operands.size)
-        # The message's own width, which the seam does not prescribe: `L` is the
-        # caller's everywhere else, and here the scheme signs a 32-byte root.
-        if operands.message.shape[1] != encoding.MESSAGE_BYTES:
-            raise ValueError(
-                f"leanSig signs a {encoding.MESSAGE_BYTES}-byte root, so a "
-                f"message batch is [B, {encoding.MESSAGE_BYTES}], got shape "
-                f"{tuple(operands.message.shape)}"
-            )
+        # Read from the caller's own array rather than back off `operands`. The
+        # message is the one operand with no device life here — a base-p
+        # decomposition consumes it and nothing else — so pulling the lifted copy
+        # back would be a round trip, and on a device leg a blocking sync in the
+        # middle of a verification. `encode_messages` owns the width rule: `L` is
+        # the caller's everywhere else on the seam, and here the scheme signs a
+        # 32-byte root.
+        message_bytes = np.asarray(message, dtype=np.uint8)
         if not operands.well_formed:
             return fnp.zeros(operands.size, dtype=bool)
 
@@ -213,14 +188,11 @@ class LeanSig:
         )
 
         # The host half, and the whole of it: both encoders decompose a wide
-        # integer base-p, which no lane holds.
-        rows = np.asarray(operands.message)
-        message_elements = fnp.stack(
-            [encoding.encode_message(bytes(row), params=params) for row in rows]
-        )
-        epoch_elements = fnp.stack(
-            [encoding.encode_epoch(int(slot), params=params) for slot in slots]
-        )
+        # integer base-p, which no lane holds. Batched rather than looped, so
+        # each is one transfer for the call — the per-entry form spent about an
+        # eighth of a `PROD` verification on dispatch alone.
+        message_elements = encoding.encode_messages(message_bytes, params=params)
+        epoch_elements = encoding.encode_epochs(slots, params=params)
 
         digits, on_layer = _codeword(params)(
             message_elements, parameters, epoch_elements, rho
@@ -261,12 +233,12 @@ class LeanSig:
                 f"one slot per public key, as a [B] column: got {batch} keys "
                 f"and positions of shape {tuple(slots.shape)}"
             )
-        outside = (slots < 0) | (slots >= self.signatures_per_key)
-        if np.any(outside):
+        outside = slots[(slots < 0) | (slots >= self.signatures_per_key)]
+        if outside.size:
             raise ValueError(
                 f"this key covers slots [0, {self.signatures_per_key}); "
-                f"{int(np.count_nonzero(outside))} of {slots.size} are outside, "
-                f"the first being {int(slots[np.argmax(outside)])}"
+                f"{outside.size} of {slots.size} are outside, "
+                f"the first being {int(outside[0])}"
             )
         return slots
 

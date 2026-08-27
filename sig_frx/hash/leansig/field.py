@@ -45,6 +45,7 @@ those is wrong on both counts.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Final
 
 import frx.numpy as fnp
@@ -98,6 +99,27 @@ def lane_reversed_limbs(value: int | np.ndarray, num_limbs: int) -> Array:
     below rather than wrapping silently.
     """
     return to_field(np.stack(_int_to_base_p(value, num_limbs), axis=-1)[..., ::-1])
+
+
+def lane_reversed_limbs_stack(values: Sequence[int], num_limbs: int) -> Array:
+    """A whole batch of *wide* values, decomposed on the host and lifted once.
+
+    The scalar form above, repeated — and it is a third entry point rather than a
+    third mode of that one because the input type is what differs. A column of
+    `int64` is an array and decomposes elementwise; a batch of 256-bit roots
+    cannot be one, since no integer dtype holds them, so the loop is Python's and
+    stays here.
+
+    What it buys is the transfer. `lane_reversed_limbs` ends in `to_field`, so
+    calling it per entry is one host-to-device copy per entry; this assembles the
+    limbs as a single host array and converts once. That is
+    [`tweakable.py`](tweakable.py)'s argument for `chain_step_tweaks` — "one
+    host-to-device transfer instead of seven" — applied to the operand a verifier
+    has `B` of.
+    """
+    return to_field(
+        np.stack([np.stack(_int_to_base_p(value, num_limbs))[::-1] for value in values])
+    )
 
 
 def _int_to_base_p(value: int | np.ndarray, num_limbs: int) -> list[int | np.ndarray]:

@@ -13,7 +13,6 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         "//sig_frx:arrays",
-        "//sig_frx:batch",
         "//sig_frx:context",
         "//sig_frx:signature",
         "//sig_frx/classical:edwards",

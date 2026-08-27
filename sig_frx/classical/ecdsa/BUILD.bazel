@@ -25,7 +25,6 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":rfc6979",
-        "//sig_frx:batch",
         "//sig_frx:context",
         "//sig_frx:hashes",
         "//sig_frx:signature",

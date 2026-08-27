@@ -172,3 +172,14 @@ TEST: Final = LeanSigParams(
     capacity=9,
 )
 """Upstream's `TEST_CONFIG` — the same scheme at a codeword short enough to sign."""
+
+
+PRESETS: Final[dict[str, LeanSigParams]] = {"prod": PROD, "test": TEST}
+"""The two presets upstream ships, by the names `PROD_CONFIG` / `TEST_CONFIG` give.
+
+Here rather than beside either consumer because there are two: the scheme's
+`named` resolves a caller's string through it, and the test harness resolves a
+vector's. This module is the leaf both already import, so it is the only home
+that costs neither of them a new edge — and a third copy of a two-entry dict is
+how a suite ends up silently running the wrong parameter set.
+"""

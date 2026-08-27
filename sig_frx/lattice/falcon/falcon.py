@@ -106,7 +106,7 @@ from frx.typing import ArrayLike
 from hash_frx import SHAKE256_RATE
 
 from sig_frx import context as context_rules
-from sig_frx.batch import require_batch, require_no_position
+from sig_frx.batch import require_batch
 from sig_frx.hashes import shake256
 from sig_frx.lattice import rejection
 from sig_frx.lattice.falcon import arith, encoding
@@ -327,7 +327,7 @@ class Falcon:
         than accepted and ignored — the seam's rule for RFC 8391 and ECDSA,
         which this joins.
         """
-        require_no_position(position, "Falcon (FN-DSA)")
+        context_rules.require_no_position(position, "Falcon (FN-DSA)")
         context_rules.require_empty(context, "Falcon (FN-DSA)")
         params = self.params
         operands = require_batch(
