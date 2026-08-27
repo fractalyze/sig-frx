@@ -73,14 +73,11 @@ py_library(
     ],
 )
 
-# `medium` for the margin rather than the runtime. This measures 41.0 s on the
-# CPU leg and 31.2 s on the GPU leg, and a workstation reads 0.32x the CPU leg
-# — `small`'s 60 s is inside that spread, and an earlier revision proved it by
-# timing out there and taking the suite red. Nearly all of it is compiling the
-# traced leg.
-# Sized from the worst run on the slowest leg, per
-# ../../../../docs/reference/measurement.md — re-check against a CI run, not a
-# workstation, before shrinking it.
+# `medium`, decided by the GPU leg: 48.5 s against the CPU leg's 35.6 s, the two
+# having swapped order since this was first sized. That is 81% of `small`'s
+# 60 s, well past the half-a-budget rule in
+# ../../../../docs/reference/measurement.md, and an earlier revision proved it by
+# timing out there. Nearly all of it is compiling the traced leg.
 py_test(
     name = "mode_test",
     size = "medium",
@@ -108,22 +105,12 @@ py_library(
     ],
 )
 
-# `small`, and unlike its siblings this one is sized from CI rather than argued
-# up for margin. Three runs of this branch: 11.2 / 10.2 / 20.8 s on the CPU leg
-# and 10.6 / 10.7 / 9.2 s on the GPU leg. The worst is 20.8 s against `small`'s
-# 60 s — 35% of it, where ../../../../docs/reference/measurement.md moves a target
-# up at half.
-#
-# Those CPU numbers are the 2.2x run-to-run spread that page describes, caught in
-# the act: the first two runs would have argued this was a fifth of its budget.
-# Do not re-derive the headroom from a subset of them — **a run past 30 s moves
-# this to `medium`**, and the honest reading today is 1.4x of margin rather than
-# the 5x the first two suggested.
-#
-# It sits under `mode_test` beside it because its traced leg compiles two
-# width-24 compressions rather than a 25-chunk sponge. A later slice adding
-# traced cases at the leaf shape should expect to pay what `mode_test` pays and
-# re-check against a CI run, never against a workstation.
+# `small`, decided by the worst CPU run: 20.8 s against 20.1 s on the GPU leg —
+# 35% of the 60 s budget, where ../../../../docs/reference/measurement.md moves a
+# target up at half. The CPU leg spread 2x across runs of this branch, so **a run
+# past 30 s on either leg moves this to `medium`**. It undercuts `mode_test`
+# because its traced leg compiles two width-24 compressions rather than a
+# 25-chunk sponge.
 py_test(
     name = "encoding_test",
     size = "small",
@@ -154,31 +141,11 @@ py_library(
     ],
 )
 
-# `large`, sized from CI, and the **GPU leg decides it** — the slower of the two
-# and so the one ../../../../docs/reference/measurement.md points at. Two CI runs
-# of this PR: 54.8 / 54.2 s on the CPU leg, and **86.1 / 152.2 s on the GPU leg**.
-# The worst is 152.2 s, which is 51% of `medium`. Past half takes the next bucket.
-# The 3.4x executor factor deliberately does not apply here — that one is the CPU
-# leg's, and the CPU leg is not deciding.
-#
-# **That 1.77x GPU spread is worth more than this target.** measurement.md sets
-# its half-of-budget threshold having measured the GPU leg's run-to-run variation
-# at 1.07x, and calls that steadiness "a property of a quiet box rather than of
-# the leg". These two runs are 1.77x apart, and the whole GPU leg went 5m30s ->
-# 14m15s between them, so the box was not quiet for the second. The threshold
-# still holds — it is deliberately coarse — but a target sized from one GPU run
-# on the strength of that 1.07x figure is sized from the wrong number. This one
-# read 29% of `medium` on its first CI run and 51% on its second.
-#
-# Local runs said the same thing less precisely and were right: 132.7 / 129.9 /
-# 115.7 s on a workstation, worst-case 44% of `medium`, which is what the page
-# means by a local GPU number sizing a budget without settling a bucket boundary.
-#
-# The cost is compile, not arithmetic, and it is spread rather than concentrated
-# — per class on a local GPU leg, over a ~12 s process start: the tree walk 28 s
-# (a `TEST` leaf and eight vmapped width-24 levels in one graph), the `PROD` leaf
-# 15 s, the tree 16 s, the chain walk 11 s, the two compressions 5 s each. There
-# is no single case that trimming would meaningfully shorten.
+# `large`, decided by the GPU leg: 75.6 s worst across two CI runs, against
+# 52.0 s on the CPU leg. That is 25% of `medium`, but this leg has been measured
+# up to 2.3x slower under load, which puts a bad run at ~174 s — 58% of it, past
+# the half-a-budget rule in ../../../../docs/reference/measurement.md. The only
+# run this target ever had under `medium` agrees, at 152.2 s.
 py_test(
     name = "tweakable_test",
     size = "large",
