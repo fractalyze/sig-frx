@@ -57,7 +57,7 @@ Both columns are needed because a single one of them lies. Without the wait,
 a placed seam is timed for its *enqueue* and its arithmetic is billed to
 whichever later seam first reads the array — on every secp lane that is
 `affine_ints`, inside `readback`. Measured at B=1024, `secp.double_multiple`
-returns in ~2.2 ms and the multiplication it queued runs a further ~10.0 ms:
+returns in about a fifth of the time the multiplication it queued then takes:
 timed without the wait, that reads as a 2% `mult` and a 45% `readback`, and
 the ranking it produces is the dispatch order rather than the profile. With
 the wait, `mult` is a third of these lanes and `readback` is the smallest
@@ -74,8 +74,8 @@ cost to the *first* call at a shape — a compile, a lazily built table, a
 device probe. Such a change reads here as a pure win, and the larger the
 first-call cost the cleaner the win looks. A change that could have one is
 measured by timing the first call separately, not by reading this table: the
-square-root ladder's `jit` cuts its steady state by ~19x while adding
-~1.5-2.6 s of compile per batch shape, none of which appears below.
+square-root ladder's `jit` cuts its steady state by ~19x while adding a
+compile per batch shape, none of which appears below.
 
 Each scheme's independent and aggregate forms sit in separate lanes so their
 per-signature costs read against each other directly — and for both schemes
@@ -129,10 +129,10 @@ def _settle(value: Any) -> None:
     the array — which on every secp lane is the readback.
 
     That is not a small distortion. Measured at B=1024 on an RTX 5090,
-    `secp.double_multiple` returns in ~2.2 ms and the multiplication it queued
-    takes a further ~10.0 ms; without this wait the first reads `mult` and the
-    second reads `readback`. The ranking that comes out is not the profile,
-    it is the dispatch order.
+    `secp.double_multiple` returns in about a fifth of the time the
+    multiplication it queued then takes; without this wait the first reads
+    `mult` and the second reads `readback`. The ranking that comes out is not
+    the profile, it is the dispatch order.
 
     Host paths are unaffected — a numpy array has no wait to do — so the two
     sides of every placement threshold stay comparable.

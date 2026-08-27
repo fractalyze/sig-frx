@@ -84,9 +84,9 @@ def _masked_quotient_pairs(
 
     Both verification equations reduce to two quotients over one denominator,
     so the batch needs one inverse per row and `group.batch_inverse` supplies
-    all of them for the price of one — 0.14 ms at B=1024 against 1.91 ms for
-    the row-at-a-time form this replaces, which built three 0-d scalar arrays
-    and took an inversion per row.
+    all of them for the price of one — 14x faster at B=1024 than the
+    row-at-a-time form this replaces, which built three 0-d scalar arrays and
+    took an inversion per row.
 
     Masked rows carry substitutes rather than their wire values, for two
     independent reasons that happen to want the same thing. A rejected row's

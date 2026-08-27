@@ -56,10 +56,10 @@ comparison the standard writes.
 ## Where the time goes
 
 Measured on a workstation CPU at Falcon-1024, `B = 256`, warm, each stage timed
-as the program it would be on its own: `verify` is 21.0 ms, and it divides into
-`HashToPoint` at 14.5 (69%), decompression at 4.9 (23%), and the key decode plus
-the ring product at 0.8 (4%). Falcon-512 is 10.9 ms at the same shape, with the
-same ranking.
+as the program it would be on its own, `verify` divides into `HashToPoint`
+(69%), decompression (23%), and the key decode plus the ring product (4%).
+Falcon-512 ranks the same way at the same shape and costs 0.52x of it, so
+verification is very nearly linear in the degree.
 
 The shape worth carrying forward is that **on CPU the challenge hash is the pole,
 not the transform**. Falcon's `s1` recovery is one forward NTT and one inverse
@@ -72,10 +72,10 @@ what its walk and its ranking cost at each granularity.
 **The GPU leg does not rank them the same way, and that inversion is the more
 useful half of the measurement.** On an RTX 5090 at Falcon-1024, `B` = 1024,
 warm, each stage timed as the program it would be on its own and taken in the
-same session as the `verify` it divides: `verify` is 0.95 ms, of which
-`HashToPoint` is 0.30 (31%) and the decoder 0.66 (69%). The same harness on the
-workstation CPU at that batch puts `verify` at 72.9 ms, `HashToPoint` at 51.1
-(70%) and the decoder at 14.4 (20%). So the challenge hash is what a CPU
+same session as the `verify` it divides, `HashToPoint` is 31% of `verify` and
+the decoder 69%. The same harness on the workstation CPU at that batch puts
+`HashToPoint` at 70% and the decoder at 20%, on a `verify` costing 77x the
+GPU's. So the challenge hash is what a CPU
 verification spends its time on and the decoder is what a GPU one does, and
 work aimed at either is work aimed at one leg. The batch is 1024 in both, rather
 than the 256 the table above uses, because a share and its total have to come
@@ -234,7 +234,7 @@ def _within_bound(values: ArrayLike, bound: int) -> Any:
     # across blocks: `2^32 / cap²` is 61 at Falcon-1024, so any 32 squares sum
     # without wrapping, and the first *block* prefix to pass `bound` is at most
     # `bound + 32·cap²`, still far under 2^32. Same guarantee as comparing every
-    # element's prefix, at 0.12 ms against 0.41 for the full-length scan.
+    # element's prefix, and 3.4x cheaper than the full-length scan.
     blocked = squares.reshape(*squares.shape[:-1], -1, _NORM_BLOCK).sum(
         axis=-1, dtype=np.uint32
     )

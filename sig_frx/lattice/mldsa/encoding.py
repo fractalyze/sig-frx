@@ -168,9 +168,9 @@ def hint_bit_unpack(y: ArrayLike, k: int, omega: int) -> tuple[Any, Any]:
     verifier must not have a data-dependent exit here anyway.
 
     The membership test broadcasts to `[k, omega, 256]`, which is the module's
-    largest intermediate: measured at ML-DSA-87 it is 86% of `sig_decode`'s
-    378 us at `B = 64` and all of its 10 MB of scratch, scaling linearly to
-    164 MB at `B = 1024`. Factoring the one-hot out of the `k` axis as an f32
+    largest intermediate: measured at ML-DSA-87 it is 86% of `sig_decode` at
+    `B = 64` and all of its 10 MB of scratch, scaling linearly to 164 MB at
+    `B = 1024`. Factoring the one-hot out of the `k` axis as an f32
     matmul measures 1.6x faster on half the memory, and is not taken: the whole
     of `sig_decode` is 0.8% of `expand_a` at the same batch, so it buys ~0.5% of
     a verify in exchange for float arithmetic in a bit-manipulation module. The
