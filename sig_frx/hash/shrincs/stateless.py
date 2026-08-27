@@ -55,6 +55,7 @@ import frx.numpy as fnp
 from frx import Array
 from frx.typing import ArrayLike
 
+from sig_frx.batch import WrongWidth, require_batch
 from sig_frx.hash.slhdsa.slh_dsa import SlhDsa, SlhDsaParams, sha2_params
 
 # The specification's stateless parameters. `n` is not among them: every tweakable
@@ -204,30 +205,25 @@ class Stateless:
         SHRINCS signature is a well-formed thing this component cannot check, and
         the answer to "is this a valid stateless signature" is no.
         """
-        keys = fnp.asarray(public_key, dtype=fnp.uint8)
-        if keys.ndim != 2 or keys.shape[1] != PUBLIC_KEY_SIZE:
-            raise ValueError(
-                f"a public key batch is [B, {PUBLIC_KEY_SIZE}], got shape "
-                f"{tuple(keys.shape)}"
-            )
-        batch = keys.shape[0]
-        signatures = fnp.asarray(signature, dtype=fnp.uint8)
-        if signatures.ndim != 2 or signatures.shape[0] != batch:
-            raise ValueError(
-                f"one signature per public key, as a [B, {SIGNATURE_SIZE}] batch: "
-                f"got {batch} keys and signatures of shape "
-                f"{tuple(signatures.shape)}"
-            )
-        messages = fnp.asarray(message, dtype=fnp.uint8)
-        if messages.ndim != 2 or messages.shape[0] != batch:
-            raise ValueError(
-                f"one message per public key, as a [B, L] batch: got {batch} keys "
-                f"and messages of shape {tuple(messages.shape)}"
-            )
         # A width this component does not issue is a verdict, not an error — the
-        # same reading as a wrong indicator byte. `accepts` raises on it instead,
-        # because reaching it is a caller inside the package getting the format
-        # wrong rather than a verifier being handed something.
-        if signatures.shape[1] != SIGNATURE_SIZE:
-            return fnp.zeros(batch, dtype=bool)
-        return accepts(self.slh_dsa, keys, messages, signatures, context)
+        # same reading as a wrong indicator byte, and SLH-DSA's own. `accepts`
+        # raises on it instead, because reaching it is a caller inside the
+        # package getting the format wrong rather than a verifier being handed
+        # something.
+        operands = require_batch(
+            public_key,
+            message,
+            signature,
+            public_key_size=PUBLIC_KEY_SIZE,
+            signature_size=SIGNATURE_SIZE,
+            public_key_width=WrongWidth.ERROR,
+        )
+        if not operands.well_formed:
+            return fnp.zeros(operands.size, dtype=bool)
+        return accepts(
+            self.slh_dsa,
+            operands.public_key,
+            operands.message,
+            operands.signature,
+            context,
+        )

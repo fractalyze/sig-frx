@@ -82,6 +82,7 @@ py_library(
         ":fors",
         ":hypertree",
         ":xmss",
+        "//sig_frx:batch",
         "//sig_frx:context",
         "//sig_frx:prehash",
         "//sig_frx:signature",

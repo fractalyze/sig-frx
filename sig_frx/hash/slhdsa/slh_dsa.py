@@ -59,6 +59,7 @@ from hash_frx import Sha256, Sha512, Shake256
 
 from sig_frx import context as ctx
 from sig_frx import prehash
+from sig_frx.batch import WrongWidth, require_batch
 from sig_frx.hash import bytestring, tree, wots
 from sig_frx.hash.slhdsa import fors, hypertree, xmss
 from sig_frx.hash.tweakable import (
@@ -485,29 +486,24 @@ class SlhDsa:
         the standard defines.
         """
         params = self.params
-        keys = fnp.asarray(public_key, dtype=fnp.uint8)
-        if keys.ndim != 2 or keys.shape[1] != params.public_key_size:
-            raise ValueError(
-                f"a public key batch is [B, {params.public_key_size}], got shape "
-                f"{tuple(keys.shape)}"
-            )
-        batch = keys.shape[0]
-        signatures = fnp.asarray(signature, dtype=fnp.uint8)
-        if signatures.ndim != 2 or signatures.shape[0] != batch:
-            raise ValueError(
-                f"one signature per public key, as a [B, {params.signature_size}] "
-                f"batch: got {batch} keys and signatures of shape "
-                f"{tuple(signatures.shape)}"
-            )
-        messages = fnp.asarray(messages, dtype=fnp.uint8)
-        if messages.ndim != 2 or messages.shape[0] != batch:
-            raise ValueError(
-                f"one message per public key, as a [B, L] batch: got {batch} keys "
-                f"and messages of shape {tuple(messages.shape)}"
-            )
-        if signatures.shape[1] != params.signature_size:
+        # FIPS 205 gives the signature's length a verdict and says nothing about
+        # the key's, which is the asymmetry `WrongWidth` exists to state.
+        operands = require_batch(
+            public_key,
+            messages,
+            signature,
+            public_key_size=params.public_key_size,
+            signature_size=params.signature_size,
+            public_key_width=WrongWidth.ERROR,
+        )
+        if not operands.well_formed:
             # Algorithm 20 lines 1 to 3.
-            return fnp.zeros(batch, dtype=bool)
+            return fnp.zeros(operands.size, dtype=bool)
+        keys, messages, signatures = (
+            operands.public_key,
+            operands.message,
+            operands.signature,
+        )
 
         pk_seeds, pk_roots = keys[:, : params.n], keys[:, params.n :]
         randomizers, fors_signatures, hypertree_signatures = self._parse_signature(
