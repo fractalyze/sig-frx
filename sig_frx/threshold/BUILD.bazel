@@ -56,6 +56,23 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# secp256k1_XMD:SHA-256_SSWU_RO_ (RFC 9380 §8.7) — the random oracle into the
+# group. Depends on secp for the group sum and the readback; the field
+# arithmetic is host integers, so nothing else arrives with it.
+py_library(
+    name = "hash_to_curve",
+    srcs = [
+        "__init__.py",
+        "hash_to_curve.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":xmd",
+        "//sig_frx/classical:secp",
+        requirement("numpy"),
+    ],
+)
+
 # FROST(secp256k1, SHA-256): §6.5's constants over the curated secp substrate.
 py_library(
     name = "secp256k1_sha256",
