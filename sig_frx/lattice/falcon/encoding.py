@@ -315,31 +315,17 @@ def bytes_to_bits_high_first(values: ArrayLike) -> Any:
     return bits.reshape(*data.shape[:-1], -1)
 
 
-def bits_to_bytes_high_first(bits: ArrayLike) -> Any:
-    """§3.11.1 read backwards — eight bits to a byte, most significant first.
+def bits_from_fields_high_first(v: ArrayLike, width: int) -> Any:
+    """`v` as big-endian `width`-bit fields, still as bits.
 
-    The trailing axis must be a whole number of bytes. Every §3.11 encoding
-    makes it one at the degrees Falcon defines, and the check is the reshape
-    below rather than a length argument nobody could pass wrongly.
-    """
-    xnp = namespace(bits)
-    data = xnp.asarray(bits, dtype=np.uint8)
-    grouped = xnp.reshape(data, (*np.shape(data)[:-1], -1, 8))
-    weights = np.arange(7, -1, -1, dtype=np.uint8)
-    # Pinned for the reason `unpack_fields_high_first` pins its own: numpy
-    # promotes a reduction's accumulator and frx does not, so an open one makes
-    # the host and traced paths differ in a width no round trip can see.
-    return (grouped << weights).sum(axis=-1, dtype=np.uint8)
+    Stops at bits rather than bytes because §3.11.5 has three runs at two
+    widths, so a caller concatenates them and converts once. Doing it per run
+    would need each run to land on a byte boundary, which is true at both
+    parameter sets and is not a property of the encoding.
 
-
-def pack_fields_high_first(v: ArrayLike, width: int) -> Any:
-    """`v` as big-endian `width`-bit fields — the inverse of the unpacking below.
-
-    Takes the field values rather than a byte count, so a caller that has
-    several runs at different widths — §3.11.5 has three — concatenates the
-    *bits* and converts once. Doing it per run instead would need each run to
-    land on a byte boundary, which is true at both parameter sets and is not a
-    property of the encoding.
+    Named against [`fields_from_bits_high_first`](#fields_from_bits_high_first)
+    rather than against `unpack_fields_high_first`: the pair that reads as
+    inverses has to *be* one, and the unpacking below starts from bytes.
     """
     xnp = namespace(v)
     values = xnp.asarray(v, dtype=np.uint32)
@@ -367,6 +353,23 @@ def fields_from_bits_high_first(bits: ArrayLike, width: int) -> Any:
     fields = xnp.reshape(values, (*np.shape(values)[:-1], -1, width))
     weights = np.arange(width - 1, -1, -1, dtype=np.uint32)
     return (fields << weights).sum(axis=-1, dtype=np.uint32)
+
+
+def bits_to_bytes_high_first(bits: ArrayLike) -> Any:
+    """§3.11.1 read backwards — eight bits to a byte, most significant first.
+
+    A byte *is* an eight-bit field, so this is the general reader above at that
+    width, narrowed back to the dtype a byte string has. The trailing axis must
+    be a whole number of bytes; the check is that reshape rather than a length
+    argument nobody could pass wrongly.
+
+    `bytes_to_bits_high_first` is deliberately **not** collapsed the same way.
+    It is the one of these four on a measured hot path — `decompress` is 69% of
+    a GPU verification — and routing it through the `uint32` form above would
+    widen every bit of every signature in the batch, which this module has
+    already measured at 3.0x for the same reason one function further up.
+    """
+    return fields_from_bits_high_first(bits, 8).astype(np.uint8)
 
 
 def unpack_fields_high_first(v: ArrayLike, width: int) -> Any:
@@ -417,7 +420,7 @@ def pk_encode(h: ArrayLike, n: int) -> Any:
     """
     xnp = namespace(h)
     header = xnp.asarray([degree_header(n, 0b0000)], dtype=np.uint8)
-    bits = pack_fields_high_first(xnp.asarray(h, dtype=np.uint32), PK_BITS)
+    bits = bits_from_fields_high_first(xnp.asarray(h, dtype=np.uint32), PK_BITS)
     return xnp.concatenate([header, bits_to_bytes_high_first(bits)], axis=-1)
 
 
@@ -443,6 +446,16 @@ def _from_two_complement(fields: ArrayLike, width: int) -> tuple[Any, Any]:
     return signed, (values == np.uint32(1 << (width - 1))).any(axis=-1)
 
 
+def _sk_widths(n: int) -> tuple[int, int, int]:
+    """§3.11.5's three runs, in order: `f` and `g` at the degree's width, `F` at 8.
+
+    One statement of the run order and its widths, read by both directions —
+    two spellings of the same table is how an encoder and a decoder drift while
+    each looks right on its own.
+    """
+    return SK_FG_BITS[n], SK_FG_BITS[n], SK_F_BITS
+
+
 def sk_encode(f: ArrayLike, g: ArrayLike, big_f: ArrayLike, n: int) -> Any:
     """§3.11.5 — `1 + n·(2w + 8)/8` bytes carrying `f`, `g` and `F` in that order.
 
@@ -456,12 +469,10 @@ def sk_encode(f: ArrayLike, g: ArrayLike, big_f: ArrayLike, n: int) -> Any:
     also work there and would break at the first degree where it did not.
     """
     xnp = namespace(f, g, big_f)
-    width = SK_FG_BITS[n]
     header = xnp.asarray([degree_header(n, 0b0101)], dtype=np.uint8)
     runs = [
-        pack_fields_high_first(_to_two_complement(f, width), width),
-        pack_fields_high_first(_to_two_complement(g, width), width),
-        pack_fields_high_first(_to_two_complement(big_f, SK_F_BITS), SK_F_BITS),
+        bits_from_fields_high_first(_to_two_complement(values, width), width)
+        for values, width in zip((f, g, big_f), _sk_widths(n))
     ]
     body = bits_to_bytes_high_first(xnp.concatenate(runs, axis=-1))
     return xnp.concatenate([header, body], axis=-1)
@@ -486,20 +497,16 @@ def sk_decode(sk: ArrayLike, n: int) -> tuple[Any, Any, Any, Any]:
     data = xnp.asarray(sk, dtype=np.uint8)
     header = data[..., 0] == np.uint8(degree_header(n, 0b0101))
     bits = bytes_to_bits_high_first(data[..., 1:])
-    width = SK_FG_BITS[n]
 
-    small, large = 2 * n * width, n * SK_F_BITS
-    f, f_bad = _from_two_complement(
-        fields_from_bits_high_first(bits[..., : small // 2], width), width
-    )
-    g, g_bad = _from_two_complement(
-        fields_from_bits_high_first(bits[..., small // 2 : small], width), width
-    )
-    big_f, big_f_bad = _from_two_complement(
-        fields_from_bits_high_first(bits[..., small : small + large], SK_F_BITS),
-        SK_F_BITS,
-    )
-    return f, g, big_f, header & ~(f_bad | g_bad | big_f_bad)
+    ok, cursor, decoded = header, 0, []
+    for width in _sk_widths(n):
+        run = fields_from_bits_high_first(bits[..., cursor : cursor + n * width], width)
+        values, forbidden = _from_two_complement(run, width)
+        decoded.append(values)
+        ok = ok & ~forbidden
+        cursor += n * width
+    f, g, big_f = decoded
+    return f, g, big_f, ok
 
 
 def decompress(data: ArrayLike, n: int) -> tuple[Any, Any]:

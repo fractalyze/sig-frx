@@ -98,7 +98,9 @@ class Bits(parameterized.TestCase):
         """
         rng = random.Random(width + 100)
         values = [rng.randrange(1 << width) for _ in range(8 * 8)]
-        bits = encoding.pack_fields_high_first(fnp.asarray(values, np.uint32), width)
+        bits = encoding.bits_from_fields_high_first(
+            fnp.asarray(values, np.uint32), width
+        )
         packed = encoding.bits_to_bytes_high_first(bits)
         got = encoding.unpack_fields_high_first(packed, width)
         np.testing.assert_array_equal(np.asarray(got), values)
@@ -125,11 +127,7 @@ class PublicKey(parameterized.TestCase):
         n = params["n"]
         rng = random.Random(n)
         h = [rng.randrange(ref.Q) for _ in range(n)]
-        bits: list[int] = [0] * 8
-        bits[4:8] = [(n.bit_length() - 1) >> s & 1 for s in range(3, -1, -1)]
-        for value in h:
-            bits.extend((value >> shift) & 1 for shift in range(13, -1, -1))
-        blob = ref.bytes_of(bits)
+        blob = ref.pk_encode(h, n)
         self.assertLen(blob, params["public_key_size"])
         got, ok = encoding.pk_decode(fnp.asarray(bytearray(blob), np.uint8), n)
         self.assertTrue(bool(ok))
@@ -140,12 +138,7 @@ class PublicKey(parameterized.TestCase):
     def test_a_coefficient_at_or_above_q_is_refused(self, **params: Any) -> None:
         """Fourteen bits hold 16383, so `q ≤ h_i` is representable and forgeable."""
         n = params["n"]
-        bits: list[int] = [0] * 8
-        bits[4:8] = [(n.bit_length() - 1) >> s & 1 for s in range(3, -1, -1)]
-        for index in range(n):
-            value = ref.Q if index == 3 else 0
-            bits.extend((value >> shift) & 1 for shift in range(13, -1, -1))
-        blob = ref.bytes_of(bits)
+        blob = ref.pk_encode([ref.Q if i == 3 else 0 for i in range(n)], n)
         _, ok = encoding.pk_decode(fnp.asarray(bytearray(blob), np.uint8), n)
         self.assertFalse(bool(ok))
         self.assertIsNone(ref.pk_decode(blob, n))

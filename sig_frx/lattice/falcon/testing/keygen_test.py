@@ -1006,9 +1006,9 @@ class LdlTest(absltest.TestCase):
         g00, g01, g11 = keygen.gram(*_transformed(basis))
         got = keygen.ldl(g00, g01, g11)
         want = falcon_reference.ldl(falcon_reference.gram(*basis))
-        for entry, name in zip(zip(got, want), ("L10", "D00", "D11")):
+        for mine, theirs, name in zip(got, want, ("L10", "D00", "D11")):
             with self.subTest(entry=name):
-                np.testing.assert_allclose(entry[0], entry[1], rtol=1e-9)
+                np.testing.assert_allclose(mine, theirs, rtol=1e-9)
 
     def test_the_decomposed_diagonal_stays_real(self) -> None:
         g00, g01, g11 = keygen.gram(*_transformed(_basis(16, 10)))

@@ -181,9 +181,7 @@ def pk_decode(pk: bytes, n: int) -> list[int] | None:
 
 def pk_encode(h: list[int], n: int) -> bytes:
     """§3.11.4 — the header byte `0000nnnn`, then `h` at 14 bits a coefficient."""
-    bits = [0, 0, 0, 0] + [
-        (n.bit_length() - 1) >> shift & 1 for shift in range(3, -1, -1)
-    ]
+    bits = bits_of(bytes([0x00 | (n.bit_length() - 1)]))
     for value in h:
         bits.extend((value >> j) & 1 for j in range(13, -1, -1))
     return bytes_of(bits)
@@ -216,9 +214,7 @@ def sk_encode(f: list[int], g: list[int], big_f: list[int], n: int) -> bytes:
     Signed encoding, two's complement, at `SK_WIDTHS[n]` bits for `f` and `g`
     and eight for `F`. `G` is not encoded; (3.35) recovers it.
     """
-    bits = [0, 1, 0, 1] + [
-        (n.bit_length() - 1) >> shift & 1 for shift in range(3, -1, -1)
-    ]
+    bits = bits_of(bytes([0x50 | (n.bit_length() - 1)]))
     for values, width in ((f, SK_WIDTHS[n]), (g, SK_WIDTHS[n]), (big_f, 8)):
         for value in values:
             field = value & ((1 << width) - 1)

@@ -1,11 +1,14 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """Arithmetic in `Z_q` and the NTT over `q = 12289`, for Falcon (FN-DSA).
 
-Verification is the only Falcon operation that lives entirely in this ring — it
-recovers `s1 = c − s2·h mod q` and measures a norm — so this module is what
-verification needs and nothing more. Key generation and signing work over
-`Q[x]/(x^n + 1)` in the complex domain instead, which is a different transform
-with a precision requirement of its own and is not here.
+Verification is the only Falcon operation that lives *entirely* in this ring —
+it recovers `s1 = c − s2·h mod q` and measures a norm. Key generation is mostly
+elsewhere, over `Q[x]/(x^n + 1)` in the complex domain, which is a different
+transform with a precision requirement of its own and is not here; but two of
+its steps are `Z_q` and do reach in, so this module is the scheme's `Z_q` and
+not verification's alone. Those two are Algorithm 5 line 7's invertibility test
+and Algorithm 4 line 9's `h = g·f^{-1}`, and they live in
+[`keygen.py`](keygen.py) — what belongs here is the arithmetic, not the step.
 
 ## The field is a dtype, and so is the transform
 
