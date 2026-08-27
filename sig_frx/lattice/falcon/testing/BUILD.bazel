@@ -158,20 +158,18 @@ py_binary(
     ] + GPU_PLUGIN_DEPS,
 )
 
-# Sized from the executor: 26.1 s on the CPU leg against 23.1 s on the GPU one,
-# so CPU is the leg that decides. `small` would put that at 43% of its 60 s —
-# under the half-a-budget rule in ../../../../docs/reference/measurement.md only
-# until the CPU leg's spread is counted, and the sibling `encoding_test` records
-# that spread at 1.8x for unchanged content. A bad run would land near 78%.
-# `medium` covers the same run at 9%.
+# Sized from the executor across two runs: 16.4-26.1 s on the CPU leg and
+# 18.0-23.1 s on the GPU one. The worst of those is 26.1 s, which is 43% of
+# `small`'s 60 s and so does not reach the half-a-budget threshold in
+# ../../../../docs/reference/measurement.md.
 #
-# The workstation argued for `small` and argued it from the wrong premise: there
-# the GPU leg ran this at twice the CPU one, where CI has the two within 13% of
-# each other and inverted. That is the case measurement.md's rule is about — the
-# local number was not merely imprecise, it named the wrong deciding leg.
+# **Which leg decides is noise here**, and worth recording because it looks like
+# signal: the two runs disagree about it, CPU slower in one and GPU slower in
+# the other, with the pair never more than 13% apart. A comment naming one of
+# them would be reversed by the next run.
 py_test(
     name = "bigint_test",
-    size = "medium",
+    size = "small",
     srcs = ["bigint_test.py"],
     deps = [
         "//sig_frx/lattice/falcon:bigint",
@@ -180,18 +178,22 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
-# Provisionally `large`, for the reason the sibling `bigint_test` had to be
-# corrected: a workstation number sizes nothing, and that target's local 7.2 s
-# became 26.1 s on the CPU leg. Scaling this one's local 38 s by the same factor
-# lands past half of `medium`'s 300 s once the CPU leg's spread is counted, so
-# it starts at the bucket that cannot time out and tightens against CI.
+# Sized from the executor: 84.1 s on the CPU leg against 82.2 s on the GPU one.
+# The worse of those is 28% of `medium`'s 300 s, well inside the half-a-budget
+# threshold in ../../../../docs/reference/measurement.md.
+#
+# That threshold is *already* the executor's spread — the page sets it at half
+# precisely because a CPU-leg duration varies by a median of 2.2x across runs of
+# unchanged commits. Applying a spread factor on top of it, which is what sized
+# this `large` to begin with, counts the same variance twice and buys a bucket
+# nothing asked for.
 #
 # The cost is the module, not the oracle: a level's shapes depend on its width,
 # so the descent compiles ten distinct programs per parameter set. Real key
 # generation pays that once per key.
 py_test(
     name = "keygen_test",
-    size = "large",
+    size = "medium",
     srcs = ["keygen_test.py"],
     deps = [
         ":falcon_reference",
