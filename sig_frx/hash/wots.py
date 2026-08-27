@@ -133,9 +133,14 @@ def base_2b(data: ArrayLike, b: int, out_len: int) -> Array:
 
     Transcribing the loop instead costs `out_len` rounds of array work on a batch
     that is already `[B]` wide, and `out_len` is `len1 = 32` at every defined
-    parameter set. Measured on the verify path it was 19% of the host time and a
-    third of the whole call's array dispatches, against a handful of operations
-    here whatever `out_len` is.
+    parameter set. Profiling a verify put the loop form at 19% of the host time
+    and a third of the whole call's array dispatches, against a handful of
+    operations here whatever `out_len` is.
+
+    **That 19% is a profiler share and reads high**: cProfile taxes Python-heavy
+    code hardest, which is exactly the code this replaces. The wall clock is the
+    honest number and it is smaller — 1.09-1.26x on `verify` across the four
+    `(parameter set, batch)` pairs measured, same workstation and command.
 
     Rank is preserved the way the callers expect: `[L]` gives `[1, out_len]` and
     `[B, L]` gives `[B, out_len]`.

@@ -49,7 +49,8 @@ that asked the point question on the square root's behalf would strand it on
 the host over a gap in a type it never touches. It is worth deciding:
 measured on an RTX 5090 with full-size scalars, the device form of `multiple`
 runs 7.3x the host at B=256 and 105x at B=4096, where it costs no more than it
-does at B=64.
+does at B=64. Those are stage ratios; the share a verification spends there is
+`ecdsa/core.py`'s.
 
 Everything that turns a point into integers is host by nature and stays there —
 `affine_ints`, `uncompressed_rows`, `on_curve`, `secret_scalar` — because the
@@ -57,7 +58,7 @@ standards define those on integers and Python has no width, which is why
 `lift_x_to_parity` places its ladder and not its readback. Host is not the
 same as row-at-a-time, though, and the two get conflated: `on_curve_rows` is
 the same host arithmetic as `on_curve` over a `[B]` array instead of a 0-d one
-per row, and that alone is 9x at B=1024. A function stays on the host because
+per row, and that stage alone is 9x at B=1024. A function stays on the host because
 its *result* is integers, not because its work has to be scalar. `is_identity` is
 the one exception on the wrong side of that line, and its docstring carries
 the reason (fractalyze/xla#594).
@@ -313,10 +314,11 @@ def multiple(curve: Curve, scalars: list[int], points: ArrayLike) -> np.ndarray:
     caller that has already placed its batch keeps that choice.
 
     Measured on an RTX 5090 with full-size scalars, the device form runs 7.3x
-    the host at B=256 and 105x at B=4096, where its cost is still flat in the
-    batch — the same there as at B=64. Those are this call's numbers, not a
-    lane's: the readback that follows it is host work either way, and moving
-    that is what `affine_ints` is waiting on.
+    the host at B=256 and 105x at B=4096, where it costs no more than it does
+    at B=64. **Those are stage ratios** — this call against itself in the two
+    namespaces, not a share of any operation: the readback that follows it is
+    host work either way, and moving that is what `affine_ints` is waiting on.
+    What a verification spends here is `ecdsa/core.py`'s to state, and it does.
     """
     points = _place(points)
     xnp = namespace(points)
@@ -510,9 +512,11 @@ def on_curve_rows(curve: Curve, xs: Sequence[int], ys: Sequence[int]) -> np.ndar
     that the per-row form's cost is not the curve equation. `on_curve` builds
     a *0-d field array per coordinate*, so a batch pays `2B` dtype
     constructions and `4B` scalar field ops to evaluate what is one
-    expression over `[B]`. Measured at B=1024 on an RTX 5090, the row-at-a-
-    time form costs 9.3x this one — the arithmetic is the same and the
-    overhead is all that leaves.
+    expression over `[B]`. Measured at B=1024 on an RTX 5090, the row-at-a-time
+    form costs 9.3x this one — a **stage ratio**, the arithmetic being the same
+    and the overhead all that leaves. What that stage is worth to a verification
+    is `Ecdsa.verify_digest`'s to say, and it says it: 19% of the call before,
+    2% after.
 
     The range check runs first and is load-bearing beyond the standard's
     reason for it. SEC 1 §2.3.4 checks `[0, p)` before the equation because
