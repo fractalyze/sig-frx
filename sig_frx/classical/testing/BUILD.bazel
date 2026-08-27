@@ -248,6 +248,7 @@ py_binary(
         "//sig_frx/threshold:frost",
         "//sig_frx/threshold:secp256k1_sha256",
         requirement("absl_py"),
+        requirement("frx"),
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )

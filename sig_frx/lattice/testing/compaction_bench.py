@@ -205,12 +205,6 @@ def _compacting_by(form: Callable[..., Any]) -> Iterator[None]:
 # -- timing ----------------------------------------------------------------
 
 
-def _blocked(value: Any) -> Any:
-    """Wait for a dispatch to land, so a timing measures work and not queueing."""
-    frx.block_until_ready(value)
-    return value
-
-
 class _Prepared(NamedTuple):
     """One form's compiled program, and what compiling it cost."""
 
@@ -239,7 +233,11 @@ def _prepare(
     with _compacting_by(form):
         call = build()
         start = time.perf_counter()
-        outcome = _blocked(call())
+        # Wait for the dispatch to land before stopping the clock: a placed
+        # program returns as soon as it is enqueued, so a timing without this
+        # measures the enqueue and bills the arithmetic to whoever reads the
+        # array next.
+        outcome = frx.block_until_ready(call())
         cold = time.perf_counter() - start
     if validate is not None:
         validate(outcome)
@@ -251,7 +249,7 @@ def _round(call: Callable[[], Any], samples: int) -> float:
     times = []
     for _ in range(samples):
         start = time.perf_counter()
-        _blocked(call())
+        frx.block_until_ready(call())
         times.append(time.perf_counter() - start)
     return statistics.median(times)
 
