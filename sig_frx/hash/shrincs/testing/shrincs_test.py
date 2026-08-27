@@ -28,16 +28,9 @@ import numpy as np
 from absl.testing import absltest
 
 from sig_frx.hash.shrincs import fxmss, shrincs
+from sig_frx.hash.shrincs.testing import harness
 from sig_frx.hash.shrincs.testing import stateful_vectors as vectors
 from sig_frx.hash.shrincs.testing import vectors as stateless_vectors
-
-
-def _rows(*values: bytes) -> np.ndarray:
-    return np.stack([np.frombuffer(v, dtype=np.uint8) for v in values])
-
-
-def _ctx(context: bytes) -> np.ndarray | None:
-    return np.frombuffer(context, dtype=np.uint8) if context else None
 
 
 def _padded(signature: bytes) -> bytes:
@@ -45,41 +38,22 @@ def _padded(signature: bytes) -> bytes:
     return signature + bytes(shrincs.stateless.SIGNATURE_SIZE - len(signature))
 
 
-# The one batch width this file verifies at. Four, because the mixed-path case
-# below is four entries wide. Verification compiles per input shape and runs both
-# paths for every entry, so a second batch width costs another whole compile —
-# the same reason `stateless_test` settles on one.
-_BATCH = 4
+def _row_of(public_key: bytes, message: bytes, signature: bytes) -> harness.Row:
+    """A row at the seam's width.
 
-
-def _verdicts(
-    scheme: shrincs.Shrincs,
-    rows: list[tuple[bytes, bytes, bytes]],
-    context: bytes,
-) -> list[bool]:
-    """Verify `(public key, message, signature)` rows in one call at `_BATCH`.
-
-    Padded by repeating the last row, so the shape holds however many rows a test
-    has something to say about. Rows in one call share a context, which is one per
-    call, and a message length, which is one per batch.
+    The padding is applied here rather than in `harness.verdicts`, which the
+    stateless file shares: the width is *this* scheme's, and a stateful signature
+    is shorter than it. One place, because a batch mixing the two paths will not
+    stack at all if a caller forgets.
     """
-    if not 1 <= len(rows) <= _BATCH:
-        raise ValueError(f"1 to {_BATCH} rows per call, got {len(rows)}")
-    padded = list(rows) + [rows[-1]] * (_BATCH - len(rows))
-    got = scheme.verify(
-        _rows(*(r[0] for r in padded)),
-        _rows(*(r[1] for r in padded)),
-        _rows(*(_padded(r[2]) for r in padded)),
-        context=_ctx(context),
-    )
-    return [bool(v) for v in np.asarray(got)][: len(rows)]
+    return (public_key, message, _padded(signature))
 
 
 def _row(
     case: vectors.StatefulVectors | stateless_vectors.StatelessVectors,
-) -> tuple[bytes, bytes, bytes]:
+) -> harness.Row:
     """The three fields a verification takes, from either path's vectors."""
-    return (case.public_key, case.message, case.signature)
+    return _row_of(case.public_key, case.message, case.signature)
 
 
 class SizeTest(absltest.TestCase):
@@ -91,7 +65,7 @@ class SizeTest(absltest.TestCase):
 
     def test_a_stateful_signature_stays_below_a_stateless_one(self) -> None:
         """Which is what makes the two distinguishable by length at all."""
-        widest = 17 + 8 + fxmss.SIGNATURE_SIZE_MAX
+        widest = shrincs.INDEX_FIELD_START + 8 + fxmss.SIGNATURE_SIZE_MAX
         self.assertEqual(widest, 4619)
         self.assertLess(widest, shrincs.stateless.SIGNATURE_SIZE)
 
@@ -100,7 +74,7 @@ class SizeTest(absltest.TestCase):
         for case in vectors.REFERENCE:
             with self.subTest(case.label):
                 derived = (
-                    17
+                    shrincs.INDEX_FIELD_START
                     + fxmss.index_field_bytes(case.leaf_depth)
                     + 514
                     + 16 * case.leaf_depth
@@ -117,7 +91,8 @@ class StatefulTest(absltest.TestCase):
         for case in vectors.REFERENCE:
             with self.subTest(case.label, depth=case.leaf_depth):
                 self.assertEqual(
-                    _verdicts(self.scheme, [_row(case)], case.context), [True]
+                    harness.verdicts(self.scheme.verify, [_row(case)], case.context),
+                    [True],
                 )
 
     def test_a_batch_of_different_depths_verifies(self) -> None:
@@ -135,7 +110,7 @@ class StatefulTest(absltest.TestCase):
         ]
         self.assertGreater(len(cases), 1)
         self.assertEqual(
-            _verdicts(self.scheme, [_row(c) for c in cases], b""),
+            harness.verdicts(self.scheme.verify, [_row(c) for c in cases], b""),
             [True] * len(cases),
         )
         self.assertEqual(
@@ -154,9 +129,9 @@ class BothPathsTest(absltest.TestCase):
 
     def _verify(self, *signatures: bytes) -> list[bool]:
         pair = self.pair
-        return _verdicts(
-            self.scheme,
-            [(pair.public_key, pair.message, s) for s in signatures],
+        return harness.verdicts(
+            self.scheme.verify,
+            [_row_of(pair.public_key, pair.message, s) for s in signatures],
             pair.context,
         )
 
@@ -203,7 +178,7 @@ class RejectionTest(absltest.TestCase):
         self.case = vectors.REFERENCE[3]  # depth 16, a two-byte index field
 
     def _verdict(self, case: vectors.StatefulVectors) -> bool:
-        return _verdicts(self.scheme, [_row(case)], case.context)[0]
+        return harness.verdicts(self.scheme.verify, [_row(case)], case.context)[0]
 
     def test_the_control_case_accepts(self) -> None:
         self.assertTrue(self._verdict(self.case))
@@ -243,9 +218,9 @@ class RejectionTest(absltest.TestCase):
             for index in (1 << case.leaf_depth, (1 << (8 * size)) - 1):
                 with self.subTest(case.label, index=index):
                     broken = (
-                        case.signature[:17]
+                        case.signature[: shrincs.INDEX_FIELD_START]
                         + index.to_bytes(size, "big")
-                        + case.signature[17 + size :]
+                        + case.signature[shrincs.INDEX_FIELD_START + size :]
                     )
                     self.assertFalse(self._verdict(replace(case, signature=broken)))
 
@@ -269,10 +244,10 @@ class RejectionTest(absltest.TestCase):
         for signature in (self.case.signature, b""):
             with self.subTest(length=len(signature)):
                 got = self.scheme.verify(
-                    _rows(self.case.public_key),
-                    _rows(self.case.message),
-                    _rows(signature),
-                    context=_ctx(self.case.context),
+                    harness.rows(self.case.public_key),
+                    harness.rows(self.case.message),
+                    harness.rows(signature),
+                    context=harness.context(self.case.context),
                 )
                 self.assertEqual(list(np.asarray(got)), [False])
 
@@ -289,14 +264,14 @@ class MessageDigestTest(absltest.TestCase):
     @staticmethod
     def _digest(case: vectors.StatefulVectors, height: int, index: int) -> bytes:
         got = shrincs.message_digest(
-            _rows(case.randomizer),
-            _rows(case.pk_seed),
-            _rows(case.sl_root),
-            _rows(case.sf_root),
+            harness.rows(case.randomizer),
+            harness.rows(case.pk_seed),
+            harness.rows(case.sl_root),
+            harness.rows(case.sf_root),
             # The address's first nine bytes: the leaf's height and its index.
-            _rows(bytes([height]) + index.to_bytes(8, "big")),
-            _rows(case.message),
-            context=_ctx(case.context),
+            harness.rows(bytes([height]) + index.to_bytes(8, "big")),
+            harness.rows(case.message),
+            context=harness.context(case.context),
         )
         return bytes(np.asarray(got)[0])
 
@@ -336,7 +311,8 @@ class StatelessAtTheSeamTest(absltest.TestCase):
     def test_a_stateless_reference_signature_verifies(self) -> None:
         case = stateless_vectors.REFERENCE[1]
         self.assertEqual(
-            _verdicts(shrincs.Shrincs(), [_row(case)], case.context), [True]
+            harness.verdicts(shrincs.Shrincs().verify, [_row(case)], case.context),
+            [True],
         )
 
 
@@ -385,7 +361,7 @@ class SignerTest(absltest.TestCase):
                     _secret_key(case.seed, case.public_key, case.shape, case.depth),
                     np.frombuffer(case.message, dtype=np.uint8),
                     case.state_counter,
-                    context=_ctx(case.context),
+                    context=harness.context(case.context),
                 )
                 made = bytes(np.asarray(signature))
                 self.assertEqual(made, _padded(case.signature))
@@ -402,14 +378,14 @@ class SignerTest(absltest.TestCase):
         secret = _secret_key(case.seed, case.public_key, case.shape, case.depth)
         message = np.frombuffer(case.message, dtype=np.uint8)
         stateful, next_counter = scheme.sign(
-            secret, message, case.state_counter, context=_ctx(case.context)
+            secret, message, case.state_counter, context=harness.context(case.context)
         )
         stateless_signature, no_counter = scheme.sign(
             secret,
             message,
             None,
             randomness=np.frombuffer(case.stateless_opt_rand, dtype=np.uint8),
-            context=_ctx(case.context),
+            context=harness.context(case.context),
         )
         self.assertEqual(bytes(np.asarray(stateful)), _padded(case.stateful_signature))
         self.assertEqual(
@@ -424,8 +400,8 @@ class SignerTest(absltest.TestCase):
             shrincs.stateless.STATELESS_INDICATOR,
         )
         self.assertEqual(
-            _verdicts(
-                scheme,
+            harness.verdicts(
+                scheme.verify,
                 [
                     (case.public_key, case.message, bytes(np.asarray(stateful))),
                     (
@@ -452,7 +428,7 @@ class SignerTest(absltest.TestCase):
                 _secret_key(case.seed, case.public_key, case.shape, case.depth),
                 np.frombuffer(case.message, dtype=np.uint8),
                 2**case.depth,
-                context=_ctx(case.context),
+                context=harness.context(case.context),
             )
 
     def test_a_salt_the_stateful_path_cannot_use_is_refused(self) -> None:
@@ -464,7 +440,7 @@ class SignerTest(absltest.TestCase):
                 np.frombuffer(case.message, dtype=np.uint8),
                 case.state_counter,
                 randomness=np.zeros(16, dtype=np.uint8),
-                context=_ctx(case.context),
+                context=harness.context(case.context),
             )
 
     def test_a_verifier_cannot_generate_a_key(self) -> None:

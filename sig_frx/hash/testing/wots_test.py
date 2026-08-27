@@ -21,7 +21,6 @@ from absl.testing import absltest
 from hash_frx import Sha256
 
 from sig_frx.hash import adrs, wots
-from sig_frx.hash.slhdsa import slh_dsa
 from sig_frx.hash.tweakable import Sha2TweakableHash
 
 _N = 16
@@ -102,8 +101,15 @@ class Base2bTest(absltest.TestCase):
 
     The two disagree only if the claim underneath the gather is wrong — that
     digit `j` is bits `[j·b, (j+1)·b)` of the big-endian stream — so the loop is
-    what pins it, at every `(b, out_len)` a defined parameter set asks for and at
-    the byte alignments in between.
+    what pins it, at **every width the window allows** rather than at the widths
+    some scheme happens to ask for.
+
+    That distinction is the point. `base_2b` is shared — FIPS 205 and RFC 8391
+    both reach it, and SHRINCS adds a third table — so a sweep driven by one
+    scheme's parameter sets is a claim that quietly narrows every time a scheme
+    is added, without anyone touching this file. Sweeping the domain instead
+    cannot narrow: a width outside it is refused by `base_2b`, and a width inside
+    it is covered here whoever asks for it.
     """
 
     def test_it_matches_the_standards_loop(self) -> None:
@@ -114,22 +120,21 @@ class Base2bTest(absltest.TestCase):
             )
             self.assertEqual(list(got[0]), _spec_base_2b(data, b, out_len), f"b={b}")
 
-    def test_it_matches_the_loop_at_every_defined_parameter_set(self) -> None:
-        # What the schemes actually call it with: WOTS+ asks for `len1` and
-        # `len2` digits of `lg_w` bits, and FORS for `k` of `a`. The cases above
-        # are alignments; these are the widths that ship.
-        asked = set()
-        for params in slh_dsa.SHA2_PARAMETER_SETS.values():
-            asked.add((params.lg_w, params.wots_params.len1))
-            asked.add((params.lg_w, params.wots_params.len2))
-            asked.add((params.a, params.k))
+    def test_it_matches_the_loop_at_every_width_the_window_allows(self) -> None:
+        """Exhaustive over `b`, which is what makes this independent of schemes.
+
+        `out_len` does not need the same treatment: it moves where the digits
+        are read from and not how, so two lengths that put the last digit in
+        different places are enough beside a `b` that is swept whole.
+        """
         data = bytes((i * 29 + 13) % 256 for i in range(256))
-        for b, out_len in sorted(asked):
-            with self.subTest(b=b, out_len=out_len):
-                got = np.asarray(
-                    wots.base_2b(np.frombuffer(data, dtype=np.uint8), b, out_len)
-                )
-                self.assertEqual(list(got[0]), _spec_base_2b(data, b, out_len))
+        for b in range(1, wots.MAX_DIGIT_BITS + 1):
+            for out_len in (1, 32):
+                with self.subTest(b=b, out_len=out_len):
+                    got = np.asarray(
+                        wots.base_2b(np.frombuffer(data, dtype=np.uint8), b, out_len)
+                    )
+                    self.assertEqual(list(got[0]), _spec_base_2b(data, b, out_len))
 
     def test_a_batch_gives_each_row_its_own_digits(self) -> None:
         rows = [bytes((i * 53 + 7 * r) % 256 for i in range(32)) for r in range(4)]

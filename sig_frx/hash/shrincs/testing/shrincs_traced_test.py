@@ -52,7 +52,7 @@ def _rows(*values: bytes, width: int | None = None) -> np.ndarray:
 
 # Past the indicator byte and the 16-byte randomizer, which both paths carry — so
 # this offset is inside the signature proper whichever path an entry took.
-_BODY = 17
+_BODY = shrincs.INDEX_FIELD_START
 
 
 def _tampered(signature: bytes) -> bytes:

@@ -252,12 +252,17 @@ py_binary(
     ] + GPU_PLUGIN_DEPS,
 )
 
-# `medium` rather than `small` because the signing stage made this real work:
-# 17 s locally, and `measurement.md` puts the CI executor at 1.6x to 3.4x a
-# workstation per target, which projects to 27-58 s against `small`'s 60 s
-# budget. That is at or past the half the page moves a target up at, and it
-# says plainly that a local number cannot size a CPU-decided budget — so the
-# cheap direction is the correct one until a CI run says otherwise.
+# `medium`, decided by the CPU leg: 51.7 s against 9.1 s on the GPU leg. That is
+# 86% of `small`'s 60 s, well past the half-budget rule in
+# ../../../docs/reference/measurement.md, and the next run of unchanged content
+# spent the remaining 14% and timed out. 51.7 s is 17% of `medium`'s 300 s.
+#
+# Two local runs of this target read 2.5x apart from each other, which is why
+# neither sized it — the CPU leg is the one that decides.
+#
+# The 51.7 s predates the signing, aggregation and deterministic stages, so it
+# understates the target as it now stands — re-read it from the first CI run
+# after those land rather than trusting the figure above to still describe it.
 py_test(
     name = "musig2_test",
     size = "medium",
