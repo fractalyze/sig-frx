@@ -201,3 +201,43 @@ py_test(
         requirement("zk_dtypes"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# The vectors the scheme suite gates on: whole `(key, slot, root, signature)`
+# objects with upstream's verdict, at `TEST` because signing needs a key.
+py_library(
+    name = "verify_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "verify_vectors.py",
+    ],
+    visibility = ["//sig_frx:__subpackages__"],
+)
+
+# The assembly: the chain walk, the leaf and the Merkle climb wired to each
+# other and to the codec.
+#
+# `medium` on 12.8 s CPU (local) and 42.7 s GPU (CI run 33079092342, fresh on
+# both legs). `small` is what the CPU number alone would have argued for and it
+# is wrong: 42.7 s is already 71% of that bucket's 60 s before any load, and this
+# leg has been measured moving as a whole by up to 2.33x on a busy runner. The
+# GPU leg decides here, which is the case `measurement.md` describes.
+#
+# Cheaper than this package's own prediction that a verify suite would be its
+# most expensive target, and the reason is the preset rather than the work:
+# these vectors are `TEST`, where `DIMENSION` is 4 against `PROD`'s 46 and the
+# tree is 8 levels against 32. The chain and tree walks that dominate
+# `tweakable_test` are compiled here at a fraction of that shape. A `PROD`
+# verification case would not be, and `size` moves with the vectors.
+py_test(
+    name = "leansig_test",
+    size = "medium",
+    srcs = ["leansig_test.py"],
+    deps = [
+        ":verify_vectors",
+        "//sig_frx/hash/leansig",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)

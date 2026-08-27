@@ -334,6 +334,7 @@ class Shrincs:
         signature: ArrayLike,
         *,
         context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
     ) -> Array:
         """Verify a batch of SHRINCS signatures, of either path.
 
@@ -341,6 +342,7 @@ class Shrincs:
         `[B, L]`, and the result is `bool[B]`. `context` applies to the whole
         batch.
         """
+        ctx.require_no_position(position, "SHRINCS")
         # SLH-DSA's reading, which this scheme inherits along with the leg that
         # reaches it: the signature's width is a verdict, the key's is not.
         operands = require_batch(

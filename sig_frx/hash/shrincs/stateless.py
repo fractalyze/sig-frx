@@ -55,6 +55,7 @@ import frx.numpy as fnp
 from frx import Array
 from frx.typing import ArrayLike
 
+from sig_frx import context as context_rules
 from sig_frx.batch import WrongWidth, require_batch
 from sig_frx.hash.slhdsa.slh_dsa import SlhDsa, SlhDsaParams, sha2_params
 
@@ -192,6 +193,7 @@ class Stateless:
         signature: ArrayLike,
         *,
         context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
     ) -> Array:
         """Verify a batch of stateless SHRINCS signatures.
 
@@ -205,6 +207,7 @@ class Stateless:
         SHRINCS signature is a well-formed thing this component cannot check, and
         the answer to "is this a valid stateless signature" is no.
         """
+        context_rules.require_no_position(position, "stateless SHRINCS")
         # A width this component does not issue is a verdict, not an error — the
         # same reading as a wrong indicator byte, and SLH-DSA's own. `accepts`
         # raises on it instead, because reaching it is a caller inside the

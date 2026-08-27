@@ -14,6 +14,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         "//sig_frx:batch",
+        "//sig_frx:context",
         "//sig_frx/hash:tweakable",
         "//sig_frx/hash/slhdsa:slh_dsa",
         "@hash_frx//hash_frx",

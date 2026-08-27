@@ -313,6 +313,7 @@ class Falcon:
         signature: ArrayLike,
         *,
         context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
     ) -> Array:
         """Algorithm 16 over a whole batch: `bool[B]`.
 
@@ -326,6 +327,7 @@ class Falcon:
         than accepted and ignored — the seam's rule for RFC 8391 and ECDSA,
         which this joins.
         """
+        context_rules.require_no_position(position, "Falcon (FN-DSA)")
         context_rules.require_empty(context, "Falcon (FN-DSA)")
         params = self.params
         operands = require_batch(

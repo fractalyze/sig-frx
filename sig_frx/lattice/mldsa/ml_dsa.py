@@ -449,8 +449,10 @@ class MlDsa:
         signature: ArrayLike,
         *,
         context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
     ) -> Array:
         """`ML-DSA.Verify` — Algorithm 3 over Algorithm 8, for the whole batch."""
+        ctx.require_no_position(position, "ML-DSA")
         return self.verify_internal(
             public_key,
             ctx.prepend(ctx.prefix(_PURE_DOMAIN, context), message),

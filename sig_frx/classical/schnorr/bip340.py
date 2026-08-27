@@ -155,9 +155,11 @@ class Bip340:
         signature: ArrayLike,
         *,
         context: ArrayLike | None,
+        position: ArrayLike | None = None,
     ) -> Any:
         """The seam's independent verdicts, `bool[B]` — the spec's algorithm,
         rejection for rejection."""
+        context_rules.require_no_position(position, "BIP-340")
         context_rules.require_empty(context, "BIP-340")
         keys, messages, signatures, ok, key_points = self._parsed(
             public_key, message, signature

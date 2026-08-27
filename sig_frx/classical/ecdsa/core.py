@@ -280,8 +280,10 @@ class Ecdsa:
         signature: ArrayLike,
         *,
         context: ArrayLike | None,
+        position: ArrayLike | None = None,
     ) -> Any:
         """The batched verdict, `bool[B]`, over the record's message hash."""
+        context_rules.require_no_position(position, "ECDSA")
         context_rules.require_empty(context, "ECDSA")
         digest = self.hash.byte_hash(message).digest(message)
         return self.verify_digest(public_key, digest, signature)

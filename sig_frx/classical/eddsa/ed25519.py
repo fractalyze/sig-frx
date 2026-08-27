@@ -264,8 +264,10 @@ class Ed25519:
         signature: ArrayLike,
         *,
         context: ArrayLike | None,
+        position: ArrayLike | None = None,
     ) -> Any:
         """The batched verdict, `bool[B]`, under this construction's rule."""
+        context_rules.require_no_position(position, "EdDSA")
         curve = self.curve
         parsed = self._parsed(public_key, message, signature, context)
 

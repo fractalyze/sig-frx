@@ -441,8 +441,10 @@ class SlhDsa:
         signature: ArrayLike,
         *,
         context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
     ) -> Array:
         """`slh_verify` — Algorithm 24 over Algorithm 20, for the whole batch."""
+        ctx.require_no_position(position, "SLH-DSA")
         return self.verify_internal(
             public_key,
             ctx.prepend(ctx.prefix(_PURE_DOMAIN, context), message),

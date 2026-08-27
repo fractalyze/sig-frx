@@ -510,6 +510,7 @@ class Xmss:
         signature: ArrayLike,
         *,
         context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
     ) -> Array:
         """§4.1.10's verification, with the batch axis added: -> bool `[B]`.
 
@@ -519,6 +520,7 @@ class Xmss:
         another index climbs to a different root and is rejected — the index is not
         a hint the verifier may take on trust.
         """
+        context_rules.require_no_position(position, "XMSS (RFC 8391)")
         context_rules.require_empty(context, "XMSS (RFC 8391)")
         params = self.params
         # RFC 8391 defines no verdict for a mis-sized key or signature the way
