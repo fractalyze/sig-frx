@@ -163,6 +163,31 @@ class PositionalTest(parameterized.TestCase):
                     (value << amount) % modulus,
                 )
 
+    @parameterized.parameters(*WIDTHS)
+    def test_the_signed_shift_fills_from_the_sign_not_from_zero(
+        self, bits: int
+    ) -> None:
+        """A negative operand is the whole point, so both signs run the sweep.
+
+        `shift_right` fills with zeros, which is right for a magnitude and turns
+        a negative two's-complement value into something enormous. Python's `>>`
+        is arithmetic, so it is the oracle for both halves here.
+        """
+        limbs = bigint.limb_count(bits)
+        modulus = _modulus(limbs)
+        magnitude = random.Random(bits + 5).getrandbits(bits - 1) % modulus
+        amounts = (0, 1, 14, 15, 16, 30, 37, bits // 2, limbs * bigint.LIMB_BITS)
+        for value in (magnitude, -magnitude):
+            packed = bigint.to_limbs(value % modulus, limbs)
+            for amount in amounts:
+                with self.subTest(value=value, amount=amount):
+                    self.assertEqual(
+                        bigint.from_limbs(
+                            bigint.shift_right_signed(packed, amount), signed=True
+                        ),
+                        value >> amount,
+                    )
+
     def test_at_least_compares_many_values_against_one_bound(self) -> None:
         """`[m, L]` against `[L]`, which is how every caller actually asks.
 

@@ -190,21 +190,17 @@ py_test(
 #
 # The cost is the module, not the oracle: a level's shapes depend on its width,
 # so the descent compiles ten distinct programs per parameter set. Real key
-# generation pays that once per key.
+# generation pays that once per key. The base case adds two more programs at
+# 3,161 and 6,302 bits, which grew the target by at most 1.27x — 48.6 s without
+# them against 56.6-61.8 s with, measured by running this same target both ways
+# on one workstation. So the 84.1 s above scales to about 107 s, still 36% of
+# `medium` and inside the threshold. The ratio is what travels between machines;
+# the seconds are the executor's, which is why the bucket is not re-derived from
+# a local duration and a spread factor — doing that is what oversized this
+# target once already.
 py_test(
     name = "keygen_test",
-    # `large` from the base case, which arrived after this target was sized.
-    # 55.6 s on this workstation, and the CPU leg runs 1.6-3.4x slower per
-    # ../../../../docs/reference/measurement.md — so the worst run reaches ~63%
-    # of `medium`'s 300 s, over the half-budget threshold that moves a bucket.
-    #
-    # The cost is compile, not arithmetic: the binary GCD's trip count and limb
-    # width both follow from `bits`, so every distinct width in this file is its
-    # own program. The widths were already consolidated to five and the small
-    # cases batched into one call each; what is left is the two the acceptance
-    # criterion names — 3,161 and 6,302 bits — which are 5.5 s together and are
-    # the only ones that run at the size the descent actually produces.
-    size = "large",
+    size = "medium",
     srcs = ["keygen_test.py"],
     deps = [
         ":falcon_reference",

@@ -200,13 +200,10 @@ def _solve_batch(
     so a batch is what checks that claim. Tracing the loop once per pair also
     costs about a second each, which is most of this target's budget.
     """
-    rows = list(pairs)
-    stacked_f = np.stack([_pack(f0, bits) for f0, _ in rows])
-    stacked_g = np.stack([_pack(g0, bits) for _, g0 in rows])
+    stacked_f = np.stack([_pack(f0, bits) for f0, _ in pairs])
+    stacked_g = np.stack([_pack(g0, bits) for _, g0 in pairs])
     big_f, big_g, ok = keygen.base_case(stacked_f, stacked_g, bits, arith.Q)
-    unpack = [bigint.from_limbs(row, signed=True) for row in np.asarray(big_f)]
-    unpack_g = [bigint.from_limbs(row, signed=True) for row in np.asarray(big_g)]
-    return unpack, unpack_g, ok
+    return _unpack(big_f), _unpack(big_g), ok
 
 
 def _coprime_pair(bits: int, seed: int) -> tuple[int, int]:
@@ -217,6 +214,46 @@ def _coprime_pair(bits: int, seed: int) -> tuple[int, int]:
         g0 = rng.randrange(1 << (bits - 1), 1 << bits)
         if math.gcd(f0, g0) == 1 and not (f0 % 2 == 0 and g0 % 2 == 0):
             return f0, g0
+
+
+def _binary_gcd_steps(x: int, y: int) -> int:
+    """Steps HAC 14.61 takes on two positive magnitudes, counted not bounded.
+
+    The traced form runs a fixed budget, so what it needs is the number this
+    would have stopped at. One step is one of the four exclusive branches — the
+    flattening `base_case` applies to HAC's nested `while`s.
+
+    Here rather than in [`falcon_reference`](falcon_reference.py) precisely
+    because it mirrors the implementation: that module transcribes the
+    specification so the tests can hold the code to something independent of it,
+    and a deliberate copy of the code's own loop shape would dilute the claim
+    four other targets lean on. What this counts is a property of the loop, so
+    it belongs beside the test that pins the loop's budget.
+    """
+    if x % 2 == 0 and y % 2 == 0:
+        raise ValueError("both even is HAC's step 2, which the base case rejects")
+    u, v = x, y
+    a, b, c, d = 1, 0, 0, 1
+    steps = 0
+    while u:
+        steps += 1
+        if u % 2 == 0:
+            u //= 2
+            if a % 2 == 0 and b % 2 == 0:
+                a, b = a // 2, b // 2
+            else:
+                a, b = (a + y) // 2, (b - x) // 2
+        elif v % 2 == 0:
+            v //= 2
+            if c % 2 == 0 and d % 2 == 0:
+                c, d = c // 2, d // 2
+            else:
+                c, d = (c + y) // 2, (d - x) // 2
+        elif u >= v:
+            u, a, b = u - v, a - c, b - d
+        else:
+            v, c, d = v - u, c - a, d - b
+    return steps
 
 
 class GcdBudgetTest(absltest.TestCase):
@@ -230,7 +267,7 @@ class GcdBudgetTest(absltest.TestCase):
         previous, current = 1, 1
         for _ in range(2000):
             previous, current = current, previous + current
-        steps = falcon_reference.binary_gcd_steps(current, previous)
+        steps = _binary_gcd_steps(current, previous)
         bits = max(current.bit_length(), previous.bit_length())
         self.assertLessEqual(steps, keygen.gcd_budget(bits))
 
@@ -241,25 +278,13 @@ class GcdBudgetTest(absltest.TestCase):
         worst = 0
         for seed in range(40):
             f0, g0 = _coprime_pair(256, seed)
-            worst = max(worst, falcon_reference.binary_gcd_steps(f0, g0))
+            worst = max(worst, _binary_gcd_steps(f0, g0))
         self.assertGreater(worst, 2 * 256)
         self.assertLessEqual(worst, keygen.gcd_budget(256))
 
 
 class BaseCaseTest(parameterized.TestCase):
     """Algorithm 6 at degree 1, against the equation it exists to satisfy."""
-
-    @parameterized.parameters(64, 256)
-    def test_solves_the_ntru_equation_exactly(self, bits: int) -> None:
-        f0, g0 = _coprime_pair(bits, seed=bits)
-        big_f, big_g, ok = keygen.base_case(
-            _pack(f0, bits), _pack(g0, bits), bits, arith.Q
-        )
-
-        self.assertTrue(bool(np.asarray(ok)))
-        value_f = bigint.from_limbs(np.asarray(big_f), signed=True)
-        value_g = bigint.from_limbs(np.asarray(big_g), signed=True)
-        self.assertEqual(f0 * value_g - g0 * value_f, arith.Q)
 
     def test_a_sign_rides_into_the_coefficient(self) -> None:
         # A sign on either side and on both: the descent's coefficients are
@@ -308,14 +333,18 @@ class BaseCaseTest(parameterized.TestCase):
         )
 
     @parameterized.named_parameters(
+        ("toy_64", 64),
+        ("toy_256", 256),
+        # The widths #26 measured at the bottom of the descent. Everything else
+        # here runs at toy sizes; these are the ones that say the budget and the
+        # limb count hold where they have to.
         ("falcon_512", 3161),
         ("falcon_1024", 6302),
     )
-    def test_solves_at_the_width_the_descent_actually_produces(self, bits: int) -> None:
-        # The widths #26 measured at the bottom of the descent. Everything above
-        # runs at toy sizes; this is the one that says the budget and the limb
-        # count hold where they have to.
+    def test_solves_the_ntru_equation_exactly(self, bits: int) -> None:
         f0, g0 = _coprime_pair(bits, seed=bits)
+        # A rank-1 call rather than `_solve_batch`: the seam takes a bare
+        # `[limbs]` as readily as a batch, and that is worth exercising once.
         big_f, big_g, ok = keygen.base_case(
             _pack(f0, bits), _pack(g0, bits), bits, arith.Q
         )
@@ -324,7 +353,7 @@ class BaseCaseTest(parameterized.TestCase):
         value_f = bigint.from_limbs(np.asarray(big_f), signed=True)
         value_g = bigint.from_limbs(np.asarray(big_g), signed=True)
         self.assertEqual(f0 * value_g - g0 * value_f, arith.Q)
-        # A register that wrapped would still satisfy nothing above, but it
+        # A register that wrapped could still satisfy nothing above, but it
         # would also blow the size the levels above budget for, so both are
         # checked rather than only the equation.
         self.assertLessEqual(abs(value_f), 2 * arith.Q * abs(f0))

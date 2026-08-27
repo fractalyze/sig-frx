@@ -309,9 +309,10 @@ def shift_right(a: ArrayLike, bits: int) -> Any:
 
 @lru_cache(maxsize=None)
 def _high_bits(limbs: int, bits: int) -> np.ndarray:
-    """Limbs with the top `bits` bits of the `limbs*15`-bit word set."""
+    """Limbs with the top `min(bits, limbs*15)` bits of the word set."""
     total = limbs * LIMB_BITS
-    return to_limbs(((1 << bits) - 1) << (total - bits), limbs)
+    width = min(bits, total)
+    return _frozen(to_limbs(((1 << width) - 1) << (total - width), limbs))
 
 
 def shift_right_signed(a: ArrayLike, bits: int) -> Any:
@@ -329,7 +330,7 @@ def shift_right_signed(a: ArrayLike, bits: int) -> Any:
     """
     values = fnp.asarray(a)
     logical = shift_right(values, bits)
-    fill = _high_bits(values.shape[-1], min(bits, values.shape[-1] * LIMB_BITS))
+    fill = _high_bits(values.shape[-1], bits)
     return fnp.where(is_negative(values)[..., None], logical | fill, logical)
 
 
