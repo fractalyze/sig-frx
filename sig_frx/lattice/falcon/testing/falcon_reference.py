@@ -253,11 +253,11 @@ def field_norm(a: list[int]) -> list[int]:
     return out
 
 
-def gram_schmidt_squared_norm(f: list[int], g: list[int], q: int) -> float:
+def gram_schmidt_squared_norm(f: list[int], g: list[int]) -> float:
     """Algorithm 5 line 5, written the way the specification states it.
 
     The larger of the NTRU basis's two orthogonalised rows: `‖(g, −f)‖²`, and
-    `q²` times the norm of `(ḡ, f̄)` divided by `f f̄ + g ḡ`. The division is
+    `Q²` times the norm of `(ḡ, f̄)` divided by `f f̄ + g ḡ`. The division is
     what forces the rational transform — there is no integer form of this — so
     the transcription uses numpy's own complex arithmetic rather than the
     module's, which is the independence that makes it an oracle.
@@ -273,20 +273,28 @@ def gram_schmidt_squared_norm(f: list[int], g: list[int], q: int) -> float:
     from_g = np.linalg.solve(powers, np.conj(g_hat) / energy).real
     from_f = np.linalg.solve(powers, np.conj(f_hat) / energy).real
     first = float(np.sum(np.asarray(f, float) ** 2) + np.sum(np.asarray(g, float) ** 2))
-    second = q**2 * float(np.sum(from_g**2) + np.sum(from_f**2))
+    second = Q**2 * float(np.sum(from_g**2) + np.sum(from_f**2))
     return max(first, second)
 
 
-def is_invertible(f: list[int], q: int) -> bool:
+def is_invertible(f: list[int]) -> bool:
     """Algorithm 5 line 6 — `f` a unit in `Z_q[x]/(x^n + 1)`.
 
     Evaluated at the `2n`-th roots of unity by direct exponentiation rather than
     by a transform, so the check and the module's NTT share nothing.
     """
     n = len(f)
-    root = pow(11, (q - 1) // (2 * n), q)
-    assert pow(root, n, q) == q - 1, "11 does not generate a 2n-th root here"
+    root = pow(11, (Q - 1) // (2 * n), Q)
+    assert pow(root, n, Q) == Q - 1, "11 does not generate a 2n-th root here"
+    # `root^(2n) = 1`, which the assertion above is half of, so the `n²`
+    # exponentiations the definition reads as are `2n` multiplications and an
+    # index. Still direct evaluation at the roots rather than a transform, which
+    # is the independence this file exists for — and 7x faster, which at
+    # `n = 1024` is most of a second off the leg.
+    powers = [1] * (2 * n)
+    for k in range(1, 2 * n):
+        powers[k] = powers[k - 1] * root % Q
     return all(
-        sum(int(f[j]) * pow(root, (2 * i + 1) * j, q) for j in range(n)) % q
+        sum(int(f[j]) * powers[(2 * i + 1) * j % (2 * n)] for j in range(n)) % Q
         for i in range(n)
     )

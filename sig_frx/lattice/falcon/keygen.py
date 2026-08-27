@@ -1,11 +1,24 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""Falcon key generation — §3.8.2's tower-of-fields descent.
+"""Falcon key generation — Algorithm 5's draw, and Algorithm 6 under it.
 
-Solving `fG - gF = q` (Algorithm 6) recurses on the field norm: `f` of degree
-`n` becomes `N(f) = f_e² - x·f_o²` of degree `n/2`, down to degree 1 where an
-extended GCD closes it. This module is that descent. The base case, the lift
-back up, and Babai's reduction are the rest of
-[#26](https://github.com/fractalyze/sig-frx/issues/26).
+Three sections, in the order key generation runs them rather than the order
+they were built:
+
+- **Algorithm 5** draws `f` and `g` from a discrete Gaussian and rejects the
+  pair unless the basis is short enough and `f` is a unit.
+- **the descent** (Algorithm 6's left-hand side) recurses on the field norm:
+  `f` of degree `n` becomes `N(f) = f_e² - x·f_o²` of degree `n/2`.
+- **the base case** closes it at degree 1, where the NTRU equation is Bezout's.
+
+The lift back up and Babai's reduction land here too, and the restart loop that
+drives Algorithm 5 lands with the caller that has a loop to put it in — all of
+them [#26](https://github.com/fractalyze/sig-frx/issues/26).
+
+The three share almost nothing: the descent is `bigint`'s residues, the base
+case is `bigint`'s limbs under a `fori_loop`, and Algorithm 5 is `fft` and
+`arith` and a table built with `decimal`. They are one module because they are
+one operation, and the reason to split would be that the file stops being
+readable rather than that the sections differ.
 
 ## Coefficients outgrow every lane on the way down, which sets the shape
 
@@ -72,6 +85,7 @@ import numpy as np
 from frx import lax
 from frx.typing import ArrayLike
 
+from sig_frx.arrays import namespace
 from sig_frx.lattice.falcon import arith, bigint, fft
 
 
@@ -368,7 +382,7 @@ def base_case(f0: ArrayLike, g0: ArrayLike, bits: int, q: int) -> tuple[Any, Any
     return big_f, big_g, ok
 
 
-# -- Algorithm 5: the draw and the three checks -------------------------------
+# -- Algorithm 5: the draw and the two checks ---------------------------------
 
 # §3.8.2's `σ_{f,g} = 1.17·sqrt(q/2n)` at `n = 4096`, which is the width one
 # draw carries. A coefficient at degree `n` is the sum of `4096/n` of them, so
@@ -384,6 +398,14 @@ DRAW_SIGMA = 1.43300980528773
 # object with a Rényi bound of its own, and this is not it.
 DRAW_BITS = 62
 _HALF_BITS = DRAW_BITS // 2
+
+# §3.8.2's `1.17·sqrt(q)`, squared, because the quantity it gates is a squared
+# norm. Here rather than at the call site: the constant is what turns
+# [`gram_schmidt_squared_norm`](#gram_schmidt_squared_norm) into Algorithm 5's
+# line 5, and a caller that supplied it by hand would also have to know to
+# square it. Degree-independent, unlike `FalconParams.squared_norm_bound`, so it
+# is a module constant rather than a parameter-set field.
+GRAM_SCHMIDT_BOUND = 1.17**2 * arith.Q
 
 
 @lru_cache(maxsize=None)
@@ -416,11 +438,8 @@ def _draw_table() -> np.ndarray:
             running += weight
             threshold = int(running / total * scale)
             rows.append((threshold >> _HALF_BITS, threshold & ((1 << _HALF_BITS) - 1)))
-    return _frozen_table(np.array(rows, dtype=np.uint32))
-
-
-def _frozen_table(table: np.ndarray) -> np.ndarray:
-    table.flags.writeable = False
+    table = np.array(rows, dtype=np.uint32)
+    table.flags.writeable = False  # cached and shared, so hand out no-one's to edit
     return table
 
 
@@ -437,19 +456,33 @@ def draw_polynomial(degree: int, stream: ArrayLike) -> Any:
     if 4096 % degree:
         raise ValueError(f"degree {degree} does not divide 4096")
     bytes_ = fnp.asarray(stream).astype(np.uint32)
-    words = bytes_[..., :4] | (bytes_[..., 4:] << np.uint32(8))
-    high = (
-        (words[..., 0] << np.uint32(23)) | (words[..., 1] << np.uint32(7))
-    ) & np.uint32((1 << _HALF_BITS) - 1)
-    low = ((words[..., 2] << np.uint32(15)) | words[..., 3]) & np.uint32(
-        (1 << _HALF_BITS) - 1
-    )
-    sign = (bytes_[..., 7] >> np.uint32(7)) & np.uint32(1)
 
-    table = _draw_table()
-    passed = (high[:, None] > table[None, :, 0]) | (
-        (high[:, None] == table[None, :, 0]) & (low[:, None] >= table[None, :, 1])
-    )
+    def word(chunk: Any) -> Any:
+        """Four bytes as one 32-bit value, most significant first."""
+        return (
+            (chunk[:, 0] << np.uint32(24))
+            | (chunk[:, 1] << np.uint32(16))
+            | (chunk[:, 2] << np.uint32(8))
+            | chunk[:, 3]
+        )
+
+    # Each half drops its low bit to reach 31, and the bit the second half drops
+    # is the sign: 62 magnitude bits and one sign bit, so 63 of the 64 reach an
+    # output and each of those reaches exactly one. The 64th — the first half's
+    # dropped bit — is spare because the budget is odd, not because it is lost.
+    #
+    # Worth spelling out. The first version of this was three shifts against a
+    # mask, and the arithmetic hid that one byte reached no output at all, that
+    # seven bits of `high` were always zero, and that two bytes collided in one
+    # position — none of which the distribution test could see, because its
+    # tolerance is far wider than the tail probabilities a skew like that moves.
+    first, second = word(bytes_[:, :4]), word(bytes_[:, 4:])
+    high, low = first >> np.uint32(1), second >> np.uint32(1)
+    sign = second & np.uint32(1)
+
+    top, bottom = _draw_table()[:, 0], _draw_table()[:, 1]
+    high, low = high[:, None], low[:, None]
+    passed = (high > top) | ((high == top) & (low >= bottom))
     magnitude = fnp.sum(passed, axis=-1, dtype=np.int32)
     values = fnp.where(sign.astype(bool), -magnitude, magnitude)
     return fnp.sum(values.reshape(degree, 4096 // degree), axis=-1, dtype=np.int32)
@@ -458,24 +491,33 @@ def draw_polynomial(degree: int, stream: ArrayLike) -> Any:
 def gram_schmidt_squared_norm(f: ArrayLike, g: ArrayLike) -> Any:
     """Algorithm 5 line 5's quantity — the basis's Gram-Schmidt norm, squared.
 
-    `max(‖(g, −f)‖², q²·‖(qf̄/(f f̄ + g ḡ), qḡ/(f f̄ + g ḡ))‖²)`, which is the
-    larger of the two rows of the NTRU basis after orthogonalisation. The second
-    row is a division in the FFT domain, so this is where key generation needs
-    the rational transform rather than the integer one — and a traced caller
-    needs [`fft.double_precision`](fft.py) around it.
+    `max(‖(g, −f)‖², q²·‖(ḡ/(f f̄ + g ḡ), f̄/(f f̄ + g ḡ))‖²)`, which is the
+    larger of the two rows of the NTRU basis after orthogonalisation, against
+    [`GRAM_SCHMIDT_BOUND`](#GRAM_SCHMIDT_BOUND). The second row is a division in
+    the FFT domain, so this is where key generation needs the rational transform
+    rather than the integer one.
+
+    **The second row never leaves the transform domain.** Only the sum of its
+    coefficients' squares is read, and Parseval turns that into a function of
+    the energy alone — `Σ from_g² + Σ from_f² = (1/n)·Σ 1/energy`, since the
+    numerator `|f̂|² + |ĝ|²` *is* the energy. So the two inverse transforms the
+    formula reads as are not computed. The reference transcription
+    ([`falcon_reference`](testing/falcon_reference.py)) does compute them, which
+    is what makes the test a check of the identity rather than of itself.
+
+    Reads the namespace off its arguments, as [`fft`](fft.py) does: key
+    generation's rejection loop is concrete, so this is called on the host,
+    where the double-precision scope is unnecessary — and lifting it here would
+    make the scope mandatory for a caller that never needed one.
     """
-    left, right = fnp.asarray(f).astype(np.float64), fnp.asarray(g).astype(np.float64)
+    xnp = namespace(f, g)
+    left, right = xnp.asarray(f, dtype=np.float64), xnp.asarray(g, dtype=np.float64)
+    degree = np.shape(left)[-1]
     left_hat, right_hat = fft.fft(left), fft.fft(right)
-    energy = (left_hat * fnp.conj(left_hat) + right_hat * fnp.conj(right_hat)).real
-    # Named for what each is built from, not for which of `F` and `G` it becomes:
-    # the second row pairs `ḡ` with `F` and `f̄` with `G`, and only the sum of
-    # their squares is read here — so a name asserting the pairing would be a
-    # claim this function neither needs nor checks.
-    from_g = fft.ifft(fnp.conj(right_hat) / energy).real
-    from_f = fft.ifft(fnp.conj(left_hat) / energy).real
-    first_row = fnp.sum(left * left) + fnp.sum(right * right)
-    second_row = (arith.Q**2) * (fnp.sum(from_g * from_g) + fnp.sum(from_f * from_f))
-    return fnp.maximum(first_row, second_row)
+    energy = (left_hat * xnp.conj(left_hat) + right_hat * xnp.conj(right_hat)).real
+    first_row = xnp.sum(left * left) + xnp.sum(right * right)
+    second_row = (arith.Q**2 / degree) * xnp.sum(1.0 / energy)
+    return xnp.maximum(first_row, second_row)
 
 
 def invertible(f: ArrayLike) -> Any:
@@ -488,4 +530,4 @@ def invertible(f: ArrayLike) -> Any:
     it lands on the device whatever the caller is.
     """
     residues = arith.ntt(arith.to_field(fnp.asarray(f)))
-    return fnp.all(fnp.asarray(residues).astype(np.uint32) != np.uint32(0))
+    return fnp.all(residues.astype(np.uint32) != np.uint32(0))

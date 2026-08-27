@@ -58,8 +58,27 @@ def _draw(degree: int, seed: int) -> list[int]:
     that sets the widths.
     """
     rng = np.random.default_rng(seed)
-    draws = rng.normal(0.0, 1.43300980528773, size=(degree, 4096 // degree))
+    draws = rng.normal(0.0, keygen.DRAW_SIGMA, size=(degree, 4096 // degree))
     return [int(v) for v in np.round(draws).astype(np.int64).sum(axis=1)]
+
+
+def _drawn(degree: int, rng: np.random.Generator) -> np.ndarray:
+    """`draw_polynomial` at `degree`, over the `[4096, 8]` bytes it consumes."""
+    stream = rng.integers(0, 256, size=(4096, 8), dtype=np.uint8)
+    return np.asarray(keygen.draw_polynomial(degree, stream))
+
+
+def _squared_norm(
+    f: Sequence[int] | np.ndarray, g: Sequence[int] | np.ndarray
+) -> float:
+    """`gram_schmidt_squared_norm` as a host float, scope included.
+
+    Opening a scope and returning is what [`fft.double_precision`](../fft.py)
+    warns against — but what crosses the boundary here is a Python float,
+    materialised inside the scope, so there is no array left to narrow.
+    """
+    with fft.double_precision():
+        return float(np.asarray(keygen.gram_schmidt_squared_norm(f, g)))
 
 
 def _unpack(limbs: object) -> list[int]:
@@ -381,10 +400,12 @@ class DrawTest(absltest.TestCase):
         the tail the table was built for.
         """
         table = keygen._draw_table()
-        top = (int(table[-1, 0]) << (keygen.DRAW_BITS // 2)) | int(table[-1, 1])
-        self.assertEqual(top, 1 << keygen.DRAW_BITS)
-        below = (int(table[-2, 0]) << (keygen.DRAW_BITS // 2)) | int(table[-2, 1])
-        self.assertLess(below, 1 << keygen.DRAW_BITS)
+
+        def threshold(row: np.ndarray) -> int:
+            return (int(row[0]) << keygen._HALF_BITS) | int(row[1])
+
+        self.assertEqual(threshold(table[-1]), 1 << keygen.DRAW_BITS)
+        self.assertLess(threshold(table[-2]), 1 << keygen.DRAW_BITS)
 
     def test_the_tail_is_past_the_quantisation(self) -> None:
         """Truncating the table must cost less than rounding it does."""
@@ -400,20 +421,15 @@ class DrawTest(absltest.TestCase):
         that exposes the sampler rather than a sum of samplers.
         """
         rng = np.random.default_rng(0)
-        counts: dict[int, int] = {}
-        rounds = 24
-        for _ in range(rounds):
-            stream = rng.integers(0, 256, size=(4096, 8), dtype=np.uint8)
-            for value in np.asarray(keygen.draw_polynomial(4096, stream)).tolist():
-                counts[value] = counts.get(value, 0) + 1
-        total = rounds * 4096
+        samples = np.concatenate([_drawn(4096, rng) for _ in range(24)])
         sigma = keygen.DRAW_SIGMA
         partition = sum(math.exp(-x * x / (2 * sigma**2)) for x in range(-60, 61))
-        noise = 4.0 / math.sqrt(total)
+        noise = 4.0 / math.sqrt(samples.size)
         for x in range(-5, 6):
             ideal = math.exp(-x * x / (2 * sigma**2)) / partition
             with self.subTest(x=x):
-                self.assertAlmostEqual(counts.get(x, 0) / total, ideal, delta=noise)
+                got = float(np.count_nonzero(samples == x)) / samples.size
+                self.assertAlmostEqual(got, ideal, delta=noise)
 
     def test_summing_scales_the_variance_by_the_degree(self) -> None:
         """`4096/n` draws per coefficient is what makes one table serve every set.
@@ -423,17 +439,11 @@ class DrawTest(absltest.TestCase):
         would still look Gaussian and would have the wrong width.
         """
         rng = np.random.default_rng(1)
+        # Eight rounds rather than twenty-four: the margin is 6.8 sigma at the
+        # worst degree, which cannot flake, and a draw costs the same whatever
+        # `degree` is — it always consumes `[4096, 8]` and only the yield differs.
         for degree in (512, 1024, 4096):
-            samples = np.concatenate(
-                [
-                    np.asarray(
-                        keygen.draw_polynomial(
-                            degree, rng.integers(0, 256, size=(4096, 8), dtype=np.uint8)
-                        )
-                    )
-                    for _ in range(24)
-                ]
-            )
+            samples = np.concatenate([_drawn(degree, rng) for _ in range(8)])
             ideal = (4096 // degree) * keygen.DRAW_SIGMA**2
             with self.subTest(degree=degree):
                 self.assertAlmostEqual(float(samples.var()), ideal, delta=0.15 * ideal)
@@ -442,22 +452,19 @@ class DrawTest(absltest.TestCase):
 class QualityCheckTest(parameterized.TestCase):
     """Algorithm 5's two rejections, against the specification's own form."""
 
-    @parameterized.parameters(8, 16, 64)
+    @parameterized.parameters(8, 64)
     def test_the_gram_schmidt_norm_agrees_with_the_reference(self, degree: int) -> None:
+        """Small integers rather than the real draw, which this is not about.
+
+        The assertion is a numeric identity against the transcription, and any
+        small integer polynomial exercises it the same way — where a real draw
+        costs a `[4096, 8]` stream and a transform per case to yield `degree`
+        coefficients, and couples this test to the sampler.
+        """
         rng = np.random.default_rng(degree)
-        pair = [
-            np.asarray(
-                keygen.draw_polynomial(
-                    4096, rng.integers(0, 256, size=(4096, 8), dtype=np.uint8)
-                )
-            )[:degree]
-            for _ in range(2)
-        ]
-        with fft.double_precision():
-            got = float(np.asarray(keygen.gram_schmidt_squared_norm(*pair)))
-        want = falcon_reference.gram_schmidt_squared_norm(
-            pair[0].tolist(), pair[1].tolist(), arith.Q
-        )
+        pair = [rng.integers(-6, 7, size=degree).tolist() for _ in range(2)]
+        got = _squared_norm(*pair)
+        want = falcon_reference.gram_schmidt_squared_norm(*pair)
         self.assertAlmostEqual(got / want, 1.0, delta=1e-9)
 
     def test_the_first_row_wins_when_the_basis_is_badly_skewed(self) -> None:
@@ -467,30 +474,18 @@ class QualityCheckTest(parameterized.TestCase):
         tiny; scaling them up inverts which one the maximum comes from. Without
         a case on each side, dropping either from the maximum still passes.
         """
-        small = [1] + [0] * 7
-        with fft.double_precision():
-            tiny = float(np.asarray(keygen.gram_schmidt_squared_norm(small, [0] * 8)))
-            large = float(
-                np.asarray(
-                    keygen.gram_schmidt_squared_norm(
-                        [4000] * 8, [0, 4000, 0, 0, 0, 0, 0, 0]
-                    )
-                )
-            )
+        tiny = _squared_norm([1] + [0] * 7, [0] * 8)
+        large = _squared_norm([4000] * 8, [0, 4000, 0, 0, 0, 0, 0, 0])
         self.assertAlmostEqual(tiny, arith.Q**2, delta=1.0)  # second row
         self.assertGreater(large, 8 * 4000**2)  # first row
 
     @parameterized.parameters(*arith.DEGREES)
     def test_invertibility_agrees_with_direct_evaluation(self, degree: int) -> None:
         rng = np.random.default_rng(degree + 7)
-        drawn = np.asarray(
-            keygen.draw_polynomial(
-                degree, rng.integers(0, 256, size=(4096, 8), dtype=np.uint8)
-            )
-        )
+        drawn = _drawn(degree, rng)
         self.assertEqual(
             bool(np.asarray(keygen.invertible(drawn))),
-            falcon_reference.is_invertible(drawn.tolist(), arith.Q),
+            falcon_reference.is_invertible(drawn.tolist()),
         )
 
     @parameterized.parameters(*arith.DEGREES)
@@ -506,12 +501,13 @@ class QualityCheckTest(parameterized.TestCase):
         """
         transform = np.ones(degree, dtype=np.int32)
         transform[degree // 3] = 0
-        singular = arith.centered(arith.intt(arith.to_field(transform)))
-        singular = np.asarray(singular).astype(np.int64)
+        singular = np.asarray(
+            arith.centered(arith.intt(arith.to_field(transform)))
+        ).astype(np.int64)
 
         self.assertTrue(np.any(singular != 0), "the polynomial itself is not zero")
         self.assertFalse(bool(np.asarray(keygen.invertible(singular))))
-        self.assertFalse(falcon_reference.is_invertible(singular.tolist(), arith.Q))
+        self.assertFalse(falcon_reference.is_invertible(singular.tolist()))
         self.assertFalse(
             bool(np.asarray(keygen.invertible(np.zeros(degree, np.int64))))
         )
