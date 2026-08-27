@@ -11,13 +11,17 @@ ordering pins ML-DSA needs ([`arith.py`](arith.py)).
 It is also, for most consumers, the only Falcon operation they will ever call,
 which is why it lands ahead of the operations that produce what it checks.
 
-**Key generation and signing are not here.** They work over `Q[x]/(x^n + 1)` in
-the complex domain and are gated on a precision question that is still open
-([#178](https://github.com/fractalyze/sig-frx/issues/178)); the seam methods
-raise until [#26](https://github.com/fractalyze/sig-frx/issues/26) and
-[#27](https://github.com/fractalyze/sig-frx/issues/27) land. The conformance pin
-is carried anyway, so the day a body replaces a `raise` the seam is already the
-thing it has to satisfy.
+**Key generation is here and signing is not.** Both work over `Q[x]/(x^n + 1)`
+in the complex domain rather than in `Z_q`, and the machinery for that lives in
+[`keygen.py`](keygen.py); what this file adds is Algorithm 4 — the restart loop
+around Algorithm 5, and the two encodings a key pair leaves as. `sign` raises
+until [#27](https://github.com/fractalyze/sig-frx/issues/27) lands.
+
+The two operations sit on opposite sides of this repo's namespace rule and it is
+worth saying why once: `verify` is traced and batch-first because that is the
+hot path, and `keygen` is concrete because Algorithm 5's restart has a
+data-dependent trip count and no batch axis to give up. One scheme object serves
+both, which is the rule working rather than an exception to it.
 
 ## Where the batch axis is, and what sits outside it
 
@@ -94,6 +98,7 @@ the tracer rather than for an attacker
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from math import isqrt
 from typing import TYPE_CHECKING, Any
@@ -109,7 +114,7 @@ from sig_frx import context as context_rules
 from sig_frx.batch import require_batch
 from sig_frx.hashes import shake256
 from sig_frx.lattice import rejection
-from sig_frx.lattice.falcon import arith, encoding
+from sig_frx.lattice.falcon import arith, encoding, keygen
 from sig_frx.lattice.falcon.arith import Q
 from sig_frx.signature import Signature
 
@@ -119,6 +124,20 @@ from sig_frx.signature import Signature
 _DRAW_BITS = 16
 _HASH_ACCEPT = ((1 << _DRAW_BITS) // Q * Q, 1 << _DRAW_BITS)
 _HASH_PER_BLOCK = SHAKE256_RATE // (_DRAW_BITS // 8)
+
+# The seed `keygen` takes. Falcon states no map from a seed to a key pair, so
+# the length is a choice here rather than a transcription: 32 bytes is 256 bits,
+# what the sibling lattice scheme's `ξ` carries and what Falcon's own highest
+# security level is stated against.
+SEED_SIZE = 32
+
+# How the attempt number is separated in that expansion, and so how many
+# attempts there can be. Two bytes is 65,536 against a measured acceptance near
+# one in seventeen, so exhausting it is not a case anyone meets — and it is an
+# error rather than a wrap, because a wrap would redraw a pair Algorithm 5 has
+# already rejected and loop forever.
+_ATTEMPT_LABEL_BYTES = 2
+_MAX_ATTEMPTS = 1 << (8 * _ATTEMPT_LABEL_BYTES)
 
 # How many squared coefficients `_within_bound` folds before comparing. Any
 # divisor of `2n` under `2^32 / (⌊√⌊β²⌋⌋ + 1)²` works — that ceiling is 61 at
@@ -252,6 +271,7 @@ class Falcon:
 
     def __init__(self, params: FalconParams) -> None:
         self.params = params
+        self.seed_size = SEED_SIZE
         self.public_key_size = params.public_key_size
         self.secret_key_size = params.secret_key_size
         # Exact rather than an upper bound at this encoding: §3.11.3 pads every
@@ -274,16 +294,80 @@ class Falcon:
     # -- key generation and signing ----------------------------------------
 
     def keygen(self, seed: ArrayLike) -> tuple[Array, Array]:
-        """§3.8's `Keygen` — not yet implemented.
+        """Algorithm 4 — `(public, secret)` in §3.11.4's and §3.11.5's encodings.
 
-        The NTRU trapdoor and the ffLDL tree are
-        [#26](https://github.com/fractalyze/sig-frx/issues/26), gated on the
-        FFT's precision ([#178](https://github.com/fractalyze/sig-frx/issues/178)).
+        **Concrete, and it has to be.** Algorithm 5's restart loop underneath
+        has a data-dependent trip count, so a traced `seed` raises here rather
+        than somewhere further in. Key generation runs once per key and has no
+        batch axis to give up, which is why that costs nothing the repo's
+        batch-first rule is about — that rule is about verification.
+
+        **Lines 3-7 are deliberately not run.** Algorithm 4 builds `B̂` and the
+        ffLDL tree and puts both in `sk`, but §3.11.5 encodes `f`, `g` and `F`
+        and nothing else — so a seam that hands back bytes has nowhere to put
+        them, and they are rebuilt when the key is loaded. That is what
+        [`keygen.gram`](keygen.py), `ffldl` and `normalize` are for, and it is
+        signing's path ([#27](https://github.com/fractalyze/sig-frx/issues/27))
+        rather than this one. Building them here would be work thrown away.
+
+        **The restart loop is here rather than in `keygen`**, because a restart
+        needs fresh bytes and Algorithm 5 does not say where they come from. That
+        makes the expansion a scheme's decision, and this one is
+        `SHAKE256(seed ‖ attempt)` with the attempt number in the *input* rather
+        than in a longer squeeze, so no two attempts share a stream prefix.
+
+        **It does not reproduce the published KAT keys**, and that is a decision
+        rather than a gap: Falcon fixes no expansion, so matching those bytes
+        would mean transcribing the NIST harness's AES-256-CTR-DRBG and the
+        reference's own sampler and restart order, none of which is the
+        specification. What gates the output instead is the NTRU equation and
+        Algorithm 5's bounds — properties of the key rather than of the draw.
         """
-        raise NotImplementedError(
-            "Falcon key generation is sig-frx#26, gated on the FFT in #178; "
-            "verification takes a public key in §3.11.4's encoding from elsewhere"
+        n = self.params.n
+        material = np.asarray(seed, dtype=np.uint8)
+        if material.shape != (self.seed_size,):
+            raise ValueError(
+                f"keygen takes a {self.seed_size}-byte seed, got shape "
+                f"{tuple(material.shape)}"
+            )
+        for attempt in range(_MAX_ATTEMPTS):
+            drawn = keygen.ntru_gen(self._draw_bytes(material, attempt), n)
+            if drawn is None:
+                continue
+            # Line 9. `G` is dropped: it is the quarter of the trapdoor §3.11.5
+            # leaves for (3.35) to recover.
+            f, g, big_f, _ = drawn
+            h = np.asarray(keygen.public_key(f, g))
+            return (
+                fnp.asarray(encoding.pk_encode(h, n)),
+                fnp.asarray(encoding.sk_encode(f, g, big_f, n)),
+            )
+        raise RuntimeError(
+            f"Algorithm 5 drew {_MAX_ATTEMPTS} pairs at degree {n} without one "
+            "passing; the acceptance rate makes that impossible unless the draw "
+            "or one of its checks is wrong"
         )
+
+    def _draw_bytes(self, material: np.ndarray, attempt: int) -> np.ndarray:
+        """One attempt's draw, as `keygen.ATTEMPT_SHAPE` bytes off the seed.
+
+        **`hashlib` rather than [`hashes.shake256`](../../hashes.py)**, which is
+        the escape hatch that module names for a concrete caller — and here it is
+        not a preference. An attempt needs 65,536 bytes, because
+        `draw_polynomial` consumes `[4096, 8]` per polynomial at every degree,
+        and asking the device row for a squeeze that long compiles a program
+        sized to the output: measured at over six minutes on the CPU leg, ending
+        in a segmentation fault rather than a result.
+
+        Key generation is on the host and has no tracer to satisfy, so nothing
+        is given up. `verify`'s `hash_to_point` above keeps the device row, where
+        the squeeze is a couple of thousand bytes and the caller is traced.
+        """
+        label = attempt.to_bytes(_ATTEMPT_LABEL_BYTES, "big")
+        digest = hashlib.shake_256(material.tobytes() + label).digest(
+            int(np.prod(keygen.ATTEMPT_SHAPE))
+        )
+        return np.frombuffer(digest, dtype=np.uint8)
 
     def sign(
         self,

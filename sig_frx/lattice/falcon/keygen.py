@@ -618,6 +618,74 @@ def recover_g(f: ArrayLike, g: ArrayLike, big_f: ArrayLike) -> Any:
     )
 
 
+# What one attempt draws. `draw_polynomial` consumes `[4096, 8]` whatever the
+# degree — (3.29)'s sum is what makes one table serve every parameter set — and
+# an attempt draws `f` and `g`.
+ATTEMPT_SHAPE = (2, 4096, 8)
+
+
+def ntru_gen(stream: ArrayLike, degree: int) -> tuple[Any, Any, Any, Any] | None:
+    """Algorithm 5 once — `(f, g, F, G)`, or `None` where the standard restarts.
+
+    All three of the standard's rejections, and none of the retrying. **The
+    restart loop is the caller's**, for two reasons that point the same way: its
+    trip count is data, so it is a host loop and this module has no host loop to
+    put it in; and a restart needs *fresh bytes*, which means a seed expansion,
+    which is a scheme's decision and not Algorithm 5's — the standard says only
+    "restart". [`falcon.Falcon.keygen`](falcon.py) is where both live.
+
+    `stream` is [`ATTEMPT_SHAPE`](#ATTEMPT_SHAPE) bytes, `f`'s draw and then
+    `g`'s. Taking bytes rather than a seed is what keeps this deterministic in
+    its input and testable without a hash.
+
+    ## The order of the rejections is the standard's, and it is also the cheap one
+
+    Lines 7-11 come before line 12 in Algorithm 5, and what each costs shows
+    why: a measured run at `n = 512` took **16 rejections at line 10 costing
+    about 30 ms between them, then one accepted attempt costing 64 s**, nearly
+    all of it the solve. Reordering would put the expensive test first for
+    nothing.
+
+    Line 13's rejection is the one that cannot be moved earlier — the descent's
+    bottom is coprime for roughly half the pairs that reach it, and finding out
+    costs the descent. So a key costs a small number of *solves*, where it costs
+    a larger number of attempts.
+    """
+    draws = np.asarray(stream, dtype=np.uint8).reshape(ATTEMPT_SHAPE)
+    f = np.asarray(draw_polynomial(degree, draws[0]))
+    g = np.asarray(draw_polynomial(degree, draws[1]))
+
+    # Line 7. On the device whatever the caller is, since `arith.ntt` has no
+    # host form — the one step of an attempt that leaves the host.
+    if not bool(np.asarray(invertible(f))):
+        return None
+    # Lines 9-11.
+    if float(np.asarray(gram_schmidt_squared_norm(f, g))) > GRAM_SCHMIDT_BOUND:
+        return None
+    # Line 12, and line 13's `⊥` is `ok`.
+    bits = max(int(np.abs(f).max()), int(np.abs(g).max())).bit_length()
+    limbs_f, limbs_g, _, ok = ntru_solve(
+        to_limbs(f, bits), to_limbs(g, bits), bits, arith.Q
+    )
+    if not bool(np.asarray(ok)):
+        return None
+    return f, g, _from_limbs(limbs_f), _from_limbs(limbs_g)
+
+
+def _from_limbs(limbs: ArrayLike) -> Any:
+    """A reduced `[degree, limbs]` back to the small integers it holds.
+
+    `F` and `G` come out of [`reduce`](#reduce) at whatever limb budget the
+    answer needed, and what they hold at that point fits eight bits — §3.11.5
+    gives `F` exactly that. So this narrows to `int32` rather than staying wide,
+    and the encoder is what would notice if it did not.
+    """
+    rows = np.asarray(limbs)
+    return np.array(
+        [bigint.from_limbs(row, signed=True) for row in rows], dtype=np.int32
+    )
+
+
 # -- the lift back up ---------------------------------------------------------
 
 

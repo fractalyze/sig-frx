@@ -124,6 +124,19 @@ py_test(
 # `large`'s 900 s covers that worst run at 30%. `medium` would have been at 91%
 # — a target that passes on a workstation and flakes where it counts, which is
 # the whole of why a local number does not size a budget.
+#
+# Algorithm 4 adds one real key generation, and **the two legs do not pay the
+# same for it**: this target went 178.7 s to 236.2 s on the CPU leg and 291.8 s
+# to 380.7 s on the GPU one, measured with and without the case on one
+# workstation. The extra on GPU is the dispatches Algorithm 5's loop makes per
+# attempt — `invertible` is an opcode with no host form and there were 17
+# attempts — where the solve itself is host arithmetic either way. 380.7 s is
+# 42% of `large`.
+#
+# At `Falcon-512` alone, which is a budget decision rather than a coverage one:
+# the degree does not change what the case asserts, and a `Falcon-1024` key
+# measured 140 s against 46 s, because a solve can be spent and then thrown
+# away by line 13.
 py_test(
     name = "falcon_test",
     size = "large",
@@ -133,6 +146,8 @@ py_test(
         ":falcon_vectors",
         "//sig_frx:signature",
         "//sig_frx/lattice/falcon",
+        "//sig_frx/lattice/falcon:encoding",
+        "//sig_frx/lattice/falcon:keygen",
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),
