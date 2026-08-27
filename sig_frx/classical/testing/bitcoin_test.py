@@ -21,6 +21,7 @@ from absl.testing import absltest
 
 from sig_frx.classical import secp
 from sig_frx.classical.ecdsa import bitcoin, core
+from sig_frx.classical.testing import weierstrass_reference
 
 _CURVE = secp.SECP256K1
 
@@ -134,8 +135,7 @@ class KeyCodecTest(absltest.TestCase):
             [good[:1], np.frombuffer(b"\xff" * 32, dtype=np.uint8)]
         )
         # x = 5 has no point on secp256k1 (its rhs is a non-residue).
-        rhs = (pow(5, 3, _CURVE.p) + _CURVE.b) % _CURVE.p
-        self.assertNotEqual(pow(rhs, (_CURVE.p - 1) // 2, _CURVE.p), 1)
+        self.assertFalse(weierstrass_reference.has_point_at(_CURVE, 5))
         off_curve = np.concatenate(
             [good[:1], np.frombuffer((5).to_bytes(32, "big"), dtype=np.uint8)]
         )
