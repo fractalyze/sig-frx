@@ -33,13 +33,13 @@ vectors start from).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
-from sig_frx.threshold.group import PrimeOrderGroup
+from sig_frx.threshold.group import E, PrimeOrderGroup
 
 
 @runtime_checkable
-class Ciphersuite(PrimeOrderGroup, Protocol):
+class Ciphersuite(PrimeOrderGroup[E], Protocol[E]):
     """What RFC 9591 §6 instantiates per suite: the group and five hashes.
 
     The group half is [`PrimeOrderGroup`](group.py), and it is not this
@@ -137,8 +137,8 @@ def _require_nonzero_scalar(group: PrimeOrderGroup, identifier: int) -> None:
 
 
 def _validated_commitment_list(
-    group: PrimeOrderGroup, commitment_list: list[Commitment]
-) -> dict[int, tuple[Any, Any]]:
+    group: PrimeOrderGroup[E], commitment_list: list[Commitment]
+) -> dict[int, tuple[E, E]]:
     """§5.2's MUST-checks on the list: sorted, distinct, deserializable.
 
     Returns the decoded `(hiding, binding)` elements by identifier — the
@@ -190,10 +190,10 @@ def compute_binding_factors(
 
 
 def compute_group_commitment(
-    group: PrimeOrderGroup,
-    decoded_commitments: dict[int, tuple[Any, Any]],
+    group: PrimeOrderGroup[E],
+    decoded_commitments: dict[int, tuple[E, E]],
     binding_factors: dict[int, int],
-) -> Any:
+) -> E:
     """RFC 9591 §4.5: `Σ (D_i + [ρ_i]E_i)`, over already-decoded elements."""
     group_commitment = group.identity_element()
     for identifier, (hiding, binding_commitment) in decoded_commitments.items():
@@ -237,11 +237,11 @@ def derive_interpolating_value(
 
 
 def _signing_context(
-    cs: Ciphersuite,
+    cs: Ciphersuite[E],
     commitment_list: list[Commitment],
     group_public_key: bytes,
     message: bytes,
-) -> tuple[dict[int, tuple[Any, Any]], dict[int, int], Any, int]:
+) -> tuple[dict[int, tuple[E, E]], dict[int, int], E, int]:
     """The round-two prologue all three §5 surfaces share.
 
     Validate the list, bind, commit, challenge — one home so the surfaces
@@ -294,7 +294,7 @@ def sign_share(
 
 
 def aggregate(
-    cs: Ciphersuite,
+    cs: Ciphersuite[E],
     commitment_list: list[Commitment],
     message: bytes,
     group_public_key: bytes,
@@ -315,7 +315,7 @@ def aggregate(
 
 
 def verify_share(
-    cs: Ciphersuite,
+    cs: Ciphersuite[E],
     identifier: int,
     participant_public_key: bytes,
     signature_share: bytes,
@@ -393,7 +393,7 @@ def vss_commit(
 
 
 def vss_verify(
-    group: PrimeOrderGroup, identifier: int, share: int, commitment: list[bytes]
+    group: PrimeOrderGroup[E], identifier: int, share: int, commitment: list[bytes]
 ) -> bool:
     """RFC 9591 Appendix C.2: `[f(i)]B = Σ i^j·φ_j` — a participant's check."""
     _require_nonzero_scalar(group, identifier)

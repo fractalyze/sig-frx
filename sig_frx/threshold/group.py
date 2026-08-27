@@ -14,13 +14,19 @@ What travels, and how:
 
 - **Elements travel serialized** (`bytes`), in whatever encoding the group's
   standard fixes; the decoded form is the implementation's own and crosses
-  this seam only between an operation and its own arithmetic.
+  this seam only between an operation and its own arithmetic. That decoded
+  form is the Protocol's type parameter, so passing a `bytes` where an element
+  belongs is a type error rather than a convention a caller is trusted to keep.
 - **Scalars travel as Python integers** in `[0, order)`. `scalar_field` is
   the matching zk_dtypes field, which is what a formula core runs on;
   integers are what the wire and the identifiers are written in.
 - **`order` and `scalar_field` name the same modulus.** They are two members
   because the bounds checks want an `int` and the formula cores want the
-  dtype, not because an implementation may choose separately. One that lets
+  dtype, not because an implementation may choose separately. The dtype
+  stays `Any` where the element does not: it is a class at runtime, and the
+  tightest annotation available models none of the operators the field
+  arithmetic uses, so tightening it would reject that arithmetic rather than
+  check it. One that lets
   them disagree type-checks and then produces a wrong interpolation
   coefficient rather than an error — the curated substrates close this off by
   deriving the integer from the dtype (`classical/secp.py`,
@@ -43,11 +49,17 @@ Implementations are ordinary objects: no base class, no registration.
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
+
+# The decoded element. Unbound on purpose: nothing generic here touches an
+# element — it is passed back into group methods and never inspected — and a
+# bound would have to name a substrate, in the module whose whole contract is
+# to name none.
+E = TypeVar("E")
 
 
 @runtime_checkable
-class PrimeOrderGroup(Protocol):
+class PrimeOrderGroup(Protocol[E]):
     """The group operations and codecs a threshold protocol needs.
 
     Names nothing from any one protocol — see the module docstring for what
@@ -63,12 +75,12 @@ class PrimeOrderGroup(Protocol):
 
     def scalar_base_mult(self, scalar: int) -> bytes: ...
 
-    def deserialize_element(self, data: bytes) -> Any: ...
+    def deserialize_element(self, data: bytes) -> E: ...
 
-    def element_add(self, left: Any, right: Any) -> Any: ...
+    def element_add(self, left: E, right: E) -> E: ...
 
-    def element_scalar_mult(self, element: Any, scalar: int) -> Any: ...
+    def element_scalar_mult(self, element: E, scalar: int) -> E: ...
 
-    def identity_element(self) -> Any: ...
+    def identity_element(self) -> E: ...
 
-    def serialize_element(self, element: Any) -> bytes: ...
+    def serialize_element(self, element: E) -> bytes: ...
