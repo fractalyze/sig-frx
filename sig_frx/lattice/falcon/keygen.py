@@ -1,7 +1,7 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""Falcon key generation — Algorithm 5's draw, and Algorithm 6 under it.
+"""Falcon key generation — Algorithm 5's draw, Algorithm 6 under it, and the tree.
 
-Four sections, in the order key generation runs them rather than the order they
+Five sections, in the order key generation runs them rather than the order they
 were built:
 
 - **Algorithm 5** draws `f` and `g` from a discrete Gaussian and rejects the
@@ -11,17 +11,19 @@ were built:
 - **the base case** closes it at degree 1, where the NTRU equation is Bezout's.
 - **the lift and Babai's reduction** walk back up, each level substituting the
   level below's answer into its own and shortening what that produces.
+- **the ffLDL tree** (Algorithms 8 and 9) decomposes the basis's Gram matrix
+  down the same tower, and is what the sampler
+  ([#27](https://github.com/fractalyze/sig-frx/issues/27)) walks.
 
 The restart loop that drives Algorithm 5 lands with the caller that has a loop
-to put it in, and the `ffLDL` tree beside all of this is still to come — both
-[#26](https://github.com/fractalyze/sig-frx/issues/26).
+to put it in — [#26](https://github.com/fractalyze/sig-frx/issues/26).
 
-The four share almost nothing: the descent is `bigint`'s residues, the base
+The five share almost nothing: the descent is `bigint`'s residues, the base
 case is `bigint`'s limbs under a `fori_loop`, the walk up is a host loop over
-`fft`, and Algorithm 5 is `fft` and `arith` and a table built with `decimal`.
-They are one module because they are one operation, and the reason to split
-would be that the file stops being readable rather than that the sections
-differ.
+`fft`, Algorithm 5 is `fft` and `arith` and a table built with `decimal`, and
+the tree is `float64` with no integer in it at all. They are one module because
+they are one operation, and the reason to split would be that the file stops
+being readable rather than that the sections differ.
 
 ## The two directions are sized differently, and on purpose
 
@@ -98,6 +100,7 @@ would run once per level per channel rather than once per level.
 from __future__ import annotations
 
 import decimal
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
@@ -955,3 +958,196 @@ def ntru_solve(
         big_f, big_g, big_bits = reduce(lifted_f, lifted_g, level_f, level_g)
 
     return big_f, big_g, big_bits, ok
+
+
+# -- the ffLDL tree -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FalconTree:
+    """§3.8.3's tree, held one level per array rather than one node per object.
+
+    Algorithm 9 recurses, so the obvious form is a `(value, left, right)` object
+    per node — 2n−1 of them at `n = 1024`, each holding an array of a different
+    length. Every node at a depth does the same arithmetic on the same shape,
+    though, so a depth is one array and the tree is `log₂n` of them:
+
+    - `values[d]` is `L10` for every node at depth `d`, as `[2^d, n >> d]`.
+    - a node at index `i` has children `2i` and `2i + 1` at depth `d + 1`, and
+      `leaves` — `[n]`, real — follows the same rule one step past `values[-1]`.
+
+    So the leaf under the path `b₀b₁…b_{k−1}` is at index `Σ bⱼ·2^(k−1−j)`,
+    which is the path read as a binary number with the root's bit at the top.
+
+    What that buys is the difference between `log₂n` array operations and 2n−1
+    of them: at `n = 1024`, ten against 2,047. It costs the same memory — `n`
+    complex per level either way — and it is the layout a traced walk of the
+    tree would want, which is what
+    [#27](https://github.com/fractalyze/sig-frx/issues/27) does with it.
+
+    A tree out of [`ffldl`](#ffldl) is Algorithm 9's; one out of
+    [`normalize`](#normalize) is a *Falcon* tree, which is Algorithm 4's name
+    for the same shape after its leaves have been divided into `σ`. The
+    specification draws that distinction in §3.8.3 and so does this, by which
+    function returned it — the two differ in what a leaf means and in nothing a
+    type could carry.
+    """
+
+    values: tuple[Any, ...]
+    leaves: Any
+
+
+def gram(
+    f_hat: ArrayLike, g_hat: ArrayLike, big_f_hat: ArrayLike, big_g_hat: ArrayLike
+) -> tuple[Any, Any, Any]:
+    """Algorithm 4 line 4's `B̂ × B̂*` for `B = [[g, −f], [G, −F]]`, as `(G00, G01, G11)`.
+
+    Three entries rather than four because `G10` is `conj(G01)`: the product of
+    a matrix with its own adjoint is self-adjoint, and an adjoint is elementwise
+    conjugation in this domain — a root of `x^n = −1` lies on the unit circle,
+    so `f*(ζ) = conj(f(ζ))`. Handing back a fourth array would be handing back
+    something a caller has to keep in step with the first three.
+
+    **The diagonal is real, and is returned real.** `G00` is `|ĝ|² + |f̂|²`, a
+    sum of squared magnitudes; carrying it as a complex value with a zero
+    imaginary part would leave every step below deciding what to do with a
+    rounding artefact the algebra says is not there.
+
+    Takes each polynomial's transform rather than computing it, which is
+    [`arith`](arith.py)'s convention seen from the rational side. Signing needs
+    `B̂` itself — Algorithm 10 lines 3 and 7 — so a `gram` that transformed
+    internally would compute the same four transforms twice.
+    """
+    xnp = namespace(f_hat, g_hat, big_f_hat, big_g_hat)
+    small_f, small_g = xnp.asarray(f_hat), xnp.asarray(g_hat)
+    large_f, large_g = xnp.asarray(big_f_hat), xnp.asarray(big_g_hat)
+    # `(−f)·(−f)*` is `f·f*` and `(−f)·(−F)*` is `f·F*`, so both of `B`'s
+    # negations cancel out of the product and this reads as `f` and `F`. They
+    # are not decorative for having cancelled: they are what makes `det B` equal
+    # `f·G − g·F`, which is the quantity Algorithm 6 sets to `q`.
+    return (
+        (small_g * xnp.conj(small_g) + small_f * xnp.conj(small_f)).real,
+        small_g * xnp.conj(large_g) + small_f * xnp.conj(large_f),
+        (large_g * xnp.conj(large_g) + large_f * xnp.conj(large_f)).real,
+    )
+
+
+def ldl(g00: ArrayLike, g01: ArrayLike, g11: ArrayLike) -> tuple[Any, Any, Any]:
+    """Algorithm 8 — `(L10, D00, D11)` with `G = L·D·L*`, over `[..., n]` nodes.
+
+    `L` is unit lower triangular and `D` diagonal, so `L10` is the only entry of
+    either that is not a constant, and the three returned here are the whole
+    decomposition. `G10` is not taken as an argument for the reason
+    [`gram`](#gram) does not return it.
+
+    **`L10 ⊙ L10*` is `|L10|²`.** The standard writes the product; taking its
+    real part is the same number and it keeps `D11` real, which a Gram diagonal
+    is. Without it the recursion carries an imaginary part of about `2^-52` that
+    the algebra says is zero, and the leaves at the bottom would need it removed
+    anyway. The transcription in
+    [`falcon_reference`](testing/falcon_reference.py) computes the complex
+    product as written, so the two forms are held against each other rather than
+    the simplification being taken on trust.
+    """
+    xnp = namespace(g00, g01, g11)
+    diagonal = xnp.asarray(g00)
+    l10 = xnp.conj(xnp.asarray(g01)) / diagonal
+    d11 = xnp.asarray(g11) - (l10 * xnp.conj(l10)).real * diagonal
+    return l10, diagonal, d11
+
+
+def _weave(left: Any, right: Any) -> Any:
+    """Two `[m, ...]` levels as one `[2m, ...]`, left at `2i` and right at `2i+1`.
+
+    Algorithm 9's `leftchild` / `rightchild` written as an index: the left child
+    of node `i` is node `2i` of the level below. Interleaving rather than
+    concatenating is what makes the depth-first path of
+    [`FalconTree`](#FalconTree) a binary number.
+    """
+    xnp = namespace(left, right)
+    return xnp.reshape(
+        xnp.stack([left, right], axis=1), (2 * left.shape[0], *left.shape[1:])
+    )
+
+
+def ffldl(g00: ArrayLike, g01: ArrayLike, g11: ArrayLike) -> FalconTree:
+    """Algorithm 9 — the LDL tree of a self-adjoint `[n]` Gram matrix.
+
+    One iteration per depth instead of one call per node, which is the whole of
+    what [`FalconTree`](#FalconTree) buys. Nothing else is reshaped: each
+    iteration is Algorithm 8 followed by lines 8-10, and the loop ends where
+    line 3 does.
+
+    ## Why the children's Gram matrix is built the way it is
+
+    Lines 8-10 break each diagonal entry `D` into a matrix over the ring below.
+    `D` is self-adjoint, so (3.30) says its multiplication map has the
+    transformation matrix `[[d0, d1], [d1*, d0]]` for `(d0, d1) = splitfft(D)` —
+    the same `d0` twice on the diagonal, which is why the child's `G11` here is
+    literally the child's `G00` and not a second array computed alongside it.
+
+    The recursion therefore descends the same tower of rings
+    `Q[x]/(x^n + 1) ⊃ Q[x]/(x^(n/2) + 1) ⊃ …` that
+    [`descend`](#descend) walks over the integers. It is the only thing the two
+    halves of key generation have in common: this side is `float64` and holds no
+    integer, where that side is thousands of bits wide and holds nothing else.
+
+    ## The bottom is ring degree 2, and its children are numbers
+
+    Line 3 stops at `n = 2`, where `D00` and `D11` are the leaves rather than
+    subtrees — and there they are *rational constants*: `d* = d` in
+    `Q[x]/(x² + 1)` forces the `x` coefficient to zero, since the adjoint sends
+    `x` to `−x`. So the two evaluations of a leaf are the same number, and
+    `leaves` carries that number rather than the pair. Their mean is taken over
+    picking one, which would privilege an index over a fact;
+    [`keygen_test`](testing/keygen_test.py) is what pins that the two agree.
+
+    That also fixes the leaf count at `n` rather than `2n`: one rational leaf
+    stands for both dimensions the ring contributes, which is what makes the
+    leaves multiply to `q^n` for a basis of determinant `q` rather than to
+    `q^(2n)`.
+    """
+    xnp = namespace(g00, g01, g11)
+    if np.ndim(g00) != 1:
+        raise ValueError(f"a Gram matrix entry is one polynomial, not {np.ndim(g00)}")
+    degree = np.shape(g00)[-1]
+    if degree < 2 or degree & (degree - 1):
+        raise ValueError(f"degree {degree} is not a power of two above 1")
+
+    # The node axis the loop below runs on: a depth's `2^d` nodes are rows of
+    # one array, so a depth costs one array operation instead of `2^d` calls.
+    top = tuple(xnp.asarray(entry)[None, :] for entry in (g00, g01, g11))
+    values: list[Any] = []
+    while True:
+        l10, d00, d11 = ldl(*top)
+        values.append(l10)
+        if d00.shape[-1] == 2:
+            pairs = _weave(d00, d11)
+            return FalconTree(tuple(values), 0.5 * (pairs[..., 0] + pairs[..., 1]))
+        left_even, left_odd = fft.split(d00)
+        right_even, right_odd = fft.split(d11)
+        child_diagonal = _weave(left_even, right_even)
+        top = (child_diagonal, _weave(left_odd, right_odd), child_diagonal)
+
+
+def normalize(tree: FalconTree, sigma: float) -> FalconTree:
+    """Algorithm 4 lines 6-7 — `leaf ← σ/√leaf`, which is what makes it a Falcon tree.
+
+    `σ` is the parameter set's own, Table 3.3's 165.736 617 183 at `n = 512` and
+    168.388 571 447 at `n = 1024`, and it arrives as an argument rather than as
+    a constant here because it is the one quantity in this module that depends
+    on which set is being generated — unlike
+    [`GRAM_SCHMIDT_BOUND`](#GRAM_SCHMIDT_BOUND), which does not.
+
+    A leaf is a squared Gram-Schmidt norm of the basis, so this turns it into
+    the standard deviation the sampler rounds that coordinate with: a longer
+    orthogonalised vector is divided by, and rounds more tightly. Algorithm 11
+    line 2 states the range that comes out — `σ' ∈ [σmin, σmax]` — and it is
+    what Algorithm 5's line-5 rejection buys, since the largest leaf *is*
+    `‖B‖²_GS` and the smallest is `q²` over it.
+
+    Only the leaves move. `values` is `L10` per node and is untouched by
+    normalization, which is why the two trees share one type.
+    """
+    xnp = namespace(tree.leaves)
+    return FalconTree(tree.values, sigma / xnp.sqrt(xnp.asarray(tree.leaves)))

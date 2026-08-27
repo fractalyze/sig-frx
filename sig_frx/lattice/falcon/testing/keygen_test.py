@@ -37,6 +37,27 @@ of the arithmetic that produced it was approximate. Babai's rounding moves the
 Which is exactly why the width is asserted beside it. `q` is satisfied by pairs
 of every size, the un-reduced lift included, so a reduction that quietly did
 nothing would pass the equation and has to be caught somewhere else.
+
+## The tree is a third kind of thing, and it cannot be gated exactly
+
+Algorithms 8 and 9 hold no integers at all — the leaves are irrational before
+any implementation touches them — so the exact oracle above does not reach them
+and a tolerance is unavoidable. Agreement with the node-by-node recursion is
+therefore only half of it; the other half is three identities the leaves satisfy
+that a wrong tree would not, and that are checked against quantities computed
+some other way:
+
+- they multiply to `q^n` whenever the basis has determinant `q`, since they are
+  its squared Gram-Schmidt norms and one rational leaf stands for the two
+  dimensions its ring contributes;
+- the largest is `‖B‖²_GS`, which is Algorithm 5 line 5's own quantity arrived
+  at from the opposite direction — a closed form there, a decomposition here;
+- the smallest is `q²` over the largest.
+
+Those hold for any basis of determinant `q`, so they are checked on one built by
+hand rather than solved for. `f = 1` makes `f·G − g·F = q` solvable by
+substitution, which buys several degrees for the cost of none and isolates the
+tree from the whole integer half of this file.
 """
 
 from __future__ import annotations
@@ -48,6 +69,7 @@ from typing import Any
 
 import numpy as np
 from absl.testing import absltest, parameterized
+from frx import numpy as fnp
 
 from sig_frx.lattice.falcon import arith, bigint, fft, keygen
 from sig_frx.lattice.falcon.testing import falcon_reference
@@ -828,6 +850,354 @@ class NtruSolveTest(parameterized.TestCase):
                     MEASURED_WIDTHS[depth],
                     delta=max(8, MEASURED_WIDTHS[depth] // 20),
                 )
+
+
+_Basis = tuple[list[int], list[int], list[int], list[int]]
+
+
+def _basis(degree: int, seed: int) -> _Basis:
+    """`(f, g, F, G)` — four small polynomials, a full-rank matrix and nothing more.
+
+    Algorithms 8 and 9 ask only that their input be a full-rank self-adjoint
+    Gram matrix, which `B × B*` is for any `B` with a non-zero first row. The
+    cases that need a *trapdoor* say so and build one.
+    """
+    rng = np.random.default_rng(seed)
+    f, g, big_f, big_g = (rng.integers(-6, 7, size=degree).tolist() for _ in range(4))
+    return f, g, big_f, big_g
+
+
+def _determinant_q_basis(degree: int, seed: int) -> _Basis:
+    """A basis with `f·G − g·F = q`, built by substitution rather than solved.
+
+    `f = 1` reduces the NTRU equation to `G = q + g·F`, so any `g` and `F` give
+    a basis of determinant `q` for the cost of one negacyclic product. Its
+    geometry is nothing like a real key's — Algorithm 5 would reject it out of
+    hand — and that is the point: the identities it is used for follow from the
+    determinant alone, so a basis that isolates them from `ntru_solve` is a
+    better witness than one that ties the two together.
+    """
+    rng = np.random.default_rng(seed)
+    f = [1] + [0] * (degree - 1)
+    g = rng.integers(-6, 7, size=degree).tolist()
+    big_f = rng.integers(-20, 21, size=degree).tolist()
+    big_g = falcon_reference.exact_negacyclic_mul(g, big_f)
+    big_g[0] += arith.Q
+    return f, g, big_f, big_g
+
+
+def _transformed(basis: _Basis) -> tuple[Any, ...]:
+    """A coefficient-domain basis in the transform domain, host side.
+
+    No [`fft.double_precision`](../fft.py) anywhere, and that is the tree's
+    whole precision story rather than an omission: numpy is `complex128`
+    natively, so a host caller needs no scope. The traced case below opens one.
+    """
+    return tuple(fft.fft(polynomial) for polynomial in basis)
+
+
+def _tree(basis: _Basis) -> keygen.FalconTree:
+    """Algorithm 4 lines 3-5 over a coefficient-domain `(f, g, F, G)`."""
+    return keygen.ffldl(*keygen.gram(*_transformed(basis)))
+
+
+def _reference_tree(basis: _Basis) -> tuple[Any, Any, Any]:
+    """The same, recursed one node at a time."""
+    return falcon_reference.ffldl(falcon_reference.gram(*basis))
+
+
+def _flatten(tree: tuple[Any, Any, Any]) -> tuple[list[np.ndarray], np.ndarray]:
+    """The recursion's tree as one array per depth, plus its leaves whole.
+
+    Depth-first, left before right — which at a fixed depth is left-to-right, so
+    appending in visit order *is* the claim that node `i`'s children are `2i`
+    and `2i + 1`. Nothing here reorders, so a level that agrees with
+    [`keygen.FalconTree`](../keygen.py)'s has agreed about the layout too.
+
+    The leaves come back as the length-2 evaluations the specification's tree
+    holds, not as the single number the module reduces them to, so that the
+    reduction is something a test can check rather than share.
+    """
+    levels: dict[int, list[np.ndarray]] = {}
+    leaves: list[np.ndarray] = []
+
+    def walk(node: tuple[Any, Any, Any], depth: int) -> None:
+        value, left, right = node
+        levels.setdefault(depth, []).append(value)
+        if isinstance(left, tuple):
+            walk(left, depth + 1)
+            walk(right, depth + 1)
+        else:
+            leaves.extend((left, right))
+
+    walk(tree, 0)
+    return [np.stack(levels[depth]) for depth in sorted(levels)], np.stack(leaves)
+
+
+class GramTest(parameterized.TestCase):
+    """Algorithm 4 lines 2-4, against the matrix product written out."""
+
+    @parameterized.parameters(8, 32, 128)
+    def test_agrees_with_the_product_of_the_basis_and_its_adjoint(
+        self, degree: int
+    ) -> None:
+        basis = _basis(degree, degree)
+        got = keygen.gram(*_transformed(basis))
+        want = falcon_reference.gram(*basis)
+        for entry, (row, column) in zip(got, ((0, 0), (0, 1), (1, 1))):
+            with self.subTest(entry=f"G{row}{column}"):
+                np.testing.assert_allclose(entry, want[row][column], rtol=1e-9)
+
+    @parameterized.parameters(8, 32)
+    def test_the_entry_it_drops_is_the_conjugate_of_one_it_keeps(
+        self, degree: int
+    ) -> None:
+        """`G10` is dropped on a claim, and this is the claim.
+
+        Both halves are needed. That the product is self-adjoint is a property
+        of `B × B*` and is checked on the transcription, which computes all
+        four entries; that the module's `G01` is the one to conjugate is a
+        property of the module, and is checked against it.
+        """
+        basis = _basis(degree, degree + 1)
+        want = falcon_reference.gram(*basis)
+        np.testing.assert_allclose(want[1][0], np.conj(want[0][1]), rtol=1e-9)
+        _, g01, _ = keygen.gram(*_transformed(basis))
+        np.testing.assert_allclose(np.conj(g01), want[1][0], rtol=1e-9)
+
+    def test_the_diagonal_comes_back_real(self) -> None:
+        """A sum of squared magnitudes, typed as one.
+
+        Not cosmetic: `ldl` subtracts from `G11` and `ffldl` splits `D00`, so a
+        complex diagonal with a zero imaginary part would carry a rounding
+        artefact all the way to the leaves, where it would have to be removed
+        anyway and by then would look like something the algorithm produced.
+        """
+        g00, g01, g11 = keygen.gram(*_transformed(_basis(16, 3)))
+        self.assertFalse(np.iscomplexobj(g00))
+        self.assertFalse(np.iscomplexobj(g11))
+        self.assertTrue(np.iscomplexobj(g01), "the off-diagonal is not real")
+
+
+class LdlTest(absltest.TestCase):
+    """Algorithm 8, against what it decomposed and against the way it is written."""
+
+    def test_it_reconstructs_the_matrix_it_decomposed(self) -> None:
+        """`G = L·D·L*`, checked at all four entries including the dropped one.
+
+        The one claim Algorithm 8 makes that does not depend on how it is
+        written, so it catches a sign or a conjugate the transcription below
+        might share.
+        """
+        g00, g01, g11 = keygen.gram(*_transformed(_basis(32, 8)))
+        l10, d00, d11 = keygen.ldl(g00, g01, g11)
+
+        # `L·D·L*` for `L = [[1, 0], [L10, 1]]` and `D = diag(D00, D11)`.
+        np.testing.assert_allclose(d00, g00, rtol=1e-9)
+        np.testing.assert_allclose(d00 * np.conj(l10), g01, rtol=1e-9)
+        np.testing.assert_allclose(l10 * d00, np.conj(g01), rtol=1e-9)
+        np.testing.assert_allclose(
+            (l10 * np.conj(l10)).real * d00 + d11, g11, rtol=1e-9
+        )
+
+    def test_agrees_with_the_standards_own_expression(self) -> None:
+        """The module folds `L10 ⊙ L10*` to a real; the transcription does not."""
+        basis = _basis(32, 9)
+        g00, g01, g11 = keygen.gram(*_transformed(basis))
+        got = keygen.ldl(g00, g01, g11)
+        want = falcon_reference.ldl(falcon_reference.gram(*basis))
+        for entry, name in zip(zip(got, want), ("L10", "D00", "D11")):
+            with self.subTest(entry=name):
+                np.testing.assert_allclose(entry[0], entry[1], rtol=1e-9)
+
+    def test_the_decomposed_diagonal_stays_real(self) -> None:
+        g00, g01, g11 = keygen.gram(*_transformed(_basis(16, 10)))
+        _, d00, d11 = keygen.ldl(g00, g01, g11)
+        self.assertFalse(np.iscomplexobj(d00))
+        self.assertFalse(np.iscomplexobj(d11))
+
+
+class FfldlTest(parameterized.TestCase):
+    """Algorithm 9's recursion, held to the level-major form that replaces it."""
+
+    @parameterized.parameters(8, 32, 128)
+    def test_every_level_agrees_with_the_node_by_node_recursion(
+        self, degree: int
+    ) -> None:
+        """One array per depth against `2^d` calls, at every depth and not the last.
+
+        The shape is asserted beside the values because it is the reshaping's
+        whole content: a level that came out `[1, n]` at every depth would still
+        hold the right numbers somewhere.
+        """
+        basis = _basis(degree, degree + 2)
+        got = _tree(basis)
+        want_levels, want_leaves = _flatten(_reference_tree(basis))
+
+        self.assertLen(got.values, degree.bit_length() - 1)
+        self.assertLen(want_levels, len(got.values))
+        for depth, (level, want) in enumerate(zip(got.values, want_levels)):
+            with self.subTest(depth=depth):
+                self.assertEqual(np.shape(level), (2**depth, degree >> depth))
+                np.testing.assert_allclose(level, want, rtol=1e-9)
+        np.testing.assert_allclose(
+            got.leaves, want_leaves.real.mean(axis=-1), rtol=1e-9
+        )
+
+    def test_a_leaf_is_one_rational_and_not_two(self) -> None:
+        """`d* = d` in `Q[x]/(x² + 1)` forces the `x` term to zero.
+
+        So a leaf is a constant, its two evaluations are the same real number,
+        and the module keeps one where the specification's tree holds the pair.
+        That is a theorem rather than a rounding convenience, and this is where
+        it is checked instead of assumed — a split or an adjoint that was wrong
+        would leave the pair disagreeing while every level above still matched
+        its own transcription.
+        """
+        basis = _basis(64, 11)
+        _, pairs = _flatten(_reference_tree(basis))
+        scale = np.max(np.abs(pairs.real))
+        self.assertLess(np.max(np.abs(pairs.imag)) / scale, 1e-12)
+        self.assertLess(np.max(np.abs(pairs[:, 0] - pairs[:, 1])) / scale, 1e-12)
+        # The transcription carries the imaginary part it is entitled to and
+        # the module does not, so the module's side of this is a dtype: a leaf
+        # that arrived complex would mean the diagonal stopped being real
+        # somewhere above, which the mean would then average away rather than
+        # report.
+        self.assertFalse(np.iscomplexobj(np.asarray(_tree(basis).leaves)))
+
+    def test_the_traced_tree_is_the_host_one(self) -> None:
+        """The same source line on both namespaces, which is what `namespace` buys.
+
+        Traced, `complex64` would be 24 bits of mantissa against the 53 Falcon's
+        analysis assumes, so the precision is checked three ways rather than
+        trusted: [`fft`](../fft.py) refuses outside the scope at all, the dtype
+        is asserted per level, and the values are held against the host's answer
+        instead of against a tolerance of the device's own.
+        """
+        basis = _basis(16, 12)
+        host = _tree(basis)
+        with fft.double_precision():
+            device = keygen.ffldl(
+                *keygen.gram(
+                    *(fft.fft(fnp.asarray(p, dtype=np.float64)) for p in basis)
+                )
+            )
+            values = [np.asarray(level) for level in device.values]
+            leaves = np.asarray(device.leaves)
+
+        self.assertLen(values, len(host.values))
+        for depth, (level, want) in enumerate(zip(values, host.values)):
+            with self.subTest(depth=depth):
+                self.assertEqual(level.dtype, np.dtype("complex128"))
+                np.testing.assert_allclose(level, want, rtol=1e-9)
+        np.testing.assert_allclose(leaves, host.leaves, rtol=1e-9)
+
+    def test_it_refuses_what_it_has_no_tree_for(self) -> None:
+        for degree in (1, 3, 12):
+            with self.subTest(degree=degree):
+                entry = np.ones(degree)
+                with self.assertRaisesRegex(ValueError, "power of two"):
+                    keygen.ffldl(entry, entry.astype(complex), entry)
+
+    def test_it_refuses_a_batch_of_gram_matrices(self) -> None:
+        """One key at a time. A leading axis would be silently read as the tree's."""
+        entry = np.ones((2, 8))
+        with self.assertRaisesRegex(ValueError, "one polynomial"):
+            keygen.ffldl(entry, entry.astype(complex), entry)
+
+
+class FalconTreeTest(parameterized.TestCase):
+    """What the leaves are, which is the only thing the sampler reads them for."""
+
+    @parameterized.parameters(8, 16, 64, 256)
+    def test_the_leaves_are_the_bases_squared_gram_schmidt_norms(
+        self, degree: int
+    ) -> None:
+        """Three identities off one tree, none of them computed the tree's way.
+
+        `q^n` and not `q^(2n)`: the leaves are the `2n` squared Gram-Schmidt
+        norms of `B` over `Q`, but the bottom of the recursion is ring degree 2
+        and a self-adjoint element there is a constant — so one leaf stands for
+        both dimensions and there are `n` of them.
+
+        Summed in logs rather than multiplied, because the product itself is
+        `q^n` and overflows a double at any interesting degree.
+        """
+        basis = _determinant_q_basis(degree, degree)
+        f, g, big_f, big_g = basis
+        equation = falcon_reference.ntru_equation(f, g, big_f, big_g)
+        self.assertEqual(equation, [arith.Q] + [0] * (degree - 1), "not determinant q")
+
+        leaves = np.asarray(_tree(basis).leaves)
+        self.assertEqual(leaves.shape, (degree,))
+        self.assertTrue(np.all(leaves > 0.0), "a squared norm is positive")
+
+        self.assertAlmostEqual(
+            float(np.sum(np.log2(leaves))) / (degree * math.log2(arith.Q)),
+            1.0,
+            delta=1e-12,
+        )
+        # Algorithm 5 line 5 reaches this by a closed form over the transform;
+        # the tree reaches it by decomposing. They are the same number.
+        norm = float(np.asarray(keygen.gram_schmidt_squared_norm(f, g)))
+        self.assertAlmostEqual(float(leaves.max()) / norm, 1.0, delta=1e-9)
+        self.assertAlmostEqual(
+            float(leaves.max() * leaves.min()) / arith.Q**2, 1.0, delta=1e-9
+        )
+
+    def test_normalization_divides_the_standard_deviation_by_the_root(self) -> None:
+        """Algorithm 4 line 7, and that it touches nothing else.
+
+        `values` is what the sampler's line 10 multiplies by and normalization
+        has no business in it — which is why one type carries both trees, and
+        so is worth a case rather than a sentence.
+        """
+        sigma = falcon_reference.PARAMETER_SETS["Falcon-512"]["sigma"]
+        tree = _tree(_determinant_q_basis(32, 13))
+        normalized = keygen.normalize(tree, sigma)
+
+        np.testing.assert_allclose(
+            normalized.leaves, sigma / np.sqrt(np.asarray(tree.leaves)), rtol=1e-12
+        )
+        self.assertLen(normalized.values, len(tree.values))
+        for depth, (after, before) in enumerate(zip(normalized.values, tree.values)):
+            with self.subTest(depth=depth):
+                np.testing.assert_array_equal(after, before)
+
+    @parameterized.parameters(*falcon_reference.parameter_cases())
+    def test_the_samplers_range_is_what_the_rejection_buys(
+        self, name: str, **params: Any
+    ) -> None:
+        """Algorithm 11 line 2 asserts `σ' ∈ [σmin, σmax]`; here is why it holds.
+
+        It is not a property of the tree — it is Algorithm 5 line 5's rejection
+        seen through it. The largest leaf is `‖B‖²_GS`, which line 5 refuses
+        above [`GRAM_SCHMIDT_BOUND`](../keygen.py), and the smallest is `q²`
+        over the largest; `σ'` is `σ` over the root of a leaf, so both ends
+        follow from that one rejection and Table 3.3. No key is needed, and none
+        would make it more true — a key exhibits one pair of values inside the
+        interval where this is the interval. Measured for one anyway, at
+        `n = 512` on a trapdoor out of `ntru_solve` whose basis line 5 accepted:
+        `σ'` ran `[1.2786, 1.7481]`.
+
+        **The two ends are not the same kind of number, and the table hides it.**
+        `σmin` is not an independent parameter at all — it *is* `σ/(1.17√q)`,
+        the smallest `σ'` the rejection allows, published rounded to ten
+        significant figures. So it is checked as an equality rather than as a
+        bound: asserting `≥` fails at `n = 512` by 7e-11, which is the table's
+        own last digit and not a fact about Falcon. `σmax` is a genuine bound
+        with slack in it — the largest reachable `σ'` is 1.7492 and 1.7772
+        against a published 1.8205 — so that end is asserted as one.
+        """
+        del name
+        bound = keygen.GRAM_SCHMIDT_BOUND
+        # The extreme leaves a basis Algorithm 5 accepts can reach.
+        largest, smallest = bound, arith.Q**2 / bound
+        self.assertAlmostEqual(
+            params["sigma"] / math.sqrt(largest) / params["sigma_min"], 1.0, delta=1e-9
+        )
+        self.assertLess(params["sigma"] / math.sqrt(smallest), params["sigma_max"])
 
 
 if __name__ == "__main__":
