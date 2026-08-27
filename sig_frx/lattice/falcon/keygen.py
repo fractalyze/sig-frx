@@ -68,6 +68,7 @@ from typing import Any
 
 import frx.numpy as fnp
 import numpy as np
+from frx import lax
 from frx.typing import ArrayLike
 
 from sig_frx.lattice.falcon import bigint
@@ -186,3 +187,165 @@ def to_limbs(coefficients: ArrayLike, bits: int) -> Any:
         [bigint.to_limbs(int(value) % span, limbs) for value in values.reshape(-1)]
     )
     return fnp.asarray(packed.reshape(*values.shape, limbs))
+
+
+# -- the base case ---------------------------------------------------------
+
+
+def gcd_budget(bits: int) -> int:
+    """Steps the binary GCD needs for two magnitudes under `2^bits`.
+
+    Proved rather than sampled, and the two differ by enough to matter. Each
+    halving drops `bits(u) + bits(v)` by one and no subtraction ever raises it,
+    so there are at most `2·bits` halvings; a subtraction leaves an odd minus an
+    odd, which is even, so the step after one is always a halving and there are
+    at most one more of those than there are halvings. Hence `4·bits + 1`.
+
+    The measured worst case is well inside it — 13,454 steps against a bound of
+    25,209 over 300 random pairs at `n = 1024` — but sampling is the wrong tool
+    here, because a budget that is short does not fail loudly. It returns a
+    `(u, v)` that is simply not the Bezout pair, and only the equation check
+    downstream would notice. This is the same call
+    [`norm_bits`](#norm_bits) makes for widths, for the same reason.
+
+    Worth recording that the earlier probe on
+    [#26](https://github.com/fractalyze/sig-frx/issues/26) sized this loop at
+    `2·bits` — 12,604 at `n = 1024`. That is **below** the measured worst case,
+    so it was never a budget, and the probe says so itself: it was measuring
+    whether the loop compiles, not whether the number theory closes.
+
+    The bound is tight rather than merely safe: `f0` of 6,302 bits against
+    `g0 = 1` takes 12,603 steps against its own bound of 12,607.
+    """
+    return 4 * bits + 1
+
+
+def _is_odd(value: Any) -> Any:
+    """The low bit of the least significant limb."""
+    return (fnp.asarray(value)[..., 0] & np.uint32(1)) != 0
+
+
+def _pick(flag: Any, when_true: Any, when_false: Any) -> Any:
+    """`where` over a `[...]` flag and `[..., limbs]` operands."""
+    return fnp.where(flag[..., None], when_true, when_false)
+
+
+def base_case(f0: ArrayLike, g0: ArrayLike, bits: int, q: int) -> tuple[Any, Any, Any]:
+    """Algorithm 6 at degree 1: `(F, G, ok)` with `f0·G - g0·F = q`.
+
+    The bottom of [`descend`](#descend), where the ring is `Z` and the NTRU
+    equation is Bezout's. `f0·u + g0·v = 1` gives `F = -q·v` and `G = q·u`,
+    since `f0·G - g0·F = q·(f0·u + g0·v)`.
+
+    `ok` is false when `gcd(f0, g0) != 1`, which is not an error: Algorithm 5
+    draws a fresh `f` and `g` and descends again. It is also false when either
+    input is zero — a degenerate pair the quality checks above reject long
+    before the descent runs, and one the loop below cannot answer for, since a
+    zero is even forever and the halving branch it selects never terminates.
+
+    ## Binary, because the substrate has no divide and no positional multiply
+
+    HAC 14.61 over [`bigint`](bigint.py): shifts, adds, subtracts and one
+    magnitude compare, which is exactly the operation set
+    [`bigint`](bigint.py) chose to carry. Its step 2 — the common factor of two
+    — is not run, because a pair that shares one has `gcd != 1` and is a reject
+    rather than something to descend into; what step 2 guarantees for the rest
+    of the algorithm is instead asserted by `ok` and the parity argument below.
+
+    The four branches are exclusive and priority-ordered, so one traced step is
+    one of them rather than HAC's nested `while`s. Past termination the loop is
+    a no-op that matters: `u = 0` is even, so every remaining step takes the
+    first branch, which touches `u`, `A` and `B` and leaves `v`, `C` and `D` —
+    the three the answer is read from — where they settled.
+
+    ## Why the halved sum is always an integer
+
+    The branch that replaces `A` with `(A + y)/2` needs `A + y` even, and that
+    follows from `u = A·x + B·y` with `u` even and `x`, `y` not both even. Take
+    `x` odd and `y` even: then `u ≡ A (mod 2)`, so `A` is even, and the branch
+    is only reached when `A` and `B` are not both even — so `B` is odd, `B - x`
+    is even, and `A + y` is even. The other two parities go the same way. This
+    is where not running step 2 is paid for, and `ok` is what pays it.
+    """
+    leading = fnp.asarray(f0).shape[:-1]
+    # Registers hold a two's-complement value: `A` through `D` peak at `bits+2`
+    # and the sum halved above them at `bits+3`, measured over 60 pairs at
+    # `n = 1024`. A whole further limb of headroom costs two limbs of 421 and
+    # buys 15 bits against a peak that is otherwise checked only by the
+    # equation the tests assert.
+    limbs = bigint.limb_count(bits + 4 + bigint.LIMB_BITS)
+
+    def widen(value: ArrayLike) -> Any:
+        narrow = fnp.asarray(value)
+        pad = limbs - narrow.shape[-1]
+        fill = fnp.where(bigint.is_negative(narrow)[..., None], bigint.MASK, 0)
+        return fnp.concatenate(
+            [narrow, fnp.broadcast_to(fill, (*narrow.shape[:-1], pad))], axis=-1
+        ).astype(np.uint32)
+
+    def constant(value: int) -> Any:
+        packed = bigint.to_limbs(value % (1 << (limbs * bigint.LIMB_BITS)), limbs)
+        return fnp.broadcast_to(fnp.asarray(packed), (*leading, limbs))
+
+    signed_f, signed_g = widen(f0), widen(g0)
+    negative_f, negative_g = bigint.is_negative(signed_f), bigint.is_negative(signed_g)
+    zero = constant(0)
+    x = _pick(negative_f, bigint.sub(zero, signed_f), signed_f)
+    y = _pick(negative_g, bigint.sub(zero, signed_g), signed_g)
+
+    def body(_: Any, state: tuple[Any, ...]) -> tuple[Any, ...]:
+        u, v, a, b, c, d = state
+        u_odd, v_odd = _is_odd(u), _is_odd(v)
+        halve_u = ~u_odd
+        halve_v = u_odd & ~v_odd
+        subtract = u_odd & v_odd
+        take_u = subtract & bigint.at_least(u, v)
+        take_v = subtract & ~take_u
+
+        def halved(left: Any, right: Any) -> tuple[Any, Any]:
+            """`(left, right)` halved, keeping `left·x + right·y` where it was."""
+            plain = ~_is_odd(left) & ~_is_odd(right)
+            left_adjusted = _pick(plain, left, bigint.add(left, y))
+            right_adjusted = _pick(plain, right, bigint.sub(right, x))
+            return (
+                bigint.shift_right_signed(left_adjusted, 1),
+                bigint.shift_right_signed(right_adjusted, 1),
+            )
+
+        a_halved, b_halved = halved(a, b)
+        c_halved, d_halved = halved(c, d)
+        return (
+            _pick(
+                halve_u, bigint.shift_right(u, 1), _pick(take_u, bigint.sub(u, v), u)
+            ),
+            _pick(
+                halve_v,
+                bigint.shift_right(v, 1),
+                _pick(take_v, bigint.sub(v, u), v),
+            ),
+            _pick(halve_u, a_halved, _pick(take_u, bigint.sub(a, c), a)),
+            _pick(halve_u, b_halved, _pick(take_u, bigint.sub(b, d), b)),
+            _pick(halve_v, c_halved, _pick(take_v, bigint.sub(c, a), c)),
+            _pick(halve_v, d_halved, _pick(take_v, bigint.sub(d, b), d)),
+        )
+
+    one = constant(1)
+    start = (x, y, one, zero, zero, one)
+    _, gcd, _, _, u_coeff, v_coeff = lax.fori_loop(0, gcd_budget(bits), body, start)
+
+    # `C·|f0| + D·|g0| = 1`, and `|f0| = ±f0`, so the sign rides into the
+    # coefficient rather than being carried alongside it.
+    u_coeff = _pick(negative_f, bigint.sub(zero, u_coeff), u_coeff)
+    v_coeff = _pick(negative_g, bigint.sub(zero, v_coeff), v_coeff)
+
+    # Both even is `gcd >= 2` and so a reject either way, but it has to be
+    # tested rather than left to the loop: it is exactly HAC's step-2
+    # precondition, and without it the parity argument above fails and the
+    # halved sums stop being integers. The loop then runs on and can land on
+    # `gcd == 1` spuriously — `f0 = 44450, g0 = 624` does, and their gcd is 2.
+    coprime_parity = _is_odd(x) | _is_odd(y)
+    nonzero = ~fnp.all(x == 0, axis=-1) & ~fnp.all(y == 0, axis=-1)
+    ok = fnp.all(gcd == one, axis=-1) & coprime_parity & nonzero
+    big_f = bigint.sub(zero, bigint.mul_small(v_coeff, np.uint32(q)))
+    big_g = bigint.mul_small(u_coeff, np.uint32(q))
+    return big_f, big_g, ok
