@@ -50,10 +50,11 @@ that re-derived either has turned a boundary into a convention spread across the
 package. (Reversing a *host* list, as `safe_domain_separator` does to its limbs,
 is not that: it is a Python slice on values that have not reached a lane yet.)
 
-The convention also needs an *exit*, because eventually a consumer holds values
-with no lanes at all, and that is `undo_lane_reversal` — the one function here
-that moves data rather than placing it. It is exported for the same reason the
-two placement facts are private: a second module open-coding the reverse is the
+The convention also needs a way *across*, because a consumer eventually holds
+values with no lanes at all and the wire holds values in leanSpec's order. That
+is `undo_lane_reversal` and `apply_lane_reversal`, the two functions here that
+move data rather than place it. They are exported for the same reason the two
+placement facts are private: a second module open-coding the reverse is the
 spread this section exists to prevent.
 
 Nothing else about the two widths differs, so both come from one builder: width
@@ -198,7 +199,7 @@ def undo_lane_reversal(vector: Array) -> Array:
     which is what the codeword caller passes; the wire format
     ([`ssz.py`](ssz.py)) is what brought a stack.
     """
-    return _reverse_lanes(vector)
+    return vector[..., ::-1]
 
 
 def apply_lane_reversal(vector: Array) -> Array:
@@ -210,15 +211,8 @@ def apply_lane_reversal(vector: Array) -> Array:
 
     Same movement as `undo_lane_reversal`, and named apart from it on purpose: a
     reversal is its own inverse, so the only thing a call site can say about
-    which direction it means is which name it spells. The two are the reason
-    neither is a `[::-1]` at a call site — a reader who meets one knows a
-    convention is being crossed, where a slice reads as an ordering detail.
+    which direction it means is which name it spells.
     """
-    return _reverse_lanes(vector)
-
-
-def _reverse_lanes(vector: Array) -> Array:
-    """The reversal both directions share, spelled once."""
     return vector[..., ::-1]
 
 

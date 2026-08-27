@@ -61,8 +61,12 @@ class LeanSigParams:
     log_lifetime: int
     """`LOG_LIFETIME`: how many slots one key covers, as a power of two — and so
     how many levels the Merkle tree has, which is what sizes an authentication
-    path. Even, because the tree splits into a top and a bottom half of
-    `log_lifetime / 2` levels each."""
+    path.
+
+    Upstream additionally requires it even, because its tree splits into a top
+    and a bottom half of `log_lifetime / 2` levels each. That check arrives with
+    the split, which nothing here has yet — the same rule this module's docstring
+    states for a column, read one level down."""
 
     dimension: int
     """`DIMENSION`, the `v` of the papers: how many chains a signature commits to,
@@ -101,12 +105,6 @@ class LeanSigParams:
     security level is set here, and it is what the rate is `24 - capacity`."""
 
     def __post_init__(self) -> None:
-        # Upstream's other validator, and the tree layout is what rests on it: the
-        # lifetime splits into a top and a bottom half of equal height, so an odd
-        # exponent has no split.
-        if self.log_lifetime % 2 != 0:
-            raise ValueError(f"LOG_LIFETIME must be even, got {self.log_lifetime}")
-
         # Upstream's own validator. The decode's uniformity argument rests on it:
         # `0 .. PRIME - 2` is exactly `BASE^Z` groups of `Q` consecutive integers,
         # so every quotient is equally likely and `PRIME - 1` is the one value

@@ -33,12 +33,14 @@ So a non-canonical group would otherwise verify as a different, well-formed
 element — a malleability the seam cannot see, since both encodings are the same
 length. The range check is what upstream's exception becomes here.
 
-**Both rejections are a `bool` and not a raise**, for the reason
-[`encoding.py`](encoding.py) gives: a tracer has no exception to take. What is
-static is checked statically — a buffer of the wrong length is a shape error and
-raises here — and what depends on the bytes comes back beside the values, for the
-verifier to fold into its verdict. The values are meaningless where the flag is
-false, and nothing narrows them for a caller.
+**Both rejections come back as `ok` and not as a raise**, which is what every
+decoder in this repo does — [`falcon/encoding.py`](../../lattice/falcon/encoding.py)'s
+`sig_decode`, [`mldsa/encoding.py`](../../lattice/mldsa/encoding.py)'s
+`hint_bit_unpack` — and for the reason [`encoding.py`](encoding.py) states: a
+tracer has no exception to take. What is static is checked statically, so a
+buffer of the wrong length raises here; what depends on the bytes rides beside
+the values for the verifier to fold into its verdict. The values are meaningless
+where `ok` is false, and nothing narrows them for a caller.
 
 **Leading axes are free.** The last axis is the encoding and everything before it
 is the caller's: `[B, size]` is the batch `verify` takes, `[size]` the single
@@ -81,7 +83,7 @@ Four rather than the three the prime would fit in: SSZ has no 24-bit basic type,
 and `Fp` declares itself a `uint32`.
 """
 
-OFFSET_BYTES: Final = 4
+_OFFSET_BYTES: Final = 4
 """SSZ's `BYTES_PER_LENGTH_OFFSET`, and the width every offset below is read at.
 
 The same four as `P_BYTES` by coincidence rather than by construction — one is
@@ -106,10 +108,6 @@ class _SignatureLayout(NamedTuple):
 
     path_offset: int
     """The `path` field's offset, in bytes. The fixed part's whole length."""
-
-    sibling_offset: int
-    """The offset nested inside `path`, in bytes. `HashTreeOpening` has one
-    variable field and nothing ahead of it, so this is `OFFSET_BYTES` flat."""
 
     hashes_offset: int
     """The `hashes` field's offset, in bytes: past the fixed part and the path."""
@@ -140,11 +138,10 @@ def _signature_layout(params: LeanSigParams) -> _SignatureLayout:
     """
     siblings = params.log_lifetime * params.hash_length
     hashes = params.dimension * params.hash_length
-    path_offset = OFFSET_BYTES + params.randomness_length * P_BYTES + OFFSET_BYTES
+    path_offset = _OFFSET_BYTES + params.randomness_length * P_BYTES + _OFFSET_BYTES
     return _SignatureLayout(
         path_offset=path_offset,
-        sibling_offset=OFFSET_BYTES,
-        hashes_offset=path_offset + OFFSET_BYTES + siblings * P_BYTES,
+        hashes_offset=path_offset + _OFFSET_BYTES + siblings * P_BYTES,
         rho_at=1,
         siblings_at=path_offset // P_BYTES + 1,
         hashes_at=path_offset // P_BYTES + 1 + siblings,
@@ -168,6 +165,17 @@ def signature_size(params: LeanSigParams) -> int:
     2536 at `PROD` and 424 at `TEST`. The widely-quoted 3112 is the technical
     note's `v = 64` figure and describes no preset that ships
     ([`params.py`](params.py)).
+
+    **A module function where ML-DSA and Falcon make this a params property**
+    ([`ml_dsa.py`](../../lattice/mldsa/ml_dsa.py),
+    [`falcon.py`](../../lattice/falcon/falcon.py)), because the dependency runs
+    the other way here: their params live in the scheme module *above* the
+    encoding, while `params.py` is a leaf this module imports. A
+    `LeanSigParams.signature_size` would have to import `ssz` — a cycle — or
+    restate the container layout, which is the second copy this derives instead
+    of. So the leanSig scheme class will read `ssz.signature_size(params)` where
+    the others read `params.signature_size`, and that is chosen rather than
+    missed.
     """
     return _signature_layout(params).words * P_BYTES
 
@@ -181,22 +189,26 @@ def encode_public_key(
     holds them; the wire order is restored here.
     """
     xnp = namespace(root, parameter)
-    named = (
-        ("root", root, (params.hash_length,)),
-        ("parameter", parameter, (params.parameter_length,)),
+    return _bytes(
+        xnp.concatenate(
+            [
+                _words_of("root", root, (params.hash_length,)),
+                _words_of("parameter", parameter, (params.parameter_length,)),
+            ],
+            axis=-1,
+        )
     )
-    return _bytes(xnp.concatenate([_words_of(*entry) for entry in named], axis=-1))
 
 
 def decode_public_key(
     encoded: ArrayLike, *, params: LeanSigParams
 ) -> tuple[Array, Array, Array]:
-    """uint8 `[..., public_key_size]` -> `(root, parameter, well_formed)`.
+    """uint8 `[..., public_key_size]` -> `(root, parameter, ok)`.
 
     `root` and `parameter` come back lane-reversed and shaped `[..., n]` and
-    `[..., parameter_length]`. `well_formed` is `[...]`: every four-byte group
-    is a canonical residue. There are no offsets in this container, so that is
-    the whole of what the bytes can get wrong.
+    `[..., parameter_length]`. `ok` is `[...]`: every four-byte group is a
+    canonical residue. There are no offsets in this container, so that is the
+    whole of what the bytes can get wrong.
     """
     words = _words(encoded, public_key_size(params), "a public key")
     root, parameter = (
@@ -226,17 +238,14 @@ def encode_signature(
     """
     xnp = namespace(siblings, rho, hashes)
     layout = _signature_layout(params)
-    named = (
-        ("siblings", siblings, (params.log_lifetime, params.hash_length)),
-        ("rho", rho, (params.randomness_length,)),
-        ("hashes", hashes, (params.dimension, params.hash_length)),
+    sibling_words = _words_of(
+        "siblings", siblings, (params.log_lifetime, params.hash_length)
     )
-    sibling_words, rho_words, hash_words = (_words_of(*entry) for entry in named)
+    rho_words = _words_of("rho", rho, (params.randomness_length,))
+    hash_words = _words_of("hashes", hashes, (params.dimension, params.hash_length))
 
     def offset(value: int) -> Array:
-        return xnp.broadcast_to(
-            xnp.asarray(value, dtype=xnp.uint32), (*rho_words.shape[:-1], 1)
-        )
+        return xnp.full((*rho_words.shape[:-1], 1), value, dtype=xnp.uint32)
 
     return _bytes(
         xnp.concatenate(
@@ -244,7 +253,7 @@ def encode_signature(
                 offset(layout.path_offset),
                 rho_words,
                 offset(layout.hashes_offset),
-                offset(layout.sibling_offset),
+                offset(_OFFSET_BYTES),
                 sibling_words,
                 hash_words,
             ],
@@ -256,12 +265,12 @@ def encode_signature(
 def decode_signature(
     encoded: ArrayLike, *, params: LeanSigParams
 ) -> tuple[Array, Array, Array, Array]:
-    """uint8 `[..., signature_size]` -> `(siblings, rho, hashes, well_formed)`.
+    """uint8 `[..., signature_size]` -> `(siblings, rho, hashes, ok)`.
 
-    The three values come back in the shapes `encode_signature` takes, and
-    `well_formed` is `[...]`: the three offsets are the ones a valid signature
-    carries, and every field-bearing group is a canonical residue. Those are the
-    two ways bytes of the right length can fail to be a signature, and the module
+    The three values come back in the shapes `encode_signature` takes, and `ok`
+    is `[...]`: the three offsets are the ones a valid signature carries, and
+    every field-bearing group is a canonical residue. Those are the two ways
+    bytes of the right length can fail to be a signature, and the module
     docstring says why each is a flag rather than a raise.
 
     The offset words are deliberately outside the range check. They are `uint32`
@@ -280,17 +289,17 @@ def decode_signature(
     pinned = (
         (words[..., 0], layout.path_offset),
         (words[..., layout.rho_at + params.randomness_length], layout.hashes_offset),
-        (words[..., layout.siblings_at - 1], layout.sibling_offset),
+        (words[..., layout.siblings_at - 1], _OFFSET_BYTES),
     )
-    well_formed = _canonical(rho) & _canonical(siblings) & _canonical(hashes)
+    ok = _canonical(rho) & _canonical(siblings) & _canonical(hashes)
     for value, expected in pinned:
-        well_formed = well_formed & (value == np.uint32(expected))
+        ok = ok & (value == np.uint32(expected))
 
     return (
         _to_field(_digests(siblings, params)),
         _to_field(rho),
         _to_field(_digests(hashes, params)),
-        well_formed,
+        ok,
     )
 
 
@@ -299,6 +308,17 @@ def _words(encoded: ArrayLike, size: int, what: str) -> Array:
 
     The length is a shape and so a static fact, which is why a wrong one raises
     here where the content checks return a flag.
+
+    **The fifth reading of fixed-width fields out of a byte string**, after
+    [`wots.base_2b`](../wots.py), [`bytestring.low_bits`](../bytestring.py),
+    [`mldsa.unpack_fields`](../../lattice/mldsa/encoding.py) and
+    [`falcon.unpack_fields_high_first`](../../lattice/falcon/encoding.py), each of
+    which records itself against the ones before it. At width 32 this is not a
+    near-miss of `mldsa.unpack_fields` — it is the same operation. It is separate
+    anyway for two reasons: `hash/` has never imported from `lattice/`, since
+    what the two share lives at the top level; and the field here is whole bytes,
+    so a weighted sum over four of them does the work that one goes through a
+    bit expansion to do, on the path a batch of verifications runs.
     """
     xnp = namespace(encoded)
     values = xnp.asarray(encoded, dtype=xnp.uint8)
@@ -331,13 +351,10 @@ def _words_of(name: str, values: ArrayLike, shape: tuple[int, ...]) -> Array:
     """
     xnp = namespace(values)
     array = xnp.asarray(values)
-    if (
-        array.ndim < len(shape)
-        or tuple(array.shape[array.ndim - len(shape) :]) != shape
-    ):
+    if tuple(array.shape[-len(shape) :]) != shape:
         raise ValueError(f"{name} is {shape}, got shape {tuple(array.shape)}")
     words = poseidon.undo_lane_reversal(array).astype(np.uint32)
-    return words.reshape(*array.shape[: array.ndim - len(shape)], -1)
+    return words.reshape(*array.shape[: -len(shape)], -1)
 
 
 def _digests(words: Array, params: LeanSigParams) -> Array:

@@ -83,6 +83,40 @@ def to_leanspec_order(values: fnp.ndarray) -> list[int]:
     return to_canonical(values)[::-1]
 
 
+def lane_reversed_rows(rows: Sequence[Sequence[int]]) -> fnp.ndarray:
+    """leanSpec-ordered rows -> the `[count, n]` stack of lane-reversed vectors.
+
+    The stacked `lane_reversed`, which two suites want: a slot's chain ends and
+    an authentication path are both a run of digests the vectors seed one at a
+    time.
+
+    Built as one host array and moved once, rather than one array per row. That
+    is not a micro-optimization at these counts — a `PROD` signature is 46 chain
+    ends and 32 siblings, so the per-row form is 78 transfers per case.
+    """
+    return fnp.asarray(np.asarray(rows, dtype=np.int64)[:, ::-1].astype(F))
+
+
+def to_leanspec_rows(values: fnp.ndarray) -> list[list[int]]:
+    """A `[count, n]` lane-reversed stack -> rows of residues in upstream's order.
+
+    The mirror of `lane_reversed_rows`, and the row-wise `to_leanspec_order`.
+    One `asarray` up front, so a stack costs one transfer rather than one per
+    row.
+    """
+    return [to_canonical(row)[::-1] for row in np.asarray(values)]
+
+
+def on_leg(function: Callable[..., Any], jit: bool) -> Callable[..., Any]:
+    """`function` on the requested leg — traced through the shared jit cache.
+
+    Every suite here runs each case twice and picks the callable the same way.
+    Spelled once so `jitted`'s static argument — `params`, for all four — is not
+    restated at each of them.
+    """
+    return jitted(function, "params") if jit else function
+
+
 @lru_cache(maxsize=None)
 def jitted(function: Callable[..., Any], *static_argnames: str) -> Callable[..., Any]:
     """One jit wrapper per callable, shared across the cases that trace it.

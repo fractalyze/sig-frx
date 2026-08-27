@@ -50,30 +50,28 @@ def _hex(values: np.ndarray | fnp.ndarray) -> str:
     return bytes(np.asarray(values, dtype=np.uint8)).hex()
 
 
-def _rows(values: fnp.ndarray) -> list[list[int]]:
-    """A stack of lane-reversed digests -> canonical residues, leanSpec's order.
+def _seeded_rows(seed: int, count: int, params: LeanSigParams) -> list[list[int]]:
+    """The `count` digests a generated vector seeds, in leanSpec's order.
 
-    The per-row form of `harness.to_leanspec_order`, kept here because this is
-    the only suite that holds digests stacked — every other one gates a single
-    digest at a time.
+    The rule the vector states, spelled once: the encode case builds its operand
+    from this and the decode case compares against it, so the two cannot come to
+    gate different things.
     """
-    return [harness.to_leanspec_order(row) for row in values]
+    return [
+        list(operand_elements(params.hash_length, seed + index))
+        for index in range(count)
+    ]
 
 
-def _digests(seed: int, count: int, params: LeanSigParams) -> fnp.ndarray:
-    """`count` lane-reversed digests, seeded the way the generated vector says."""
-    return fnp.stack(
-        [
-            harness.lane_reversed(operand_elements(params.hash_length, seed + index))
-            for index in range(count)
-        ]
-    )
+def _mutated(position: int, replacement: int) -> np.ndarray:
+    """The first published signature with one word replaced, as a uint8 array."""
+    raw = bytearray(bytes.fromhex(PUBLISHED_SIGNATURES[0].encoded))
+    raw[position : position + ssz.P_BYTES] = replacement.to_bytes(ssz.P_BYTES, "little")
+    return np.frombuffer(bytes(raw), dtype=np.uint8)
 
 
 def _decode_signature(encoded: str, params: LeanSigParams, jit: bool) -> tuple:
-    decode = (
-        harness.jitted(ssz.decode_signature, "params") if jit else ssz.decode_signature
-    )
+    decode = harness.on_leg(ssz.decode_signature, jit)
     return decode(_buffer(encoded, jit), params=params)
 
 
@@ -87,7 +85,7 @@ def _both_presets(vectors: Sequence[PublicKeyVector]) -> list[tuple]:
     return [
         (f"{vector.name}_{preset}_{'traced' if jit else 'host'}", vector, params, jit)
         for vector in vectors
-        for preset, params in (("prod", PROD), ("test", TEST))
+        for preset, params in harness.PRESETS.items()
         for jit in (False, True)
     ]
 
@@ -99,19 +97,13 @@ class PublicKeyTest(parameterized.TestCase):
     def test_it_decodes_to_upstreams_elements(
         self, vector: PublicKeyVector, params: LeanSigParams, jit: bool
     ) -> None:
-        decode = (
-            harness.jitted(ssz.decode_public_key, "params")
-            if jit
-            else ssz.decode_public_key
-        )
+        decode = harness.on_leg(ssz.decode_public_key, jit)
 
-        root, parameter, well_formed = decode(
-            _buffer(vector.encoded, jit), params=params
-        )
+        root, parameter, ok = decode(_buffer(vector.encoded, jit), params=params)
 
         self.assertEqual(harness.to_leanspec_order(root), list(vector.root))
         self.assertEqual(harness.to_leanspec_order(parameter), list(vector.parameter))
-        self.assertTrue(bool(np.asarray(well_formed)))
+        self.assertTrue(bool(np.asarray(ok)))
         self.assertEqual(root.dtype, F)
         self.assertEqual(parameter.dtype, F)
         self.assertEqual(root.shape, (params.hash_length,))
@@ -121,11 +113,7 @@ class PublicKeyTest(parameterized.TestCase):
     def test_it_encodes_upstreams_elements_to_its_bytes(
         self, vector: PublicKeyVector, params: LeanSigParams, jit: bool
     ) -> None:
-        encode = (
-            harness.jitted(ssz.encode_public_key, "params")
-            if jit
-            else ssz.encode_public_key
-        )
+        encode = harness.on_leg(ssz.encode_public_key, jit)
 
         got = encode(
             harness.lane_reversed(vector.root),
@@ -144,16 +132,17 @@ class PublishedSignatureTest(parameterized.TestCase):
     def test_it_decodes_to_upstreams_layout(
         self, vector: PublishedSignature, jit: bool
     ) -> None:
-        siblings, rho, hashes, well_formed = _decode_signature(
-            vector.encoded, PROD, jit
-        )
+        siblings, rho, hashes, ok = _decode_signature(vector.encoded, PROD, jit)
 
-        self.assertTrue(bool(np.asarray(well_formed)))
+        self.assertTrue(bool(np.asarray(ok)))
         self.assertEqual(harness.to_leanspec_order(rho), list(vector.rho))
-        self.assertEqual(_rows(siblings)[0], list(vector.first_sibling))
-        self.assertEqual(_rows(siblings)[-1], list(vector.last_sibling))
-        self.assertEqual(_rows(hashes)[0], list(vector.first_hash))
-        self.assertEqual(_rows(hashes)[-1], list(vector.last_hash))
+        for values, index, expected in (
+            (siblings, 0, vector.first_sibling),
+            (siblings, -1, vector.last_sibling),
+            (hashes, 0, vector.first_hash),
+            (hashes, -1, vector.last_hash),
+        ):
+            self.assertEqual(harness.to_leanspec_order(values[index]), list(expected))
         self.assertEqual(siblings.shape, (PROD.log_lifetime, PROD.hash_length))
         self.assertEqual(hashes.shape, (PROD.dimension, PROD.hash_length))
         self.assertEqual(rho.shape, (PROD.randomness_length,))
@@ -166,11 +155,7 @@ class PublishedSignatureTest(parameterized.TestCase):
     ) -> None:
         siblings, rho, hashes, _ = _decode_signature(vector.encoded, PROD, jit)
 
-        encode = (
-            harness.jitted(ssz.encode_signature, "params")
-            if jit
-            else ssz.encode_signature
-        )
+        encode = harness.on_leg(ssz.encode_signature, jit)
         got = encode(siblings, rho, hashes, params=PROD)
 
         self.assertEqual(_hex(got), vector.encoded)
@@ -184,18 +169,18 @@ class GeneratedSignatureTest(parameterized.TestCase):
         self, vector: GeneratedSignature, jit: bool
     ) -> None:
         params = harness.PRESETS[vector.preset]
-        encode = (
-            harness.jitted(ssz.encode_signature, "params")
-            if jit
-            else ssz.encode_signature
-        )
+        encode = harness.on_leg(ssz.encode_signature, jit)
 
         got = encode(
-            _digests(vector.sibling_seed, params.log_lifetime, params),
+            harness.lane_reversed_rows(
+                _seeded_rows(vector.sibling_seed, params.log_lifetime, params)
+            ),
             harness.lane_reversed(
                 operand_elements(params.randomness_length, vector.rho_seed)
             ),
-            _digests(vector.hash_seed, params.dimension, params),
+            harness.lane_reversed_rows(
+                _seeded_rows(vector.hash_seed, params.dimension, params)
+            ),
             params=params,
         )
 
@@ -207,28 +192,20 @@ class GeneratedSignatureTest(parameterized.TestCase):
     ) -> None:
         params = harness.PRESETS[vector.preset]
 
-        siblings, rho, hashes, well_formed = _decode_signature(
-            vector.encoded, params, jit
-        )
+        siblings, rho, hashes, ok = _decode_signature(vector.encoded, params, jit)
 
-        self.assertTrue(bool(np.asarray(well_formed)))
+        self.assertTrue(bool(np.asarray(ok)))
         self.assertEqual(
             harness.to_leanspec_order(rho),
             list(operand_elements(params.randomness_length, vector.rho_seed)),
         )
         self.assertEqual(
-            _rows(siblings),
-            [
-                list(operand_elements(params.hash_length, vector.sibling_seed + level))
-                for level in range(params.log_lifetime)
-            ],
+            harness.to_leanspec_rows(siblings),
+            _seeded_rows(vector.sibling_seed, params.log_lifetime, params),
         )
         self.assertEqual(
-            _rows(hashes),
-            [
-                list(operand_elements(params.hash_length, vector.hash_seed + chain))
-                for chain in range(params.dimension)
-            ],
+            harness.to_leanspec_rows(hashes),
+            _seeded_rows(vector.hash_seed, params.dimension, params),
         )
 
 
@@ -240,9 +217,9 @@ class BatchTest(absltest.TestCase):
             [_buffer(vector.encoded, jit=True) for vector in PUBLISHED_SIGNATURES]
         )
 
-        siblings, rho, hashes, well_formed = ssz.decode_signature(stacked, params=PROD)
+        siblings, rho, hashes, ok = ssz.decode_signature(stacked, params=PROD)
 
-        self.assertEqual(well_formed.shape, (len(PUBLISHED_SIGNATURES),))
+        self.assertEqual(ok.shape, (len(PUBLISHED_SIGNATURES),))
         self.assertEqual(
             siblings.shape,
             (len(PUBLISHED_SIGNATURES), PROD.log_lifetime, PROD.hash_length),
@@ -252,8 +229,13 @@ class BatchTest(absltest.TestCase):
         )
         for index, vector in enumerate(PUBLISHED_SIGNATURES):
             self.assertEqual(harness.to_leanspec_order(rho[index]), list(vector.rho))
-            self.assertEqual(_rows(siblings[index])[0], list(vector.first_sibling))
-            self.assertEqual(_rows(hashes[index])[-1], list(vector.last_hash))
+            self.assertEqual(
+                harness.to_leanspec_order(siblings[index][0]),
+                list(vector.first_sibling),
+            )
+            self.assertEqual(
+                harness.to_leanspec_order(hashes[index][-1]), list(vector.last_hash)
+            )
 
     def test_a_batch_re_encodes_to_the_bytes_it_came_from(self) -> None:
         stacked = fnp.stack(
@@ -291,28 +273,16 @@ class RejectionTest(parameterized.TestCase):
     def test_it_reports_a_mutated_signature_as_malformed(
         self, position: int, replacement: int
     ) -> None:
-        raw = bytearray(bytes.fromhex(PUBLISHED_SIGNATURES[0].encoded))
-        raw[position : position + ssz.P_BYTES] = replacement.to_bytes(
-            ssz.P_BYTES, "little"
-        )
+        _, _, _, ok = ssz.decode_signature(_mutated(position, replacement), params=PROD)
 
-        _, _, _, well_formed = ssz.decode_signature(
-            np.frombuffer(bytes(raw), dtype=np.uint8), params=PROD
-        )
-
-        self.assertFalse(bool(np.asarray(well_formed)))
+        self.assertFalse(bool(np.asarray(ok)))
 
     def test_a_malformed_signature_still_comes_back_with_its_values(self) -> None:
         # Nothing narrows the values for a caller: a tracer has no `None`, and a
         # verifier folds the flag into its verdict rather than branching here.
-        raw = bytearray(bytes.fromhex(PUBLISHED_SIGNATURES[0].encoded))
-        raw[0:4] = (0).to_bytes(4, "little")
+        siblings, rho, hashes, ok = ssz.decode_signature(_mutated(0, 0), params=PROD)
 
-        siblings, rho, hashes, well_formed = ssz.decode_signature(
-            np.frombuffer(bytes(raw), dtype=np.uint8), params=PROD
-        )
-
-        self.assertFalse(bool(np.asarray(well_formed)))
+        self.assertFalse(bool(np.asarray(ok)))
         self.assertEqual(siblings.shape, (PROD.log_lifetime, PROD.hash_length))
         self.assertEqual(hashes.shape, (PROD.dimension, PROD.hash_length))
         self.assertEqual(rho.shape, (PROD.randomness_length,))
@@ -333,9 +303,9 @@ class RejectionTest(parameterized.TestCase):
         # The `TEST` preset's path under `PROD`, which is the mistake a preset
         # mix-up makes: it would otherwise produce a short buffer and fail at the
         # concatenate, naming no field.
-        siblings = _digests(10, TEST.log_lifetime, PROD)
+        siblings = harness.lane_reversed_rows(_seeded_rows(10, TEST.log_lifetime, PROD))
         rho = harness.lane_reversed(operand_elements(PROD.randomness_length, 3))
-        hashes = _digests(100, PROD.dimension, PROD)
+        hashes = harness.lane_reversed_rows(_seeded_rows(100, PROD.dimension, PROD))
 
         with self.assertRaisesRegex(ValueError, "siblings is"):
             ssz.encode_signature(siblings, rho, hashes, params=PROD)

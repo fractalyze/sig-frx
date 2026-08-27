@@ -212,26 +212,14 @@ py_library(
     ],
 )
 
-# `medium`, and alone in this file in being sized before any CI run exists — so
-# there is no worst run to size it from, only a ratio, which is the form a local
-# number survives in. On one GPU leg this costs **0.26x `mode_test`**, whose CI
-# figure above is 48.5 s: call it ~13 s, and expect 12-21 s once
-# ../../../../docs/reference/measurement.md's 0.8-1.4x local-to-CI band is paid.
-# The traced leg compiles no permutation at all — the whole codec is a reshape,
-# a shift and a sum — which is why it is the cheapest target here.
-#
-# That reads like `small`, and it is a bucket above anyway. The GPU leg has been
-# measured **2.3x** slower under load (the pair `tweakable_test` below records),
-# and 21 s at 2.3x is 48 s — 80% of `small`'s 60 s, well past the half where the
-# page moves a target up. Stacking those two is legitimate where stacking the
-# CPU executor factor would not be: that one is the CPU leg's, and this is the
-# GPU leg's own spread.
-#
-# **Re-check against two or three CI runs**, and read the page on why a merge
-# run cannot supply them — it replays this whole package as `(cached)`.
+# `small`: 5.7 s on the CPU leg and 5.8 s on the GPU one, the cheapest target in
+# the package because the codec compiles no permutation at all — the whole of it
+# is a reshape, a shift and a sum. Even at the 2.3x this GPU leg has been
+# measured at under load that is 13 s, a fifth of the 60 s budget, well inside
+# the half-a-budget rule in ../../../../docs/reference/measurement.md.
 py_test(
     name = "ssz_test",
-    size = "medium",
+    size = "small",
     srcs = ["ssz_test.py"],
     deps = [
         ":harness",
