@@ -19,6 +19,25 @@ py_library(
     ],
 )
 
+# Integers wider than a lane, for key generation's NTRU solver. Depends on no
+# scheme — not even on `:arith`, since it names no modulus of Falcon's — so it
+# is gated against Python `int` alone, before any of the recursion above it
+# exists. No `//sig_frx:arrays`: the module is traced-only on purpose, because
+# the host already has arbitrary-precision integers and a host spelling of this
+# would be a slower `int`.
+py_library(
+    name = "bigint",
+    srcs = [
+        "__init__.py",
+        "bigint.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
 # `Z_q` arithmetic and the NTT over q = 12289. Depends on no hash and on no
 # scheme logic: the transform is testable against exact integer arithmetic
 # before any of keygen, sign or verify exists, which is why it lands on its own.
