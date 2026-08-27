@@ -3,6 +3,23 @@ load("@sig_frx_pip//:requirements.bzl", "requirement")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
 py_test(
+    name = "dealt_key_test",
+    size = "medium",
+    srcs = ["dealt_key_test.py"],
+    data = ["@frost_secp256k1_sha256_vectors//file"],
+    deps = [
+        "//sig_frx/classical:secp",
+        "//sig_frx/classical/ecdsa:core",
+        "//sig_frx/threshold:frost",
+        "//sig_frx/threshold:group",
+        "//sig_frx/threshold:secp256k1_sha256",
+        "@rules_python//python/runfiles",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
     name = "frost_test",
     size = "medium",
     srcs = ["frost_test.py"],
