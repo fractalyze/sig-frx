@@ -33,11 +33,12 @@ vectors start from).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from sig_frx.threshold.group import PrimeOrderGroup
 
 
+@runtime_checkable
 class Ciphersuite(PrimeOrderGroup, Protocol):
     """What RFC 9591 §6 instantiates per suite: the group and five hashes.
 
@@ -46,14 +47,16 @@ class Ciphersuite(PrimeOrderGroup, Protocol):
     and what a second one reuses. What §6 adds is `h1`–`h5`, and those are
     Schnorr's: the binding factor, the challenge and the nonce derivation
     are FROST's own transcript, so a protocol with a different transcript
-    brings its own hashes to the same group rather than these.
+    brings its own hashes to the same group rather than these. Which seam a
+    function takes says which half it needs; the signatures are where that
+    is written down.
 
-    Three functions here take a hash — `nonce_generate`,
-    `compute_binding_factors`, `compute_challenge` — and the round-two
-    surfaces that reach them through `_signing_context`. Everything else,
-    including the whole of Appendix C's dealer, takes the group instead.
-    The boundary is visible in the signatures rather than stated here.
+    `element_size` is here rather than on the group because its readers are
+    each suite's own `verify`, unpacking that suite's `R ‖ z` — a §6.x
+    constant read off `self`, not a value crossing the group seam.
     """
+
+    element_size: int
 
     def h1(self, message: bytes) -> int: ...
 

@@ -128,7 +128,6 @@ class _GroupOnly:
     def __init__(self, suite: frost.Ciphersuite) -> None:
         self._suite = suite
         self.order = suite.order
-        self.element_size = suite.element_size
         self.scalar_field = suite.scalar_field
 
     def serialize_scalar(self, scalar: int) -> bytes:
@@ -165,44 +164,35 @@ class GroupSeamTest(parameterized.TestCase):
 
     @parameterized.named_parameters(*_PARAMS)
     def test_the_stand_in_is_a_group_and_not_a_ciphersuite(self, name: str) -> None:
-        v = _Vectors(name)
-        bare = _GroupOnly(v.cs)
-        for member in (
-            "order",
-            "element_size",
-            "scalar_field",
-            "serialize_scalar",
-            "deserialize_scalar",
-            "scalar_base_mult",
-            "deserialize_element",
-            "element_add",
-            "element_scalar_mult",
-            "identity_element",
-            "serialize_element",
-        ):
-            self.assertTrue(hasattr(bare, member), member)
+        bare = _GroupOnly(_SUITES[name][0])
+        self.assertIsInstance(bare, group.PrimeOrderGroup)
+        self.assertNotIsInstance(bare, frost.Ciphersuite)
         for absent in ("h1", "h2", "h3", "h4", "h5"):
             self.assertFalse(hasattr(bare, absent), absent)
 
     @parameterized.named_parameters(*_PARAMS)
-    def test_the_dealer_reproduces_its_vectors_without_a_transcript(
+    def test_every_group_taking_function_agrees_through_the_narrow_seam(
         self, name: str
     ) -> None:
-        v = _Vectors(name)
-        bare = _GroupOnly(v.cs)
-        shares = frost.secret_share_split(bare, v.secret, v.coefficients, 3)
-        self.assertEqual(dict(shares), v.shares)
-        commitment = frost.vss_commit(bare, v.secret, v.coefficients)
-        self.assertEqual(commitment[0], v.group_public_key)
-        for identifier, share in v.shares.items():
-            self.assertTrue(frost.vss_verify(bare, identifier, share, commitment))
-        self.assertFalse(frost.vss_verify(bare, 1, v.shares[1] + 1, commitment))
+        """Same answers with the transcript withheld as with the whole suite.
 
-    @parameterized.named_parameters(*_PARAMS)
-    def test_interpolation_and_encoding_need_no_transcript(self, name: str) -> None:
+        Equality rather than the published values, which `FrostTest` already
+        gates: what this asks is whether the narrowing holds, and a function
+        that reached for a hash raises `AttributeError` here instead of
+        answering.
+        """
         v = _Vectors(name)
         bare = _GroupOnly(v.cs)
         participants = sorted(v.shares)
+
+        self.assertEqual(
+            frost.secret_share_split(bare, v.secret, v.coefficients, 3),
+            frost.secret_share_split(v.cs, v.secret, v.coefficients, 3),
+        )
+        commitment = frost.vss_commit(bare, v.secret, v.coefficients)
+        self.assertEqual(commitment, frost.vss_commit(v.cs, v.secret, v.coefficients))
+        for identifier, share in v.shares.items():
+            self.assertTrue(frost.vss_verify(bare, identifier, share, commitment))
         for identifier in participants:
             self.assertEqual(
                 frost.derive_interpolating_value(bare, participants, identifier),
@@ -211,6 +201,22 @@ class GroupSeamTest(parameterized.TestCase):
         self.assertEqual(
             frost.encode_group_commitment_list(bare, v.commitment_list),
             frost.encode_group_commitment_list(v.cs, v.commitment_list),
+        )
+        decoded = {
+            entry.identifier: (
+                bare.deserialize_element(entry.hiding),
+                bare.deserialize_element(entry.binding),
+            )
+            for entry in v.commitment_list
+        }
+        factors = dict.fromkeys(decoded, 1)
+        self.assertEqual(
+            v.cs.serialize_element(
+                frost.compute_group_commitment(bare, decoded, factors)
+            ),
+            v.cs.serialize_element(
+                frost.compute_group_commitment(v.cs, decoded, factors)
+            ),
         )
 
 
