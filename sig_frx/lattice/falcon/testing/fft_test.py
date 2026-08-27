@@ -14,13 +14,16 @@ tolerances differ by degree: at `n = 1024` the *reference* is the noisy side.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from absl.testing import absltest, parameterized
+from frx import numpy as fnp
 
-from sig_frx.lattice.falcon import fft
+from sig_frx.lattice.falcon import arith, fft
 
-# Falcon's two degrees, plus a small one whose values are checkable by hand.
-DEGREES = (8, 512, 1024)
+# Falcon's own degrees, plus a small one whose values are checkable by hand.
+DEGREES = (8, *arith.DEGREES)
 
 
 def _roots(n: int) -> np.ndarray:
@@ -30,32 +33,47 @@ def _roots(n: int) -> np.ndarray:
 
 def _evaluate(coefficients: np.ndarray, points: np.ndarray) -> np.ndarray:
     """`Σ_j c_j · p^j` at each `p`, written the way the definition reads."""
-    return np.array([np.polyval(coefficients[::-1], p) for p in points])
+    return np.polyval(coefficients[::-1], points)
 
 
 class ScopeTest(absltest.TestCase):
-    def test_every_entry_point_refuses_outside_the_scope(self) -> None:
+    """The scope is the traced path's problem, and only the traced path's."""
+
+    def _entry_points(self, one: Any) -> tuple[tuple[str, Any], ...]:
+        return (
+            ("fft", lambda: fft.fft(one)),
+            ("ifft", lambda: fft.ifft(one)),
+            ("split", lambda: fft.split(one)),
+            ("merge", lambda: fft.merge(one, one)),
+        )
+
+    def test_a_traced_call_refuses_outside_the_scope(self) -> None:
         """Narrowing to `complex64` is a warning in frx and an error here.
 
         24 bits of mantissa against 53 is not a tolerance this transform can
         absorb — it is the difference the security analysis rests on — so it
         must not be reachable by forgetting a context manager.
         """
-        one = np.ones(8)
-        for name, call in (
-            ("fft", lambda: fft.fft(one)),
-            ("ifft", lambda: fft.ifft(one)),
-            ("split", lambda: fft.split(one)),
-            ("merge", lambda: fft.merge(one, one)),
-            ("roots", lambda: fft.roots(8)),
-        ):
+        for name, call in self._entry_points(fnp.ones(8)):
             with self.subTest(name):
                 with self.assertRaisesRegex(RuntimeError, "double precision"):
                     call()
 
-    def test_the_scope_actually_reaches_double(self) -> None:
+    def test_a_host_call_needs_no_scope(self) -> None:
+        """numpy is `complex128` natively, so the host path pays nothing.
+
+        This is the path key generation and signing are on
+        ([`conventions.md`](../../../../docs/reference/conventions.md)), which
+        is why the scope is not a precondition of the module.
+        """
+        for name, call in self._entry_points(np.ones(8)):
+            with self.subTest(name):
+                call()
+        self.assertEqual(fft.fft(np.ones(8)).dtype, np.dtype("complex128"))
+
+    def test_the_scope_reaches_double_when_traced(self) -> None:
         with fft.double_precision():
-            self.assertEqual(fft.fft(np.ones(8)).dtype, np.dtype("complex128"))
+            self.assertEqual(fft.fft(fnp.ones(8)).dtype, np.dtype("complex128"))
 
 
 class TransformTest(parameterized.TestCase):
@@ -79,8 +97,7 @@ class TransformTest(parameterized.TestCase):
         f = np.random.default_rng(2).standard_normal(n)
         with fft.double_precision():
             got = np.asarray(fft.ifft(fft.fft(f)))
-        np.testing.assert_allclose(got.real, f, rtol=0, atol=1e-12)
-        self.assertLess(np.max(np.abs(got.imag)), 1e-12)
+        np.testing.assert_allclose(got, f, rtol=0, atol=1e-12)
 
 
 class SplitMergeTest(parameterized.TestCase):

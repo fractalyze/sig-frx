@@ -1,10 +1,10 @@
 load("@rules_python//python:defs.bzl", "py_library")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 
-# `Z_q` arithmetic and the NTT over q = 12289. Depends on no hash and on no
-# scheme logic: the transform is testable against exact integer arithmetic
-# before any of keygen, sign or verify exists, which is why it lands on its own.
-# frx is a dependency because the transform is its `lax.ntt` opcode.
+# The complex FFT over `Q[x]/(x^n + 1)`, which is keygen and signing's transform
+# the way `arith` is verification's. Reached through the array namespace's own
+# `fft`, so it depends on `//sig_frx:arrays` to read that namespace off its
+# arguments rather than naming one.
 py_library(
     name = "fft",
     srcs = [
@@ -13,11 +13,16 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//sig_frx:arrays",
         requirement("frx"),
         requirement("numpy"),
     ],
 )
 
+# `Z_q` arithmetic and the NTT over q = 12289. Depends on no hash and on no
+# scheme logic: the transform is testable against exact integer arithmetic
+# before any of keygen, sign or verify exists, which is why it lands on its own.
+# frx is a dependency because the transform is its `lax.ntt` opcode.
 py_library(
     name = "arith",
     srcs = [
