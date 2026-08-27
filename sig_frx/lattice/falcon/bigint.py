@@ -307,6 +307,33 @@ def shift_right(a: ArrayLike, bits: int) -> Any:
     return (moved >> np.uint32(part)) | ((upper << np.uint32(LIMB_BITS - part)) & MASK)
 
 
+@lru_cache(maxsize=None)
+def _high_bits(limbs: int, bits: int) -> np.ndarray:
+    """Limbs with the top `min(bits, limbs*15)` bits of the word set."""
+    total = limbs * LIMB_BITS
+    width = min(bits, total)
+    return _frozen(to_limbs(((1 << width) - 1) << (total - width), limbs))
+
+
+def shift_right_signed(a: ArrayLike, bits: int) -> Any:
+    """`a >> bits` reading the limbs as two's complement — an arithmetic shift.
+
+    [`shift_right`](#shift_right) fills from the top with zeros, which halves a
+    non-negative value and turns a negative one into something enormous. Halving
+    is what a binary GCD does to its Bezout coefficients, and those are signed
+    from the second step onwards, so the signed form is its own operation rather
+    than a flag on the unsigned one.
+
+    The sign fill is a constant here because `bits` is known at trace time; a
+    data-dependent one would need the mask gathered per value, and no caller
+    wants that (the same argument [`shift_right`](#shift_right) makes).
+    """
+    values = fnp.asarray(a)
+    logical = shift_right(values, bits)
+    fill = _high_bits(values.shape[-1], bits)
+    return fnp.where(is_negative(values)[..., None], logical | fill, logical)
+
+
 def shift_left(a: ArrayLike, bits: int) -> Any:
     """`a << bits` over limbs, modulo `2^(L*15)`, for a `bits` known at trace time."""
     values = fnp.asarray(a)
