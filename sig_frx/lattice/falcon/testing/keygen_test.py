@@ -1,5 +1,11 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""The descent is checked coefficient by coefficient against Python integers.
+"""Key generation against Python integers, and against the distribution itself.
+
+Two halves with two different oracles. Algorithm 6's recursion and its base case
+are exact integer arithmetic, so the oracle is exact integer arithmetic.
+Algorithm 5's draw is a *distribution*, which no single output can be right or
+wrong about — so it is checked against `exp(-x²/2σ²)` normalised, over enough
+samples that the sampling noise is smaller than the thing being asserted.
 
 Every level of Algorithm 6's recursion is compared against
 [`falcon_reference.field_norm`](falcon_reference.py), which is the definition
@@ -32,7 +38,7 @@ from typing import Any
 import numpy as np
 from absl.testing import absltest, parameterized
 
-from sig_frx.lattice.falcon import arith, bigint, keygen
+from sig_frx.lattice.falcon import arith, bigint, fft, keygen
 from sig_frx.lattice.falcon.testing import falcon_reference
 
 # The widths #26 measured a random key's descent to reach, at `n = 1024`. The
@@ -42,11 +48,14 @@ MEASURED_WIDTHS = (4, 11, 24, 51, 102, 203, 406, 807, 1593, 3151, 6302)
 
 
 def _draw(degree: int, seed: int) -> list[int]:
-    """§3.8.2's `f`: `4096/n` draws summed, so the variance is degree-independent.
+    """A cheap stand-in for the draw, for the tests that are not about the draw.
 
-    A rounded continuous Gaussian rather than the reference's table sampler.
-    They differ in tail shape and not in variance, and it is variance that sets
-    the coefficient magnitude the descent's widths follow from.
+    A rounded continuous Gaussian, where [`keygen.draw_polynomial`](../keygen.py)
+    is the real discrete one. Deliberately not that: the descent's tests want a
+    coefficient distribution that is fixed, seeded and independent of the
+    sampler, so that a change to the sampler cannot move the width corridor they
+    assert. The two differ in tail shape and not in variance, and it is variance
+    that sets the widths.
     """
     rng = np.random.default_rng(seed)
     draws = rng.normal(0.0, 1.43300980528773, size=(degree, 4096 // degree))
@@ -358,6 +367,154 @@ class BaseCaseTest(parameterized.TestCase):
         # checked rather than only the equation.
         self.assertLessEqual(abs(value_f), 2 * arith.Q * abs(f0))
         self.assertLessEqual(abs(value_g), 2 * arith.Q * abs(g0))
+
+
+class DrawTest(absltest.TestCase):
+    """The Gaussian draw, against the distribution it is supposed to be."""
+
+    def test_the_table_tops_out_at_the_tail(self) -> None:
+        """The last row is a sentinel no uniform reaches, which caps the count.
+
+        A magnitude is how many thresholds a uniform passes, so the table needs
+        one more row than the largest magnitude — set at exactly `2^62`, which
+        a `62`-bit uniform cannot reach. Without it the count could run one past
+        the tail the table was built for.
+        """
+        table = keygen._draw_table()
+        top = (int(table[-1, 0]) << (keygen.DRAW_BITS // 2)) | int(table[-1, 1])
+        self.assertEqual(top, 1 << keygen.DRAW_BITS)
+        below = (int(table[-2, 0]) << (keygen.DRAW_BITS // 2)) | int(table[-2, 1])
+        self.assertLess(below, 1 << keygen.DRAW_BITS)
+
+    def test_the_tail_is_past_the_quantisation(self) -> None:
+        """Truncating the table must cost less than rounding it does."""
+        sigma = keygen.DRAW_SIGMA
+        tail = keygen._draw_table().shape[0] - 1
+        weight = math.exp(-(tail**2) / (2 * sigma**2))
+        self.assertLess(weight, 2.0**-keygen.DRAW_BITS)
+
+    def test_the_draw_matches_the_discrete_gaussian(self) -> None:
+        """Compared against `exp(-x²/2σ²)` normalised, not against itself.
+
+        `degree = 4096` is one draw per coefficient, which is the only shape
+        that exposes the sampler rather than a sum of samplers.
+        """
+        rng = np.random.default_rng(0)
+        counts: dict[int, int] = {}
+        rounds = 24
+        for _ in range(rounds):
+            stream = rng.integers(0, 256, size=(4096, 8), dtype=np.uint8)
+            for value in np.asarray(keygen.draw_polynomial(4096, stream)).tolist():
+                counts[value] = counts.get(value, 0) + 1
+        total = rounds * 4096
+        sigma = keygen.DRAW_SIGMA
+        partition = sum(math.exp(-x * x / (2 * sigma**2)) for x in range(-60, 61))
+        noise = 4.0 / math.sqrt(total)
+        for x in range(-5, 6):
+            ideal = math.exp(-x * x / (2 * sigma**2)) / partition
+            with self.subTest(x=x):
+                self.assertAlmostEqual(counts.get(x, 0) / total, ideal, delta=noise)
+
+    def test_summing_scales_the_variance_by_the_degree(self) -> None:
+        """`4096/n` draws per coefficient is what makes one table serve every set.
+
+        The standard's `σ_{f,g}` depends on `n`; this sampler does not, and the
+        sum is where the dependence comes from. A draw that ignored the sum
+        would still look Gaussian and would have the wrong width.
+        """
+        rng = np.random.default_rng(1)
+        for degree in (512, 1024, 4096):
+            samples = np.concatenate(
+                [
+                    np.asarray(
+                        keygen.draw_polynomial(
+                            degree, rng.integers(0, 256, size=(4096, 8), dtype=np.uint8)
+                        )
+                    )
+                    for _ in range(24)
+                ]
+            )
+            ideal = (4096 // degree) * keygen.DRAW_SIGMA**2
+            with self.subTest(degree=degree):
+                self.assertAlmostEqual(float(samples.var()), ideal, delta=0.15 * ideal)
+
+
+class QualityCheckTest(parameterized.TestCase):
+    """Algorithm 5's two rejections, against the specification's own form."""
+
+    @parameterized.parameters(8, 16, 64)
+    def test_the_gram_schmidt_norm_agrees_with_the_reference(self, degree: int) -> None:
+        rng = np.random.default_rng(degree)
+        pair = [
+            np.asarray(
+                keygen.draw_polynomial(
+                    4096, rng.integers(0, 256, size=(4096, 8), dtype=np.uint8)
+                )
+            )[:degree]
+            for _ in range(2)
+        ]
+        with fft.double_precision():
+            got = float(np.asarray(keygen.gram_schmidt_squared_norm(*pair)))
+        want = falcon_reference.gram_schmidt_squared_norm(
+            pair[0].tolist(), pair[1].tolist(), arith.Q
+        )
+        self.assertAlmostEqual(got / want, 1.0, delta=1e-9)
+
+    def test_the_first_row_wins_when_the_basis_is_badly_skewed(self) -> None:
+        """Both rows are read, and a test drawing only random pairs reads one.
+
+        A near-zero `f` and `g` make the *second* row enormous and the first
+        tiny; scaling them up inverts which one the maximum comes from. Without
+        a case on each side, dropping either from the maximum still passes.
+        """
+        small = [1] + [0] * 7
+        with fft.double_precision():
+            tiny = float(np.asarray(keygen.gram_schmidt_squared_norm(small, [0] * 8)))
+            large = float(
+                np.asarray(
+                    keygen.gram_schmidt_squared_norm(
+                        [4000] * 8, [0, 4000, 0, 0, 0, 0, 0, 0]
+                    )
+                )
+            )
+        self.assertAlmostEqual(tiny, arith.Q**2, delta=1.0)  # second row
+        self.assertGreater(large, 8 * 4000**2)  # first row
+
+    @parameterized.parameters(*arith.DEGREES)
+    def test_invertibility_agrees_with_direct_evaluation(self, degree: int) -> None:
+        rng = np.random.default_rng(degree + 7)
+        drawn = np.asarray(
+            keygen.draw_polynomial(
+                degree, rng.integers(0, 256, size=(4096, 8), dtype=np.uint8)
+            )
+        )
+        self.assertEqual(
+            bool(np.asarray(keygen.invertible(drawn))),
+            falcon_reference.is_invertible(drawn.tolist(), arith.Q),
+        )
+
+    @parameterized.parameters(*arith.DEGREES)
+    def test_one_zero_evaluation_is_enough_to_refuse(self, degree: int) -> None:
+        """The case that separates "every evaluation" from "some evaluation".
+
+        A random draw is invertible and the zero polynomial is not, and both
+        answer the same under `all` and under `any` — so a check reading `any`
+        passes a test built from those two. What tells them apart is a
+        polynomial that is not zero and whose transform has a single zero in it,
+        which is what a non-unit actually looks like: built by inverting a
+        transform that has one.
+        """
+        transform = np.ones(degree, dtype=np.int32)
+        transform[degree // 3] = 0
+        singular = arith.centered(arith.intt(arith.to_field(transform)))
+        singular = np.asarray(singular).astype(np.int64)
+
+        self.assertTrue(np.any(singular != 0), "the polynomial itself is not zero")
+        self.assertFalse(bool(np.asarray(keygen.invertible(singular))))
+        self.assertFalse(falcon_reference.is_invertible(singular.tolist(), arith.Q))
+        self.assertFalse(
+            bool(np.asarray(keygen.invertible(np.zeros(degree, np.int64))))
+        )
 
 
 if __name__ == "__main__":

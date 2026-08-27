@@ -51,7 +51,9 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":arith",
         ":bigint",
+        ":fft",
         requirement("frx"),
         requirement("numpy"),
     ],

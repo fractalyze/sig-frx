@@ -63,6 +63,7 @@ would run once per level per channel rather than once per level.
 
 from __future__ import annotations
 
+import decimal
 from functools import lru_cache
 from typing import Any
 
@@ -71,7 +72,7 @@ import numpy as np
 from frx import lax
 from frx.typing import ArrayLike
 
-from sig_frx.lattice.falcon import bigint
+from sig_frx.lattice.falcon import arith, bigint, fft
 
 
 def norm_bits(bits: int, degree: int) -> int:
@@ -365,3 +366,126 @@ def base_case(f0: ArrayLike, g0: ArrayLike, bits: int, q: int) -> tuple[Any, Any
     big_f = bigint.sub(zero, bigint.mul_small(v_coeff, np.uint32(q)))
     big_g = bigint.mul_small(u_coeff, np.uint32(q))
     return big_f, big_g, ok
+
+
+# -- Algorithm 5: the draw and the three checks -------------------------------
+
+# §3.8.2's `σ_{f,g} = 1.17·sqrt(q/2n)` at `n = 4096`, which is the width one
+# draw carries. A coefficient at degree `n` is the sum of `4096/n` of them, so
+# its variance is `(4096/n)·σ²` — the standard's `σ_{f,g}` for that degree,
+# reached with a single table rather than one per parameter set.
+DRAW_SIGMA = 1.43300980528773
+
+# Bits of the uniform each draw consumes. The table below is exact well past
+# this, so it is the quantisation alone that separates the sampled distribution
+# from `D_{Z,σ,0}` — under `2^-62` per draw, and under `2^-50` over the 4096
+# draws a key costs. That is the *keygen* requirement, which is that `f` and `g`
+# have the right geometry; the sampler #27 needs for signing is a different
+# object with a Rényi bound of its own, and this is not it.
+DRAW_BITS = 62
+_HALF_BITS = DRAW_BITS // 2
+
+
+@lru_cache(maxsize=None)
+def _draw_table() -> np.ndarray:
+    """The CDT for `|X|`, as `[tail + 1, 2]` halves of a `DRAW_BITS` threshold.
+
+    Two 31-bit columns rather than one 62-bit value, because a lane is 32 bits
+    and the comparison has to be exact — a table quantised to what a lane holds
+    would be the dominant error rather than a negligible one.
+
+    Built with `decimal` rather than `math.exp`: a `float64` exponential is
+    accurate to `2^-52`, which would put the table's own error two orders above
+    the quantisation it is meant to be below.
+    """
+    with decimal.localcontext() as context:
+        context.prec = 80
+        variance = decimal.Decimal(DRAW_SIGMA) ** 2
+        weights, tail = [decimal.Decimal(1)], 0
+        while True:
+            tail += 1
+            weight = 2 * (-decimal.Decimal(tail) ** 2 / (2 * variance)).exp()
+            weights.append(weight)
+            if weight < decimal.Decimal(2) ** -(DRAW_BITS + 2):
+                break
+        total = sum(weights)
+        scale = decimal.Decimal(2) ** DRAW_BITS
+        running = decimal.Decimal(0)
+        rows = []
+        for weight in weights:
+            running += weight
+            threshold = int(running / total * scale)
+            rows.append((threshold >> _HALF_BITS, threshold & ((1 << _HALF_BITS) - 1)))
+    return _frozen_table(np.array(rows, dtype=np.uint32))
+
+
+def _frozen_table(table: np.ndarray) -> np.ndarray:
+    table.flags.writeable = False
+    return table
+
+
+def draw_polynomial(degree: int, stream: ArrayLike) -> Any:
+    """`4096/n` discrete Gaussian draws summed per coefficient, as `[degree]`.
+
+    `stream` is `[4096, 8]` bytes — eight per draw, of which `DRAW_BITS` choose
+    the magnitude and one chooses the sign.
+
+    The magnitude is a table lookup and not a rejection loop, which is what lets
+    the draw be traced at all: a cumulative table turns "sample until accepted"
+    into "count the thresholds this uniform passes".
+    """
+    if 4096 % degree:
+        raise ValueError(f"degree {degree} does not divide 4096")
+    bytes_ = fnp.asarray(stream).astype(np.uint32)
+    words = bytes_[..., :4] | (bytes_[..., 4:] << np.uint32(8))
+    high = (
+        (words[..., 0] << np.uint32(23)) | (words[..., 1] << np.uint32(7))
+    ) & np.uint32((1 << _HALF_BITS) - 1)
+    low = ((words[..., 2] << np.uint32(15)) | words[..., 3]) & np.uint32(
+        (1 << _HALF_BITS) - 1
+    )
+    sign = (bytes_[..., 7] >> np.uint32(7)) & np.uint32(1)
+
+    table = _draw_table()
+    passed = (high[:, None] > table[None, :, 0]) | (
+        (high[:, None] == table[None, :, 0]) & (low[:, None] >= table[None, :, 1])
+    )
+    magnitude = fnp.sum(passed, axis=-1, dtype=np.int32)
+    values = fnp.where(sign.astype(bool), -magnitude, magnitude)
+    return fnp.sum(values.reshape(degree, 4096 // degree), axis=-1, dtype=np.int32)
+
+
+def gram_schmidt_squared_norm(f: ArrayLike, g: ArrayLike) -> Any:
+    """Algorithm 5 line 5's quantity — the basis's Gram-Schmidt norm, squared.
+
+    `max(‖(g, −f)‖², q²·‖(qf̄/(f f̄ + g ḡ), qḡ/(f f̄ + g ḡ))‖²)`, which is the
+    larger of the two rows of the NTRU basis after orthogonalisation. The second
+    row is a division in the FFT domain, so this is where key generation needs
+    the rational transform rather than the integer one — and a traced caller
+    needs [`fft.double_precision`](fft.py) around it.
+    """
+    left, right = fnp.asarray(f).astype(np.float64), fnp.asarray(g).astype(np.float64)
+    left_hat, right_hat = fft.fft(left), fft.fft(right)
+    energy = (left_hat * fnp.conj(left_hat) + right_hat * fnp.conj(right_hat)).real
+    # Named for what each is built from, not for which of `F` and `G` it becomes:
+    # the second row pairs `ḡ` with `F` and `f̄` with `G`, and only the sum of
+    # their squares is read here — so a name asserting the pairing would be a
+    # claim this function neither needs nor checks.
+    from_g = fft.ifft(fnp.conj(right_hat) / energy).real
+    from_f = fft.ifft(fnp.conj(left_hat) / energy).real
+    first_row = fnp.sum(left * left) + fnp.sum(right * right)
+    second_row = (arith.Q**2) * (fnp.sum(from_g * from_g) + fnp.sum(from_f * from_f))
+    return fnp.maximum(first_row, second_row)
+
+
+def invertible(f: ArrayLike) -> Any:
+    """Algorithm 5 line 6 — whether `f` is a unit in `Z_q[x]/(x^n + 1)`.
+
+    The public key is `g/f mod q`, so this is the condition that one exists.
+    Read off the transform: a product of evaluations is zero exactly when one of
+    them is, and `arith.ntt` is what evaluates. This is the one step of key
+    generation that has no host form at all — the opcode does not have one — so
+    it lands on the device whatever the caller is.
+    """
+    residues = arith.ntt(arith.to_field(fnp.asarray(f)))
+    return fnp.all(fnp.asarray(residues).astype(np.uint32) != np.uint32(0))

@@ -206,6 +206,7 @@ py_test(
         ":falcon_reference",
         "//sig_frx/lattice/falcon:arith",
         "//sig_frx/lattice/falcon:bigint",
+        "//sig_frx/lattice/falcon:fft",
         "//sig_frx/lattice/falcon:keygen",
         requirement("absl_py"),
         requirement("numpy"),
