@@ -25,6 +25,7 @@ from absl.testing import absltest, parameterized
 from sig_frx import arrays
 from sig_frx.classical import secp
 from sig_frx.classical.testing import ecdsa_wycheproof_vectors as wycheproof
+from sig_frx.classical.testing import weierstrass_reference
 from sig_frx.testing import kat
 
 # secp256k1 only, and not by preference. A traced array can hold a point type
@@ -70,18 +71,6 @@ def _scalars(curve: secp.Curve, count: int) -> list[int]:
 def _identity_and_generator(curve: secp.Curve) -> np.ndarray:
     """`[0·G, 1·G]` — the identity and a real point, in one jacobian batch."""
     return secp.multiple(curve, [curve.n, 1], _generators(curve, 2))
-
-
-def _has_a_point(curve: secp.Curve, x: int) -> bool:
-    """Whether some `y` satisfies the curve equation at `x`, by Euler.
-
-    Python integers and `pow`, sharing nothing with the substrate under test —
-    the square root, the field dtype, the Montgomery storage. A lift held
-    against its own `sqrt` would agree with itself on a wrong root, which is
-    the failure a parity check between two paths also cannot see.
-    """
-    rhs = (pow(x, 3, curve.p) + curve.a * x + curve.b) % curve.p
-    return rhs == 0 or pow(rhs, (curve.p - 1) // 2, curve.p) == 1
 
 
 def _lift_fixture(count: int) -> tuple[list[int], list[int]]:
@@ -226,7 +215,9 @@ class LiftParityTest(parameterized.TestCase):
         for holding each leg against Wycheproof's own verdicts.
         """
         xs, parities = _lift_fixture(24)
-        want_ok = [_has_a_point(curve, x) for x in xs]
+        # Python integers and `pow`, sharing nothing with the substrate under
+        # test — the square root, the field dtype, the Montgomery storage.
+        want_ok = [weierstrass_reference.has_point_at(curve, x) for x in xs]
         # The fixture is only worth running if it reaches both answers.
         self.assertIn(True, want_ok)
         self.assertIn(False, want_ok)

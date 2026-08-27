@@ -12,6 +12,20 @@ py_library(
     ],
 )
 
+# The short Weierstrass curve equation over Python integers — the independent
+# form the secp substrate's lift and membership checks are held to. Depends on
+# `secp` for the curve constants only: the arithmetic here shares nothing with
+# the field dtypes it cross-checks, which is the whole point of it.
+py_library(
+    name = "weierstrass_reference",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "weierstrass_reference.py",
+    ],
+    deps = ["//sig_frx/classical:secp"],
+)
+
 py_test(
     name = "eddsa_test",
     size = "medium",
@@ -102,6 +116,7 @@ py_test(
     srcs = ["secp_device_test.py"],
     deps = [
         ":ecdsa_wycheproof_vectors",
+        ":weierstrass_reference",
         "//sig_frx:arrays",
         "//sig_frx/classical:secp",
         "//sig_frx/testing:kat",
@@ -177,6 +192,7 @@ py_test(
     size = "medium",
     srcs = ["ecdsa_test.py"],
     deps = [
+        ":weierstrass_reference",
         "//sig_frx/classical:secp",
         "//sig_frx/classical/ecdsa:core",
         "//sig_frx/testing:kat",
@@ -203,6 +219,7 @@ py_test(
     size = "medium",
     srcs = ["bitcoin_test.py"],
     deps = [
+        ":weierstrass_reference",
         "//sig_frx/classical:secp",
         "//sig_frx/classical/ecdsa:bitcoin",
         "//sig_frx/classical/ecdsa:core",

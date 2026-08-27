@@ -29,6 +29,7 @@ from absl.testing import absltest
 
 from sig_frx.classical import secp
 from sig_frx.classical.ecdsa import core
+from sig_frx.classical.testing import weierstrass_reference
 from sig_frx.testing import kat
 
 # RFC 6979 Appendix A.2.5: the P-256 example key pair.
@@ -289,7 +290,9 @@ def _curve_point_from(curve: secp.Curve, start: int) -> tuple[int, int]:
     """
     x = start
     while True:
-        rhs = (pow(x, 3, curve.p) + curve.a * x + curve.b) % curve.p
+        rhs = weierstrass_reference.rhs(curve, x)
+        # Both curves are `p = 3 mod 4`, so this exponent is a root when one
+        # exists; squaring it back is what decides whether one does.
         root = pow(rhs, (curve.p + 1) // 4, curve.p)
         if root * root % curve.p == rhs:
             return x, root
@@ -300,8 +303,7 @@ def _non_residue_r(curve: secp.Curve) -> int:
     """The first `r >= 1` whose curve equation rhs has no square root."""
     r = 1
     while True:
-        rhs = (pow(r, 3, curve.p) + curve.a * r + curve.b) % curve.p
-        if rhs != 0 and pow(rhs, (curve.p - 1) // 2, curve.p) != 1:
+        if not weierstrass_reference.has_point_at(curve, r):
             return r
         r += 1
 
