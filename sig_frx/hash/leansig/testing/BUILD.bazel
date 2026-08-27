@@ -165,3 +165,39 @@ py_test(
         requirement("zk_dtypes"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# The wire format is the one leanSig layer the fixtures archive covers, so these
+# are transcribed from a published file rather than produced by a driver — except
+# the `TEST` preset, which the archive does not carry. Both provenances, and the
+# recipe for the second, live in the module.
+py_library(
+    name = "ssz_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "ssz_vectors.py",
+    ],
+)
+
+# `small`: 5.7 s on the CPU leg and 5.8 s on the GPU one, the cheapest target in
+# the package because the codec compiles no permutation at all — the whole of it
+# is a reshape, a shift and a sum. Even at the 2.3x this GPU leg has been
+# measured at under load that is 13 s, a fifth of the 60 s budget, well inside
+# the half-a-budget rule in ../../../../docs/reference/measurement.md.
+py_test(
+    name = "ssz_test",
+    size = "small",
+    srcs = ["ssz_test.py"],
+    deps = [
+        ":harness",
+        ":mode_vectors",
+        ":ssz_vectors",
+        "//sig_frx/hash/leansig:field",
+        "//sig_frx/hash/leansig:params",
+        "//sig_frx/hash/leansig:ssz",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ] + GPU_PLUGIN_DEPS,
+)

@@ -17,8 +17,7 @@ to the scheme, for the reason [`poseidon.py`](../poseidon.py) gives.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from typing import Any
+from collections.abc import Sequence
 
 import frx.numpy as fnp
 import numpy as np
@@ -44,11 +43,6 @@ from sig_frx.hash.leansig.testing.mode_vectors import operand_elements
 def _digits(codeword: str) -> list[int]:
     """A vector's codeword string as the digits it stands for."""
     return [int(digit) for digit in codeword]
-
-
-def _on(function: Callable[..., Any], jit: bool) -> Callable[..., Any]:
-    """`function` on the requested leg — traced through the shared jit cache."""
-    return harness.jitted(function, "params") if jit else function
 
 
 def _reference_decode(
@@ -138,7 +132,9 @@ class AbortingDecodeTest(parameterized.TestCase):
         preset = harness.PRESETS[vector.preset]
         elements = harness.lane_reversed(vector.elements)
 
-        digits, accepted = _on(encoding.aborting_decode, jit)(elements, params=preset)
+        digits, accepted = harness.on_leg(encoding.aborting_decode, jit)(
+            elements, params=preset
+        )
 
         self.assertEqual(bool(accepted), vector.digits is not None)
         if vector.digits is not None:
@@ -203,8 +199,10 @@ class MessageHashTest(parameterized.TestCase):
         operands = _operands(vector, preset)
         expected = _digits(vector.digits)
 
-        digits, accepted = _on(encoding.message_hash, jit)(*operands, params=preset)
-        on_layer_digits, on_layer = _on(encoding.target_sum_encode, jit)(
+        digits, accepted = harness.on_leg(encoding.message_hash, jit)(
+            *operands, params=preset
+        )
+        on_layer_digits, on_layer = harness.on_leg(encoding.target_sum_encode, jit)(
             *operands, params=preset
         )
 

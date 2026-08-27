@@ -106,3 +106,24 @@ py_library(
         requirement("zk_dtypes"),
     ],
 )
+
+# The wire format: SSZ over KoalaBear residues, and the two rejections a decode
+# owes a verifier. It reaches `poseidon` only for the lane-reversal seam — the
+# placement every decoded digest needs and no module open-codes.
+py_library(
+    name = "ssz",
+    srcs = [
+        "__init__.py",
+        "ssz.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":field",
+        ":params",
+        ":poseidon",
+        "//sig_frx:arrays",
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)

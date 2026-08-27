@@ -50,10 +50,11 @@ that re-derived either has turned a boundary into a convention spread across the
 package. (Reversing a *host* list, as `safe_domain_separator` does to its limbs,
 is not that: it is a Python slice on values that have not reached a lane yet.)
 
-The convention also needs an *exit*, because eventually a consumer holds values
-with no lanes at all, and that is `undo_lane_reversal` — the one function here
-that moves data rather than placing it. It is exported for the same reason the
-two placement facts are private: a second module open-coding the reverse is the
+The convention also needs a way *across*, because a consumer eventually holds
+values with no lanes at all and the wire holds values in leanSpec's order. That
+is `undo_lane_reversal` and `apply_lane_reversal`, the two functions here that
+move data rather than place it. They are exported for the same reason the two
+placement facts are private: a second module open-coding the reverse is the
 spread this section exists to prevent.
 
 Nothing else about the two widths differs, so both come from one builder: width
@@ -192,8 +193,27 @@ def undo_lane_reversal(vector: Array) -> Array:
     docstring gives: a second module that open-codes `[::-1]` has turned a
     boundary into a convention spread across the package, and the third one
     copies the line rather than the seam.
+
+    The reversal is over the **last** axis, so a stack of digests reverses each
+    of them rather than their order. A single vector reads the same either way,
+    which is what the codeword caller passes; the wire format
+    ([`ssz.py`](ssz.py)) is what brought a stack.
     """
-    return vector[::-1]
+    return vector[..., ::-1]
+
+
+def apply_lane_reversal(vector: Array) -> Array:
+    """leanSpec-ordered lanes -> the lane-reversed vector this package runs on.
+
+    The entrance the exit above has always implied, and the traced counterpart of
+    [`field.lane_reversed_limbs`](field.py) — that one places a host integer's
+    limbs, this one places values that arrive already in lanes, off the wire.
+
+    Same movement as `undo_lane_reversal`, and named apart from it on purpose: a
+    reversal is its own inverse, so the only thing a call site can say about
+    which direction it means is which name it spells.
+    """
+    return vector[..., ::-1]
 
 
 def join_digests(digests: Array) -> Array:

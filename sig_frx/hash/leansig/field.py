@@ -67,8 +67,11 @@ def to_field(canonical: ArrayLike) -> Array:
     """Canonical residues -> a field array. The dtype cast Montgomery-encodes.
 
     Host-side values only: everything that reaches this is a parameter set or the
-    limbs `_int_to_base_p` returned, and a traced value has no business being
-    rebuilt from residues.
+    limbs `_int_to_base_p` returned, which are host integers by construction.
+
+    Residues *do* arrive traced, off the wire — but they arrive already in lanes
+    and in leanSpec's order, so what that path needs is a reversal as well as a
+    cast, and it lives with the codec that reads them ([`ssz.py`](ssz.py)).
     """
     return fnp.asarray(np.asarray(canonical, dtype=np.int64).astype(F))
 

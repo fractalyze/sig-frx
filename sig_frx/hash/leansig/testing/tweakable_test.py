@@ -69,12 +69,9 @@ def _parameter(seed: int) -> fnp.ndarray:
 
 def _chain_ends(seed: int, dimension: int) -> fnp.ndarray:
     """One slot's `dimension` chain ends — `[dimension, n]`, the leaf's operand."""
-    return fnp.stack([_digest(seed + i) for i in range(dimension)])
-
-
-def _leanspec_rows(values: fnp.ndarray) -> list[list[int]]:
-    """A `[B, n]` lane-reversed batch as rows of residues, in upstream's order."""
-    return [harness.to_leanspec_order(row) for row in np.asarray(values)]
+    return harness.lane_reversed_rows(
+        [operand_elements(_HASH_LENGTH, seed + i) for i in range(dimension)]
+    )
 
 
 def _assert_one_digest(
@@ -86,7 +83,7 @@ def _assert_one_digest(
     one-dimensional mode, which is exactly where a promotion would pass a
     comparison that reads residues back and nothing else.
     """
-    case.assertEqual(_leanspec_rows(got), [list(expected)])
+    case.assertEqual(harness.to_leanspec_rows(got), [list(expected)])
     case.assertEqual(got.dtype, F)
     case.assertEqual(got.shape, (1, _HASH_LENGTH))
 
@@ -138,12 +135,12 @@ class ChainStepTest(parameterized.TestCase):
         # against a differently-built expectation, since every row stays
         # self-consistent. Upstream is what gates the single-row path, above.
         expected = [
-            _leanspec_rows(
+            harness.to_leanspec_rows(
                 family.f(parameters[k : k + 1], tweaks[k : k + 1], digests[k : k + 1])
             )[0]
             for k in range(len(CHAIN_STEP_VECTORS))
         ]
-        self.assertEqual(_leanspec_rows(got), expected)
+        self.assertEqual(harness.to_leanspec_rows(got), expected)
         self.assertEqual(got.dtype, F)
 
 
@@ -180,7 +177,7 @@ class TreeNodeTest(parameterized.TestCase):
 
         got = family.h(_parameter(vector.parameter_seed), tweaks, swapped)
 
-        self.assertNotEqual(_leanspec_rows(got), [list(vector.output)])
+        self.assertNotEqual(harness.to_leanspec_rows(got), [list(vector.output)])
 
     def test_it_refuses_a_pair_that_is_not_two_digests(self) -> None:
         family = tweakable.LeanSigTweakableHash(_PROD)
@@ -265,7 +262,7 @@ class ChainWalkTest(parameterized.TestCase):
             _parameter(vector.parameter_seed), _digest(vector.digest_seed)[None, :]
         )
 
-        self.assertEqual(_leanspec_rows(got), [list(vector.output)])
+        self.assertEqual(harness.to_leanspec_rows(got), [list(vector.output)])
         self.assertEqual(got.dtype, F)
 
     def test_every_chain_runs_the_same_number_of_hashes(self) -> None:
@@ -322,7 +319,7 @@ class TreeWalkTest(parameterized.TestCase):
 
         got = (frx.jit(climb) if jit else climb)(leaves, paths)
 
-        self.assertEqual(_leanspec_rows(got), [list(v.root) for v in vectors])
+        self.assertEqual(harness.to_leanspec_rows(got), [list(v.root) for v in vectors])
         self.assertEqual(got.dtype, F)
 
 
@@ -368,7 +365,7 @@ class TreeTest(parameterized.TestCase):
         )
 
         self.assertEqual(
-            [_leanspec_rows(path) for path in np.asarray(got)],
+            [harness.to_leanspec_rows(path) for path in np.asarray(got)],
             [[list(sibling) for sibling in path] for path in vector.paths],
         )
 
@@ -397,7 +394,7 @@ class TreeTest(parameterized.TestCase):
         )
 
         self.assertEqual(
-            _leanspec_rows(got), [list(vector.root)] * len(vector.positions)
+            harness.to_leanspec_rows(got), [list(vector.root)] * len(vector.positions)
         )
 
 
@@ -409,7 +406,9 @@ class TweakTest(absltest.TestCase):
         chain = tweakable.chain_tweaks([0], [0], 1, params=_PROD)
         node = tweakable.tree_tweaks(0, [0], params=_PROD)
 
-        self.assertNotEqual(_leanspec_rows(chain), _leanspec_rows(node))
+        self.assertNotEqual(
+            harness.to_leanspec_rows(chain), harness.to_leanspec_rows(node)
+        )
 
     def test_it_refuses_an_index_that_would_carry_into_the_level(self) -> None:
         with self.assertRaisesRegex(ValueError, "index takes 32 bits"):
