@@ -1,9 +1,22 @@
 load("@rules_python//python:defs.bzl", "py_library")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 
+# The prime-order group a threshold protocol runs over, as one Protocol.
+# Names no protocol, so a second scheme over these curves depends on this
+# rather than on frost. Typing only — no runtime dependency of its own.
+py_library(
+    name = "group",
+    srcs = [
+        "__init__.py",
+        "group.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # The RFC 9591 skeleton: round functions, aggregation, share verification,
 # and the trusted-dealer sharing, all ciphersuite-parameterized and all pure.
-# Standard library only — the group arrives through the Ciphersuite.
+# Standard library only — the group arrives through the Ciphersuite, which is
+# the group Protocol plus §6's five hashes.
 py_library(
     name = "frost",
     srcs = [
@@ -11,6 +24,7 @@ py_library(
         "frost.py",
     ],
     visibility = ["//visibility:public"],
+    deps = [":group"],
 )
 
 # FROST(Ed25519, SHA-512): §6.1's constants and hashes over the Edwards

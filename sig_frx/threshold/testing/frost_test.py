@@ -23,12 +23,13 @@ existed for it).
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from absl.testing import absltest, parameterized
 from python.runfiles import Runfiles
 
-from sig_frx.threshold import frost
+from sig_frx.threshold import frost, group
 from sig_frx.threshold.ed25519_sha512 import Ed25519Sha512
 from sig_frx.threshold.secp256k1_sha256 import Secp256k1Sha256
 
@@ -107,6 +108,109 @@ class _Vectors:
             self.message,
             self.group_public_key,
             self.signature_shares(),
+        )
+
+
+class _GroupOnly:
+    """A suite's group half with the five hashes withheld.
+
+    The point of the split is that Appendix C's dealer and the interpolation
+    need no transcript, and the way to hold that claim honest is to run them
+    against something that *cannot* provide one: every `PrimeOrderGroup`
+    member delegates, and `h1`-`h5` are absent rather than raising, so a
+    function that reached for a hash fails as `AttributeError` here instead
+    of quietly working because a real ciphersuite was passed.
+
+    This is the shape a second threshold protocol over these curves brings —
+    the reuse the seam exists for, exercised rather than asserted.
+    """
+
+    def __init__(self, suite: frost.Ciphersuite) -> None:
+        self._suite = suite
+        self.order = suite.order
+        self.element_size = suite.element_size
+        self.scalar_field = suite.scalar_field
+
+    def serialize_scalar(self, scalar: int) -> bytes:
+        return self._suite.serialize_scalar(scalar)
+
+    def deserialize_scalar(self, data: bytes) -> int:
+        return self._suite.deserialize_scalar(data)
+
+    def scalar_base_mult(self, scalar: int) -> bytes:
+        return self._suite.scalar_base_mult(scalar)
+
+    def deserialize_element(self, data: bytes) -> Any:
+        return self._suite.deserialize_element(data)
+
+    def element_add(self, left: Any, right: Any) -> Any:
+        return self._suite.element_add(left, right)
+
+    def element_scalar_mult(self, element: Any, scalar: int) -> Any:
+        return self._suite.element_scalar_mult(element, scalar)
+
+    def identity_element(self) -> Any:
+        return self._suite.identity_element()
+
+    def serialize_element(self, element: Any) -> bytes:
+        return self._suite.serialize_element(element)
+
+
+if TYPE_CHECKING:
+    _: type[group.PrimeOrderGroup] = _GroupOnly
+
+
+class GroupSeamTest(parameterized.TestCase):
+    """The functions that take a group take *only* a group."""
+
+    @parameterized.named_parameters(*_PARAMS)
+    def test_the_stand_in_is_a_group_and_not_a_ciphersuite(self, name: str) -> None:
+        v = _Vectors(name)
+        bare = _GroupOnly(v.cs)
+        for member in (
+            "order",
+            "element_size",
+            "scalar_field",
+            "serialize_scalar",
+            "deserialize_scalar",
+            "scalar_base_mult",
+            "deserialize_element",
+            "element_add",
+            "element_scalar_mult",
+            "identity_element",
+            "serialize_element",
+        ):
+            self.assertTrue(hasattr(bare, member), member)
+        for absent in ("h1", "h2", "h3", "h4", "h5"):
+            self.assertFalse(hasattr(bare, absent), absent)
+
+    @parameterized.named_parameters(*_PARAMS)
+    def test_the_dealer_reproduces_its_vectors_without_a_transcript(
+        self, name: str
+    ) -> None:
+        v = _Vectors(name)
+        bare = _GroupOnly(v.cs)
+        shares = frost.secret_share_split(bare, v.secret, v.coefficients, 3)
+        self.assertEqual(dict(shares), v.shares)
+        commitment = frost.vss_commit(bare, v.secret, v.coefficients)
+        self.assertEqual(commitment[0], v.group_public_key)
+        for identifier, share in v.shares.items():
+            self.assertTrue(frost.vss_verify(bare, identifier, share, commitment))
+        self.assertFalse(frost.vss_verify(bare, 1, v.shares[1] + 1, commitment))
+
+    @parameterized.named_parameters(*_PARAMS)
+    def test_interpolation_and_encoding_need_no_transcript(self, name: str) -> None:
+        v = _Vectors(name)
+        bare = _GroupOnly(v.cs)
+        participants = sorted(v.shares)
+        for identifier in participants:
+            self.assertEqual(
+                frost.derive_interpolating_value(bare, participants, identifier),
+                frost.derive_interpolating_value(v.cs, participants, identifier),
+            )
+        self.assertEqual(
+            frost.encode_group_commitment_list(bare, v.commitment_list),
+            frost.encode_group_commitment_list(v.cs, v.commitment_list),
         )
 
 
