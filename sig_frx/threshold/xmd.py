@@ -40,6 +40,22 @@ def expand_message_xmd(message: bytes, dst: bytes, length: int) -> bytes:
     return b"".join(blocks)[:length]
 
 
+def hash_to_field(
+    message: bytes, dst: bytes, count: int, modulus: int, length: int
+) -> list[int]:
+    """RFC 9380 §5.2: `count` field elements, `length` bytes of entropy each.
+
+    One expansion of `count * length` bytes, split — not `count` expansions.
+    They are different functions: the length is hashed into `b_0`, so asking
+    twice for `length` bytes and asking once for twice as many share no output.
+    """
+    raw = expand_message_xmd(message, dst, count * length)
+    return [
+        int.from_bytes(raw[i * length : (i + 1) * length], "big") % modulus
+        for i in range(count)
+    ]
+
+
 def hash_to_scalar(message: bytes, dst: bytes, order: int, length: int) -> int:
-    """RFC 9380 §5.2's `hash_to_field` at `m = 1`: expand, then reduce."""
-    return int.from_bytes(expand_message_xmd(message, dst, length), "big") % order
+    """`hash_to_field` at `m = 1`, which is the shape RFC 9591 derives with."""
+    return hash_to_field(message, dst, 1, order, length)[0]

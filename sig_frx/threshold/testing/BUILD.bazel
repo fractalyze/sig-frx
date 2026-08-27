@@ -39,6 +39,17 @@ py_test(
 )
 
 py_test(
+    name = "hash_to_curve_test",
+    size = "small",
+    srcs = ["hash_to_curve_test.py"],
+    deps = [
+        "//sig_frx/classical:secp",
+        "//sig_frx/threshold:hash_to_curve",
+        requirement("absl_py"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
     name = "xmd_test",
     size = "small",
     srcs = ["xmd_test.py"],

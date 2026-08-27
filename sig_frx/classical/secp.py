@@ -432,6 +432,12 @@ def host_multiple_of_g(curve: Curve, scalar: int) -> tuple[int, int]:
     return x, y
 
 
+# What `affine_ints` reads the group identity back as, named because a caller
+# working in affine integers has to compare against it. No real point on these
+# curves occupies it — see `affine_ints` for why.
+AFFINE_IDENTITY = (0, 0)
+
+
 def affine_ints(curve: Curve, points: ArrayLike) -> list[tuple[int, int]]:
     """Any point batch back to affine `(x, y)` Python integers.
 
