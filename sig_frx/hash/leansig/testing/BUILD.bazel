@@ -141,15 +141,11 @@ py_library(
     ],
 )
 
-# `large`, decided by the GPU leg: 75.6 s against 52.0 s on the CPU leg. That is
-# 25% of `medium`, but this leg has been measured up to 2.3x slower under load,
-# which puts a bad run at ~176 s — 59% of it, past the half-a-budget rule in
-# ../../../../docs/reference/measurement.md. The only run this target ever had
-# under `medium` agrees, at 152.2 s.
-#
-# One sample, because a target only re-runs when its own inputs change: a merge
-# run replays this whole package as `(cached)`, and so does any run that did not
-# touch it. Gather more from PRs that do.
+# `large`, decided by the GPU leg: 75.6 s worst across two CI runs, against
+# 52.0 s on the CPU leg. That is 25% of `medium`, but this leg has been measured
+# up to 2.3x slower under load, which puts a bad run at ~174 s — 58% of it, past
+# the half-a-budget rule in ../../../../docs/reference/measurement.md. The only
+# run this target ever had under `medium` agrees, at 152.2 s.
 py_test(
     name = "tweakable_test",
     size = "large",
