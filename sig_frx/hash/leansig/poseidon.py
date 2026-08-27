@@ -192,8 +192,13 @@ def undo_lane_reversal(vector: Array) -> Array:
     docstring gives: a second module that open-codes `[::-1]` has turned a
     boundary into a convention spread across the package, and the third one
     copies the line rather than the seam.
+
+    The reversal is over the **last** axis, so a stack of vectors reverses each
+    of them rather than their order. A single one reads the same either way,
+    which is all any caller passes today; the axis is named because the
+    alternative silently reorders a stack the first time one arrives.
     """
-    return vector[::-1]
+    return vector[..., ::-1]
 
 
 def join_digests(digests: Array) -> Array:
