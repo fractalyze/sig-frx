@@ -308,8 +308,10 @@ class Ecdsa:
         rather than where the shape suggests: at B=1024 the curve equation
         was 19% of this call as `on_curve` per row and is 2% as one
         expression over `[B]`, while the `int.from_bytes` decode it sits
-        behind is 4%. The remaining per-row work — the quotient pair's
-        modular inverse and the point construction — is tracked separately.
+        behind is 4%. Those shares are one run of this call split by line,
+        so they and their total come from one session. The remaining per-row
+        work — the quotient pair's modular inverse and the point
+        construction — is tracked separately.
         """
         curve = self.curve
         n = curve.n

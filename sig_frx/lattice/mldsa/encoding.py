@@ -168,13 +168,22 @@ def hint_bit_unpack(y: ArrayLike, k: int, omega: int) -> tuple[Any, Any]:
     verifier must not have a data-dependent exit here anyway.
 
     The membership test broadcasts to `[k, omega, 256]`, which is the module's
-    largest intermediate: measured at ML-DSA-87 it is 86% of `sig_decode` at
-    `B = 64` and all of its 10 MB of scratch, scaling linearly to 164 MB at
-    `B = 1024`. Factoring the one-hot out of the `k` axis as an f32
-    matmul measures 1.6x faster on half the memory, and is not taken: the whole
-    of `sig_decode` is 0.8% of `expand_a` at the same batch, so it buys ~0.5% of
-    a verify in exchange for float arithmetic in a bit-manipulation module. The
-    number to watch is the memory, not the time.
+    largest intermediate: all of `sig_decode`'s 10 MB of scratch at ML-DSA-87
+    and `B = 64`, scaling linearly to 164 MB at `B = 1024`. Factoring the
+    one-hot out of the `k` axis as an f32 matmul halves that memory and is not
+    taken, because it buys a fraction of a percent of a verify in exchange for
+    float arithmetic in a bit-manipulation module. **The number to watch is the
+    memory, not the time** — the memory is shape-derived and checkable from the
+    shapes above; the time is not.
+
+    The three timing figures this paragraph used to carry — an 86% share of
+    `sig_decode`, a 1.6x for the matmul form, and `sig_decode` at 0.8% of
+    `expand_a` — are **withdrawn pending a re-measurement**, not disproved.
+    They predate the rule that a share and its total come from one session
+    (../../../docs/reference/measurement.md) and nothing records whether they
+    did. The decision above does not rest on their exact values: it rests on
+    `sig_decode` being a small part of a verify next to `expand_a`, which the
+    memory figures and the shapes already carry.
 
     `h` is returned even when `ok` is false. It is meaningless in that case, and
     a caller that ignores `ok` has accepted a forged hint — which is why `ok` is
