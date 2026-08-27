@@ -2,6 +2,23 @@ load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
+# Sized from the legs rather than from a local run, which sizes nothing
+# (../../../../docs/reference/measurement.md): the GPU leg measures 3.6 s here
+# on a comparable device, which that page says is usable, and the CPU leg is
+# what the merge gate records. `small`'s 60 s covers the worse of the two at
+# well under half.
+py_test(
+    name = "fft_test",
+    size = "small",
+    srcs = ["fft_test.py"],
+    deps = [
+        "//sig_frx/lattice/falcon:arith",
+        "//sig_frx/lattice/falcon:fft",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 # Sized from the executor: 4.0 s on the CPU leg against 2.9 s on the GPU one, so
 # CPU is the leg that decides and `small`'s 60 s covers it at 7%. The CPU leg's
 # run-to-run spread is around 2.2x, which leaves a bad run near 15% — well
