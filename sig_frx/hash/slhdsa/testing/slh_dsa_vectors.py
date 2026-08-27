@@ -12,12 +12,12 @@ the same shape. What is here is the part only FIPS 205 answers.
 Two things bound what runs, and both are stated as data rather than left to a
 filter somewhere:
 
-- `CONSTRUCTIBLE_SETS` — the parameter sets `slh_dsa.sha2` can build. The other
-  ten published sets need SHAKE256 or SHA-512.
+- `CONSTRUCTIBLE_SETS` — the parameter sets the two builders cover, which is all
+  twelve Table 2 publishes.
 - `PRE_HASHES` — the pre-hash functions this scheme may be driven with. ACVP
-  exercises twelve; hash-frx provides five, and §10.2.2 approves one of those for
-  the sets constructible here. A pre-hash case names its function inside the
-  message it signs, so the rest cannot be approximated by a stand-in.
+  exercises twelve and `prehash` provides five, so this is the boundary that
+  still drops cases. A pre-hash case names its function inside the message it
+  signs, so the rest cannot be approximated by a stand-in.
 
 `excluded_by_reason` reports what those two leave out, so a test asserts the size
 of its own coverage gap instead of silently shrinking.
@@ -43,27 +43,29 @@ from sig_frx.testing.vector_sets import Operation
 
 _RUNFILES = Runfiles.Create()
 
-# Every SHAKE set, and the SHA-2 sets §11.2.1's SHA-256-only family reaches.
-# §11.1 reaches all six SHAKE sets with SHAKE256 alone, at every security
-# category; the SHA-2 categories 3 and 5 hash `H`, `T_l` and `PRF_msg` with
-# SHA-512 (§11.2.2) and stay out until a SHA-512 `ByteHash` exists.
+# All twelve of Table 2. Both families reach every security category: §11.1 with
+# SHAKE256 alone, and §11.2 with SHA-256 at category 1 (§11.2.1) or SHA-256 and
+# SHA-512 together at categories 3 and 5 (§11.2.2).
 CONSTRUCTIBLE_SETS = (
-    "SLH-DSA-SHA2-128s",
-    "SLH-DSA-SHA2-128f",
+    *slh_dsa.SHA2_PARAMETER_SETS,
     *slh_dsa.SHAKE_PARAMETER_SETS,
 )
 
-# §10.2.2 restricts SHA-256 to parameter sets claimed in security category 1,
-# which is every set `sha2` builds — so of the functions `prehash` provides, this
-# is the one these sets are approved to use.
+# Of the functions `prehash` provides, this is the one the published cases select
+# for the sets here. §10.2.2 restricts SHA-256 to security category 1, which is a
+# subset of the sets `sha2` builds — but that restriction is a pairing rule for a
+# deployment, and a case that pairs them is still one this repo computes
+# faithfully, so the boundary here is which *functions* exist rather than which
+# pairings are approved.
 PRE_HASHES: dict[str, Callable[[], prehash.PreHash]] = {
     "SHA2-256": slh_dsa.sha256_pre_hash,
 }
 
+# No `parameter_set_reason`: its own default says a scheme that builds every set
+# it has vectors for never reaches that bucket, and this one does.
 COVERAGE = vector_sets.Coverage(
     parameter_sets=CONSTRUCTIBLE_SETS,
     pre_hashes=PRE_HASHES,
-    parameter_set_reason="parameter set needs SHA-512",
 )
 
 

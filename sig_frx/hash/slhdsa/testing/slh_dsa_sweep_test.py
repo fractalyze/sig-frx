@@ -13,8 +13,9 @@ geometry, in how many digest bytes each index consumes, and in how many FORS tre
 sign the digest, so `f` passing says nothing about `s`.
 
 **One test per published operation, because the cost is not spread evenly.**
-Signing at the four `s` sets is two thirds of the sweep, and the largest single
-operation is a fourteenth of it — so a sweep written as one method per ACVP mode
+Signing is three quarters of the sweep, over half of that at the six `s` sets,
+and the largest single operation is a twenty-seventh of the whole — so a sweep
+written as one method per ACVP mode
 cannot be divided below `sigGen`, and its budget has to cover every set's
 hypertree walk at once. Cut at the operation instead — the unit
 `slh_dsa_vectors.check` already takes — and the longest piece is one signing
@@ -38,9 +39,13 @@ from sig_frx.hash.slhdsa.testing import slh_dsa_vectors
 # One case per published operation, named mode first and parameter set last. The
 # order is what the shards are cut out of — bazel assigns cases round-robin over
 # their sorted names — and trailing the set is what lands a shard on operations
-# of one parameter set: each then compiles that set's kernels once, where a set
-# scattered across eight shards compiles in all eight. Naming it the other way
-# round costs a third of the sweep's total processor time in repeated compiles.
+# of one parameter set: the twelve sets sit consecutively in that order, so a
+# shard draws one of them wherever `shard_count` is a multiple of twelve, and
+# each then compiles that set's kernels once. Naming it the other way round
+# scatters a set across ten shards and costs a third of the sweep's total
+# processor time in repeated compiles; a `shard_count` that merely shares a
+# factor with twelve pays a fraction of the same, which is why the BUILD file's
+# number moves with the set count rather than being chosen on its own.
 _CASES = [
     (f"{mode}_{operation.name}", mode, operation)
     for mode, published in slh_dsa_vectors.operations().items()
@@ -80,13 +85,13 @@ class CoverageTest(absltest.TestCase):
                 )
 
     def test_every_published_case_is_reached(self) -> None:
-        # 10 keyGen cases for each of the eight constructible sets. For sigGen, 7
+        # 10 keyGen cases for each of the twelve constructible sets. For sigGen, 7
         # pure and 7 internal per mode, plus the one pre-hash case per mode whose
-        # function hash-frx provides: 30 per set. For sigVer, 14 pure and 14
+        # function `prehash` provides: 30 per set. For sigVer, 14 pure and 14
         # internal plus the runnable pre-hash cases — one per set, except
-        # SLH-DSA-SHAKE-256f, for which ACVP publishes two, so 233 rather than a
-        # multiple of eight.
-        for mode, expected in (("keyGen", 80), ("sigGen", 240), ("sigVer", 233)):
+        # SLH-DSA-SHAKE-256f, for which ACVP publishes two, so 349 rather than a
+        # multiple of twelve.
+        for mode, expected in (("keyGen", 120), ("sigGen", 360), ("sigVer", 349)):
             with self.subTest(mode):
                 groups = slh_dsa_vectors.runnable_groups(mode)
                 self.assertEqual(sum(len(group) for group in groups.values()), expected)

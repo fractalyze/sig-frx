@@ -87,21 +87,20 @@ class KeyGenKatTest(absltest.TestCase):
     def test_the_runnable_groups_are_the_ones_the_family_reaches(self) -> None:
         # Which cases ran, stated rather than implied: a set this cannot build is a
         # coverage boundary, and one that silently vanished would read as a pass.
+        # Both directions, which is what makes this the statement that every
+        # published set is swept: a set the vectors publish and `CONSTRUCTIBLE_SETS`
+        # omits would be silently dropped, and one named here that the vectors do
+        # not publish is a coverage boundary that moved. What is left out of the
+        # run is only the pre-hash functions `prehash` does not provide, which is
+        # a boundary in `PRE_HASHES` rather than in the family.
         published = {vector.parameter_set for vector in self.vectors}
         self.assertLen(published, 12)
-        self.assertContainsSubset(slh_dsa_vectors.CONSTRUCTIBLE_SETS, published)
-        self.assertEqual(
-            slh_dsa_vectors.excluded_by_reason(self.vectors),
-            {"parameter set needs SHA-512": 40},
-        )
-        for name in published - set(slh_dsa_vectors.CONSTRUCTIBLE_SETS):
-            with self.subTest(name):
-                # All that is left out is SHA-2 at categories 3 and 5, which
-                # §11.2.2 hashes with SHA-512. Each says so rather than quietly
-                # building a family over the wrong hash.
-                self.assertIn(name, slh_dsa.SHA2_PARAMETER_SETS)
-                with self.assertRaises(NotImplementedError):
-                    slh_dsa.sha2(name)
+        self.assertCountEqual(slh_dsa_vectors.CONSTRUCTIBLE_SETS, published)
+        # Empty, where it used to hold 40 cases: the parameter-set bucket is the
+        # one this closed, and `keyGen` publishes no pre-hash case to fall into
+        # the other. The sweep's counts are where the pre-hash boundary is still
+        # asserted, since that is where the cases it drops live.
+        self.assertEqual(slh_dsa_vectors.excluded_by_reason(self.vectors), {})
 
     def test_every_published_secret_key_ends_in_its_public_key(self) -> None:
         # Figure 15's secret key ends in Figure 16's public key, which is what

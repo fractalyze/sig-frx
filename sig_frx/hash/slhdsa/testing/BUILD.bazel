@@ -187,19 +187,31 @@ py_test(
 # back: it is the standards-exactness gate, and it is too slow to sit in review.
 #
 # Sharded rather than given a bigger budget, because no budget holds the whole
-# sweep for long: undivided on the CI executor — where this package measures
-# 2.1-2.7x a workstation — it spends most of `enormous`'s hour, with four more
-# parameter sets still to become constructible. The test cuts at the published
+# sweep: undivided on the CI executor — where this package measures 2.1-2.7x a
+# workstation — it runs past `enormous`'s hour. The test cuts at the published
 # operation, the longest of which is under a tenth of the whole, and names its
-# cases so that a shard draws the operations of one parameter set. At thirty-two
-# the worst shard is a third of `large` once the executor factor is paid, and
-# every shard compiles one set's kernels rather than several shards each
-# compiling the same set's.
+# cases with the parameter set last so that a shard draws the operations of one
+# set. That holds only where the set count divides `shard_count`, since bazel
+# cycles shards over the sorted case names: thirty-two divided eight and does not
+# divide twelve, where it would leave every shard three sets to compile kernels
+# for. Forty-eight is four shards to each of the twelve sets — the same cut
+# thirty-two made of eight, and the most bazel allows, which refuses more than
+# fifty.
+#
+# `large` does not cover the worst shard, and did not before this change: the
+# scheduled run hit its 900 s on nine or ten shards of thirty-two every night
+# from 2026-08-12 to 2026-08-24, then came in at 628.2 s and 701.8 s on 08-25 and
+# 08-26. The worst shard is a SHAKE `s` set, which was already constructible, and
+# the four sets this adds are the cheap half — SHA-2 is 17.7% of the sweep
+# against SHAKE's 82.3%. Left at `large` rather than bumped: `eternal` would stop
+# the nightly failing without making it faster, and what makes it slow is
+# upstream of this target. Sized in
+# [#247](https://github.com/fractalyze/sig-frx/issues/247).
 py_test(
     name = "slh_dsa_sweep_test",
     size = "large",
     srcs = ["slh_dsa_sweep_test.py"],
-    shard_count = 32,
+    shard_count = 48,
     tags = ["slow_kat"],
     deps = [
         ":slh_dsa_vectors",

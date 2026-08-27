@@ -19,10 +19,13 @@ to two names — `SLH-DSA-SHA2-<suffix>` and `SLH-DSA-SHAKE-<suffix>` — becaus
 two families are the same parameters over a different tweakable hash. So the SHAKE
 sets are these rows under a SHAKE instantiation rather than a second scheme.
 
-Security category 1 is what is constructible here. §11.2.1 reaches every function
-of the family with SHA-256 alone, while categories 3 and 5 keep SHA-256 for `PRF`
-and `F` and move `H`, `T_l` and `PRF_msg` to SHA-512 (§11.2.2) — a family over two
-hashes, so those sets need a SHA-512 `ByteHash` before `sha2` can build them.
+**All twelve sets are constructible, over three hash families.** §11.1 reaches
+every function with SHAKE256 at every security category, so the six SHAKE sets
+are one family. The SHA-2 sets are two: §11.2.1 reaches every function with
+SHA-256 alone at category 1, while categories 3 and 5 keep SHA-256 for `PRF` and
+`F` and move `H`, `T_l`, `PRF_msg` and `H_msg` to SHA-512 (§11.2.2) — the
+collision-bound four, which a 256-bit digest is short of at n = 24 and 32. Which
+family a set gets is `security_category`'s answer, not a builder argument.
 
 **Verification takes the batch and signing does not**, the asymmetry every layer
 below carries. Each entry brings its own public key, so `PK.seed` and `PK.root`
@@ -52,7 +55,7 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx import Sha256, Shake256
+from hash_frx import Sha256, Sha512, Shake256
 
 from sig_frx import context as ctx
 from sig_frx import prehash
@@ -613,37 +616,41 @@ class SlhDsa:
 
 
 def sha2_params(params: SlhDsaParams, *, deterministic: bool = False) -> SlhDsa:
-    """§11.2.1's SHA-256-only family at `params`, whether Table 2 names it or not.
+    """§11.2's SHA-2 family at `params`, whether Table 2 names the set or not.
 
     `sha2` is this with a Table 2 lookup in front of it. The split exists because
     a scheme may define a parameter set of its own — SHRINCS's stateless
     component is the one in this repo — and the alternative is assembling
     `SlhDsa` and a tweakable hash at the call site, which copies the one fact
     this module should own: which hash family goes with which security category.
-    That fact is about to have a second answer, since categories 3 and 5 want
-    SHA-512, and a copy would not be found when it does.
+
+    That fact has two answers. Category 1 is §11.2.1, one hash for all six
+    functions; categories 3 and 5 are §11.2.2, which keeps SHA-256 for `PRF` and
+    `F` and moves the other four to SHA-512. `security_category` is `n`'s answer
+    (§11), so a set gets its family from its own size rather than from a caller.
     """
-    if params.security_category != 1:
-        raise NotImplementedError(
-            f"security category {params.security_category} hashes H, T_l and "
-            f"PRF_msg with SHA-512 (FIPS 205 §11.2.2); this builds §11.2.1's "
-            f"SHA-256-only family"
-        )
+    wide = None if params.security_category == 1 else Sha512()
     return SlhDsa(
-        Sha2TweakableHash(Sha256(), n=params.n, m=params.m),
+        Sha2TweakableHash(Sha256(), n=params.n, m=params.m, wide=wide),
         params,
         deterministic=deterministic,
     )
 
 
 def sha2(name: str, *, deterministic: bool = False) -> SlhDsa:
-    """The `SLH-DSA-SHA2-*` parameter set called `name`, over hash-frx's SHA-256.
+    """The `SLH-DSA-SHA2-*` parameter set called `name`, over hash-frx's SHA-2.
 
-    §11.2.1's family reaches `PRF`, `PRF_msg`, `F`, `H`, `T_l` and `H_msg` with
-    SHA-256 alone, which is every function the security category 1 sets need.
-    Categories 3 and 5 keep SHA-256 for `PRF` and `F` but hash `H`, `T_l` and
-    `PRF_msg` with SHA-512 (§11.2.2), so they are a family over two hashes and
-    need a SHA-512 `ByteHash` rather than a different constant here.
+    All six, like `shake` — but over one hash or two, which the security category
+    decides rather than the caller. §11.2.1 reaches `PRF`, `PRF_msg`, `F`, `H`,
+    `T_l` and `H_msg` with SHA-256 alone, which is what category 1 needs.
+    Categories 3 and 5 keep SHA-256 for `PRF` and `F` and move `H`, `T_l`,
+    `PRF_msg` and `H_msg` to SHA-512 (§11.2.2): those four are the
+    collision-bound functions, and a 256-bit digest is short of the strength
+    n = 24 and 32 claim.
+
+    So the category selects the family, and `Sha2TweakableHash` takes the second
+    hash rather than a flag — there is no set for which the pair is a
+    deployment's choice.
     """
     if name not in SHA2_PARAMETER_SETS:
         raise ValueError(f"{name!r} is not one of {sorted(SHA2_PARAMETER_SETS)}")
@@ -653,10 +660,10 @@ def sha2(name: str, *, deterministic: bool = False) -> SlhDsa:
 def shake(name: str, *, deterministic: bool = False) -> SlhDsa:
     """The `SLH-DSA-SHAKE-*` parameter set called `name`, over hash-frx's SHAKE256.
 
-    All six, unlike `sha2`. §11.1 reaches every function with SHAKE256 at every
-    security category, because an extendable output already produces whatever
-    length the function wants — where §11.2 has to change hash at categories 3
-    and 5 to get one. The category is a parameter here rather than a constraint.
+    All six over one hash, where `sha2` needs two at categories 3 and 5: §11.1
+    reaches every function with SHAKE256 at every security category, because an
+    extendable output already produces whatever length the function wants. So the
+    category costs this family nothing, which is the whole of the difference.
     """
     if name not in SHAKE_PARAMETER_SETS:
         raise ValueError(f"{name!r} is not one of {sorted(SHAKE_PARAMETER_SETS)}")
@@ -674,7 +681,11 @@ def sha256_pre_hash() -> prehash.PreHash:
     """SHA-256 as HashSLH-DSA's pre-hash — Algorithm 23 lines 9 to 11.
 
     §10.2.2 restricts SHA-256 to parameter sets claimed in security category 1,
-    which is every set `sha2` builds.
+    which is the 128s and 128f rows rather than every set `sha2` builds. Pairing a
+    pre-hash with a set is a deployment's choice rather than something an
+    implementation may refuse, per [`prehash`](../../prehash.py)'s note on the
+    strength pairing; naming the restriction here is what keeps this from reading
+    as an endorsement at categories 3 and 5.
     """
     return prehash.sha2_256()
 

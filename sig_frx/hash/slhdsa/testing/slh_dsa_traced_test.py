@@ -19,6 +19,18 @@ than two, which is where a value too wide for a 32-bit lane would show up. The s
 set runs first as the fast signal — it traces the same path at a shape that compiles
 in a moment.
 
+Then one §11.2.2 set, where what differs is the hash family rather than the
+geometry: categories 3 and 5 run `H`, `T_l`, `PRF_msg` and `H_msg` over SHA-512,
+which is a second hash-frx row, a 128-byte block in the seed padding, and an MGF1
+over a 64-byte digest. None of that is reached by the category 1 sets above, and a
+row that traces differently from how it computes would be invisible to
+`slh_dsa_kat_test`, which is eager.
+
+One set rather than all four, because this module's cost is compilation and every
+real set unrolls a whole `d`-layer walk. What the second hash needs demonstrated
+here is that it traces at all; that it is *correct* at each `n` is the published
+vectors' claim, and `slh_dsa_sweep_test` makes it for all four.
+
 Its own target rather than a case in `slh_dsa_test`, because the cost is compilation
 rather than hashing: the real sets unroll the whole `d`-layer walk, which is most of
 this module's runtime and none of what the assembly cases beside it are checking.
@@ -40,6 +52,10 @@ _SMALL = slh_dsa.SlhDsaParams(n=16, h=4, d=2, a=3, k=4)
 _MESSAGE = np.frombuffer(b"the content that gets signed", dtype=np.uint8)
 
 _CATEGORY_1 = ("SLH-DSA-SHA2-128f", "SLH-DSA-SHA2-128s")
+
+# §11.2.2's two-hash family. The `f` geometry, so the compile this adds is the same
+# shape as 128f's above rather than a second kind of cost.
+_SHA512_FAMILY_SET = "SLH-DSA-SHA2-192f"
 
 
 def _seed(size: int) -> np.ndarray:
@@ -112,6 +128,12 @@ class TracedVerifyTest(absltest.TestCase):
                 self._assert_traces_to_the_eager_verdicts(
                     slh_dsa.sha2(name, deterministic=True)
                 )
+
+    def test_the_sha512_family_traces_to_the_eager_verdicts(self) -> None:
+        """§11.2.2's second hash under a tracer, which §11.2.1's sets never reach."""
+        self._assert_traces_to_the_eager_verdicts(
+            slh_dsa.sha2(_SHA512_FAMILY_SET, deterministic=True)
+        )
 
 
 if __name__ == "__main__":
