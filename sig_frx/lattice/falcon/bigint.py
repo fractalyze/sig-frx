@@ -80,9 +80,29 @@ BASE = np.uint32(1 << LIMB_BITS)
 MASK = np.uint32((1 << LIMB_BITS) - 1)
 
 
+# The bridge reduces each limb against its place value and then sums, so the
+# accumulator holds at most `L` values under `2^15`. Past this many limbs that
+# sum leaves a `uint32` without raising — which is the failure the repo's first
+# non-negotiable names, and the reason it is a bound rather than a comment. It
+# sits four orders of magnitude above the 629 limbs Falcon's widest intermediate
+# needs, so nothing here is near it; what it buys is that a future caller with a
+# much wider value fails loudly instead of quietly.
+MAX_LIMBS = (1 << 32) // (1 << LIMB_BITS)
+
+
 def limb_count(bits: int) -> int:
     """How many limbs hold an unsigned value of `bits` bits."""
     return -(-bits // LIMB_BITS)
+
+
+def _check_bridgeable(limbs: int) -> None:
+    """Refuse a limb budget whose reduced-limb sum would leave the lane."""
+    if limbs > MAX_LIMBS:
+        raise ValueError(
+            f"{limbs} limbs exceeds the {MAX_LIMBS} the bridge can sum without "
+            f"leaving a 32-bit lane; a wider value needs a wider accumulator, "
+            f"not more limbs"
+        )
 
 
 @lru_cache(maxsize=None)
@@ -376,6 +396,7 @@ def to_rns(a: ArrayLike, channels: int) -> Any:
     under `2^15` and survives every limb this module can hold.
     """
     values = fnp.asarray(a)
+    _check_bridgeable(values.shape[-1])
     mods = moduli(channels)
     table = _place_values(channels, values.shape[-1])
     terms = (values[..., None, :] * table) % mods[:, None]
@@ -417,6 +438,7 @@ def from_rns(residues: ArrayLike, channels: int, limbs: int) -> Any:
     for that reason.
     """
     values = fnp.asarray(residues)
+    _check_bridgeable(limbs)
     prefix, inverse = _garner_tables(channels, limbs)
     # The tables are indexed by the loop counter, which is traced — so they are
     # device arrays gathered from, not host arrays subscripted.

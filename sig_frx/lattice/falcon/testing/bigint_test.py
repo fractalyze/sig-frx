@@ -248,6 +248,24 @@ class ResidueTest(parameterized.TestCase):
                 bigint.from_limbs(bigint.from_rns(residues, channels, limbs)), value
             )
 
+    def test_the_bridge_refuses_a_limb_budget_it_could_not_sum(self) -> None:
+        """The accumulator's bound is a check, because passing it is silent.
+
+        Both bridge directions reduce each limb and then sum, so the accumulator
+        holds `L` values under `2^15`. Past `MAX_LIMBS` that sum leaves a
+        `uint32` without raising — and a wrong answer that raises nothing is
+        what the repo's first non-negotiable is about. Nothing in Falcon comes
+        within four orders of magnitude of the bound; the check is here for the
+        caller that one day does.
+        """
+        channels = bigint.channel_count(120)
+        too_many = bigint.MAX_LIMBS + 1
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            bigint.to_rns(np.zeros(too_many, dtype=np.uint32), channels)
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            bigint.from_rns(np.zeros(channels, dtype=np.uint32), channels, too_many)
+        self.assertGreater(bigint.MAX_LIMBS, 100 * bigint.limb_count(max(WIDTHS)))
+
     def test_the_bridge_carries_a_product_no_lane_could_hold(self) -> None:
         """The operation the two forms exist for: multiply as residues, read as `int`.
 
