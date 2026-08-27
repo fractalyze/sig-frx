@@ -158,16 +158,20 @@ py_binary(
     ] + GPU_PLUGIN_DEPS,
 )
 
-# Provisionally sized, because no leg has recorded this target yet and
-# ../../../../docs/reference/measurement.md says a workstation number sizes
-# nothing. What the workstation does say is which leg will decide: the GPU one
-# runs it at roughly twice the CPU one, the ratio the sibling `arith_test`
-# shows and `falcon_test` inverts, and both are far enough inside `small` that
-# no other bucket is arguable. Revisit against the first CI run — if the GPU leg
-# lands past half of 60 s, this wanted `medium`.
+# Sized from the executor: 26.1 s on the CPU leg against 23.1 s on the GPU one,
+# so CPU is the leg that decides. `small` would put that at 43% of its 60 s —
+# under the half-a-budget rule in ../../../../docs/reference/measurement.md only
+# until the CPU leg's spread is counted, and the sibling `encoding_test` records
+# that spread at 1.8x for unchanged content. A bad run would land near 78%.
+# `medium` covers the same run at 9%.
+#
+# The workstation argued for `small` and argued it from the wrong premise: there
+# the GPU leg ran this at twice the CPU one, where CI has the two within 13% of
+# each other and inverted. That is the case measurement.md's rule is about — the
+# local number was not merely imprecise, it named the wrong deciding leg.
 py_test(
     name = "bigint_test",
-    size = "small",
+    size = "medium",
     srcs = ["bigint_test.py"],
     deps = [
         "//sig_frx/lattice/falcon:bigint",
