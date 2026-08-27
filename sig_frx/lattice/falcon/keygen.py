@@ -572,6 +572,52 @@ def invertible(f: ArrayLike) -> Any:
     return fnp.all(residues.astype(np.uint32) != np.uint32(0))
 
 
+def public_key(f: ArrayLike, g: ArrayLike) -> Any:
+    """Algorithm 4 line 9 — `h = g·f^{-1} mod q`, as `[n]` residues under `q`.
+
+    The whole of what a Falcon public key is. Read back with `astype` and never
+    a bitcast, since the field's storage is a Montgomery representative
+    ([`arith`](arith.py)), and left uncentered because §3.11.4 encodes "each
+    value in the 0 to `q − 1` range".
+
+    Lands on the device whatever the caller is, for the reason
+    [`invertible`](#invertible) does: `arith.ntt` is an opcode with no host
+    form. So key generation is host for the trapdoor and device for its two
+    `Z_q` steps, which is the same shape verification's `decompress` has.
+    """
+    f_hat = arith.ntt(arith.to_field(f))
+    g_hat = arith.ntt(arith.to_field(g))
+    return arith.intt(arith.base_div(g_hat, f_hat)).astype(np.uint32)
+
+
+def recover_g(f: ArrayLike, g: ArrayLike, big_f: ArrayLike) -> Any:
+    """(3.35) — `G = (q + g·F)/f mod ϕ`, the polynomial §3.11.5 does not encode.
+
+    A private key stores `f`, `g` and `F`; `G` is recomputed on load, which is
+    what makes the encoding a quarter shorter than the trapdoor it carries.
+
+    **The `q +` vanishes here and that is the point.** It is what makes the
+    numerator divisible by `f` over the integers, where this computes modulo `q`
+    and `q ≡ 0` — which is exactly the observation §3.11.5 makes when it says
+    the recovery "can be done modulo `q` as well, using the same techniques as
+    signature verification". So one division in the transform domain recovers a
+    polynomial whose coefficients are not residues at all.
+
+    What licenses reading the answer back as centered integers is that `G` is
+    *small*: §3.11.5 asserts it in as many words, and the encoding gives `F`
+    eight bits for the same reason. A `G` that outgrew `q/2` would come back as
+    a different polynomial with no complaint, so
+    [`keygen_test`](testing/keygen_test.py) checks the NTRU equation over the
+    recovered `G` rather than trusting the round trip.
+    """
+    numerator = arith.base_mul(
+        arith.ntt(arith.to_field(g)), arith.ntt(arith.to_field(big_f))
+    )
+    return arith.centered(
+        arith.intt(arith.base_div(numerator, arith.ntt(arith.to_field(f))))
+    )
+
+
 # -- the lift back up ---------------------------------------------------------
 
 

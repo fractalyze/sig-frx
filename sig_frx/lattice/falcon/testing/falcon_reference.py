@@ -179,6 +179,83 @@ def pk_decode(pk: bytes, n: int) -> list[int] | None:
     return out
 
 
+def pk_encode(h: list[int], n: int) -> bytes:
+    """§3.11.4 — the header byte `0000nnnn`, then `h` at 14 bits a coefficient."""
+    bits = [0, 0, 0, 0] + [
+        (n.bit_length() - 1) >> shift & 1 for shift in range(3, -1, -1)
+    ]
+    for value in h:
+        bits.extend((value >> j) & 1 for j in range(13, -1, -1))
+    return bytes_of(bits)
+
+
+SK_WIDTHS: dict[int, int] = {
+    2: 8,
+    4: 8,
+    8: 8,
+    16: 8,
+    32: 8,
+    64: 7,
+    128: 7,
+    256: 6,
+    512: 6,
+    1024: 5,
+}
+"""§3.11.5's `f` and `g` widths, transcribed at every degree the section lists.
+
+The implementation carries the two Falcon defines; this carries all eight,
+because a table with only the used rows cannot say whether the rule was read
+correctly — and the boundaries (32 to 64, 128 to 256, 512 to 1024) are where a
+misreading would land.
+"""
+
+
+def sk_encode(f: list[int], g: list[int], big_f: list[int], n: int) -> bytes:
+    """§3.11.5 — `0101nnnn`, then `f`, `g` and `F` in that order.
+
+    Signed encoding, two's complement, at `SK_WIDTHS[n]` bits for `f` and `g`
+    and eight for `F`. `G` is not encoded; (3.35) recovers it.
+    """
+    bits = [0, 1, 0, 1] + [
+        (n.bit_length() - 1) >> shift & 1 for shift in range(3, -1, -1)
+    ]
+    for values, width in ((f, SK_WIDTHS[n]), (g, SK_WIDTHS[n]), (big_f, 8)):
+        for value in values:
+            field = value & ((1 << width) - 1)
+            bits.extend((field >> j) & 1 for j in range(width - 1, -1, -1))
+    return bytes_of(bits)
+
+
+def sk_decode(sk: bytes, n: int) -> tuple[list[int], list[int], list[int]] | None:
+    """§3.11.5 read back — `None` where the encoding is malformed.
+
+    Two ways it can be, both of which the section states: a header that is not
+    `0101nnnn` for this `n`, and a coefficient at the minimal value, which
+    "is forbidden; e.g. when using degree 512, the valid range for a coefficient
+    of `f` or `g` is −31 to +31; −32 is not allowed."
+    """
+    width = SK_WIDTHS[n]
+    if len(sk) != 1 + n * (2 * width + 8) // 8:
+        return None
+    if sk[0] != 0x50 | (n.bit_length() - 1):
+        return None
+    bits = bits_of(sk[1:])
+    out: list[list[int]] = []
+    cursor = 0
+    for count, size in ((n, width), (n, width), (n, 8)):
+        values = []
+        for _ in range(count):
+            field = 0
+            for _ in range(size):
+                field = (field << 1) | bits[cursor]
+                cursor += 1
+            if field == 1 << (size - 1):
+                return None
+            values.append(field - (1 << size) if field >> (size - 1) else field)
+        out.append(values)
+    return out[0], out[1], out[2]
+
+
 def negacyclic_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """`(a · b) mod (x^n + 1) mod q`, in exact integers.
 

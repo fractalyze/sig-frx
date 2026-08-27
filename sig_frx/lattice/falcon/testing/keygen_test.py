@@ -71,8 +71,8 @@ import numpy as np
 from absl.testing import absltest, parameterized
 from frx import numpy as fnp
 
-from sig_frx.lattice.falcon import arith, bigint, fft, keygen
-from sig_frx.lattice.falcon.testing import falcon_reference
+from sig_frx.lattice.falcon import arith, bigint, encoding, fft, keygen
+from sig_frx.lattice.falcon.testing import falcon_reference, falcon_vectors
 
 # The widths #26 measured a random key's descent to reach, at `n = 1024`. The
 # entry is `f` itself; the rest are one level of `N` each. Sampling moves these
@@ -1198,6 +1198,100 @@ class FalconTreeTest(parameterized.TestCase):
             params["sigma"] / math.sqrt(largest) / params["sigma_min"], 1.0, delta=1e-9
         )
         self.assertLess(params["sigma"] / math.sqrt(smallest), params["sigma_max"])
+
+
+class PublishedKeyTest(parameterized.TestCase):
+    """The reference implementation's own key pair, agreed with four ways.
+
+    Everything else in this file is gated against a transcription of the
+    specification, which cannot catch a misreading two implementations share.
+    This is the case that can: the round-3 KAT's `sk` and `pk` are the reference
+    implementation's output, and nothing here invented either of them.
+
+    It is also as much of #26's third acceptance criterion as can be had without
+    compiling that implementation — a key it generated is accepted here and its
+    public key reproduced. What is left for the criterion is the direction that
+    needs the C: a key generated *here* accepted by it.
+    """
+
+    @parameterized.parameters(*falcon_reference.parameter_cases())
+    def test_the_published_private_key_implies_the_published_public_one(
+        self, name: str, **params: Any
+    ) -> None:
+        """Four agreements off one decode, and they are together because it is one.
+
+        Splitting them would decode the same 2,305 bytes four times to ask four
+        questions of the same numbers — the reason `DescentTest` groups its
+        assertions, applied to a key rather than to a recursion.
+        """
+        n = params["n"]
+        sk = np.frombuffer(
+            bytes.fromhex(falcon_vectors.SECRET_KEYS[name]), dtype=np.uint8
+        )
+        pk = np.frombuffer(
+            bytes.fromhex(falcon_vectors.VECTORS[name][0].public_key), dtype=np.uint8
+        )
+        self.assertLen(sk, params["secret_key_size"])
+
+        f, g, big_f, ok = encoding.sk_decode(sk, n)
+        self.assertTrue(bool(np.asarray(ok)))
+        f, g, big_f = (np.asarray(value) for value in (f, g, big_f))
+
+        # §3.11.5, against the transcription: the widths and the sign convention
+        # are shared between the two decoders and nothing else is.
+        self.assertEqual(
+            falcon_reference.sk_decode(sk.tobytes(), n),
+            (f.tolist(), g.tolist(), big_f.tolist()),
+        )
+
+        # (3.35), and then the equation the recovery exists to satisfy. The
+        # recovery runs modulo `q` and the answer is read back centered, which
+        # is only sound because `G` is small — so its magnitude is asserted
+        # rather than left to the equation, which a wrapped `G` would fail in a
+        # way that says nothing about why.
+        big_g = np.asarray(keygen.recover_g(f, g, big_f))
+        self.assertLess(int(np.abs(big_g).max()), arith.Q // 2)
+        self.assertEqual(
+            falcon_reference.ntru_equation(
+                f.tolist(), g.tolist(), big_f.tolist(), big_g.tolist()
+            ),
+            [arith.Q] + [0] * (n - 1),
+        )
+
+        # Algorithm 4 line 9, against bytes this repo did not produce.
+        published, key_ok = encoding.pk_decode(pk, n)
+        self.assertTrue(bool(np.asarray(key_ok)))
+        np.testing.assert_array_equal(
+            np.asarray(keygen.public_key(f, g)), np.asarray(published)
+        )
+
+        # And back out again, which is what says the encoders agree with the
+        # decoders on more than their own output.
+        np.testing.assert_array_equal(
+            np.asarray(encoding.sk_encode(f, g, big_f, n)), sk
+        )
+        np.testing.assert_array_equal(np.asarray(encoding.pk_encode(published, n)), pk)
+
+    @parameterized.parameters(*arith.DEGREES)
+    def test_the_public_key_inverts_what_it_divides_by(self, degree: int) -> None:
+        """`h = g/f` means `f·h = g mod q`, which is checkable without a key pair.
+
+        A separate case from the published one because it fails differently: the
+        published test says the division agrees with the reference, and this
+        says it is a division at all. A `base_div` that multiplied instead would
+        still produce a polynomial, and only this notices.
+        """
+        f, g = _draw(degree, degree + 40), _draw(degree, degree + 41)
+        if not bool(np.asarray(keygen.invertible(f))):
+            self.skipTest(f"the draw at degree {degree} is not a unit")
+        h = keygen.public_key(f, g)
+        product = arith.intt(
+            arith.base_mul(arith.ntt(arith.to_field(h)), arith.ntt(arith.to_field(f)))
+        )
+        np.testing.assert_array_equal(
+            np.asarray(arith.centered(product)),
+            np.asarray(arith.centered(arith.to_field(g))),
+        )
 
 
 if __name__ == "__main__":
