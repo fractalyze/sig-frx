@@ -99,6 +99,16 @@ def _unpack(limbs: object) -> list[int]:
     ]
 
 
+def _bits(*polynomials: Sequence[int]) -> int:
+    """The widest coefficient's bit length across every polynomial given.
+
+    Variadic because a width here is almost always a property of a *pair* —
+    `f` and `g` descend together and are budgeted together, and the level above
+    sizes itself from whichever of the two is wider.
+    """
+    return max(abs(v) for polynomial in polynomials for v in polynomial).bit_length()
+
+
 class WidthBoundTest(absltest.TestCase):
     """`norm_bits` has to be an upper bound, and be one for the right reason."""
 
@@ -124,7 +134,7 @@ class WidthBoundTest(absltest.TestCase):
                     extreme if (i // 2) % 2 == 0 else -extreme for i in range(degree)
                 ]
                 result = falcon_reference.field_norm(saturating)
-                widest = max(abs(v) for v in result).bit_length()
+                widest = _bits(result)
                 bound = keygen.norm_bits(bits, degree)
                 self.assertLessEqual(widest, bound)
                 self.assertLessEqual(bound - widest, 1)
@@ -142,7 +152,7 @@ class FieldNormTest(parameterized.TestCase):
     @parameterized.parameters(8, 16, 32, 64)
     def test_agrees_with_the_reference_at_small_degrees(self, degree: int) -> None:
         source = _draw(degree, degree)
-        bits = max(abs(v) for v in source).bit_length()
+        bits = _bits(source)
         result, _ = keygen.field_norm(keygen.to_limbs(source, bits), bits)
         self.assertEqual(_unpack(result), falcon_reference.field_norm(source))
 
@@ -203,7 +213,7 @@ class DescentTest(parameterized.TestCase):
         implementation's table is indexed the same way, by depth alone.
         """
         source = _draw(degree, degree + 1)
-        bits = max(abs(v) for v in source).bit_length()
+        bits = _bits(source)
         levels = degree.bit_length() - 1
         chain = keygen.descend(keygen.to_limbs(source, bits), bits, levels)
 
@@ -211,7 +221,7 @@ class DescentTest(parameterized.TestCase):
         expected = source
         for level, (limbs, bound) in enumerate(chain, start=1):
             expected = falcon_reference.field_norm(expected)
-            widest = max(abs(v) for v in expected).bit_length()
+            widest = _bits(expected)
             with self.subTest(level=level):
                 self.assertEqual(_unpack(limbs), expected)
                 self.assertLen(expected, degree >> level)
@@ -559,13 +569,16 @@ class LiftBoundTest(absltest.TestCase):
                     0 if i % 2 else (high if i == 0 else -high) for i in range(degree)
                 ]
                 result = falcon_reference.lift(lower, other)
-                widest = max(abs(v) for v in result).bit_length()
+                widest = _bits(result)
                 bound = keygen.lift_bits(low_bits, high_bits, degree)
                 self.assertLessEqual(widest, bound)
                 self.assertLessEqual(bound - widest, 1)
 
     def test_the_bound_refuses_a_degree_the_lift_has_no_step_for(self) -> None:
-        for degree in (0, 3, 12):
+        # 1 is in the sweep and is the one that is not obvious: a lift lands at
+        # *twice* its operand's degree, so degree 1 is not a result it can
+        # produce — where the descent, which halves, bottoms out there.
+        for degree in (0, 1, 3, 12):
             with self.subTest(degree=degree):
                 with self.assertRaisesRegex(ValueError, "power of two"):
                     keygen.lift_bits(4, 4, degree)
@@ -578,8 +591,8 @@ class LiftTest(parameterized.TestCase):
     def test_agrees_with_the_reference_at_small_degrees(self, degree: int) -> None:
         lower = _draw(degree // 2, degree)
         other = _draw(degree, degree + 1)
-        lower_bits = max(abs(v) for v in lower).bit_length()
-        other_bits = max(abs(v) for v in other).bit_length()
+        lower_bits = _bits(lower)
+        other_bits = _bits(other)
 
         result, bits = keygen.lift(
             keygen.to_limbs(lower, lower_bits),
@@ -590,7 +603,7 @@ class LiftTest(parameterized.TestCase):
 
         expected = falcon_reference.lift(lower, other)
         self.assertEqual(_unpack(result), expected)
-        self.assertLessEqual(max(abs(v) for v in expected).bit_length(), bits)
+        self.assertLessEqual(_bits(expected), bits)
 
     def test_the_substitution_and_the_wrap_sign_are_both_the_right_ones(self) -> None:
         """Two ways to write this step wrong, and one case that separates each.
@@ -655,10 +668,8 @@ class ReduceTest(absltest.TestCase):
         ]
         before = falcon_reference.ntru_equation(f, g, big_f, big_g)
 
-        small_bits = max(max(abs(v) for v in f), max(abs(v) for v in g)).bit_length()
-        big_bits = max(
-            max(abs(v) for v in big_f), max(abs(v) for v in big_g)
-        ).bit_length()
+        small_bits = _bits(f, g)
+        big_bits = _bits(big_f, big_g)
         reduced_f, reduced_g, width = keygen.reduce(
             _pack_poly(big_f, big_bits),
             _pack_poly(big_g, big_bits),
@@ -670,16 +681,12 @@ class ReduceTest(absltest.TestCase):
         self.assertEqual(
             falcon_reference.ntru_equation(f, g, values_f, values_g), before
         )
-        widest = max(
-            max(abs(v) for v in values_f), max(abs(v) for v in values_g)
-        ).bit_length()
+        widest = _bits(values_f, values_g)
         self.assertEqual(widest, width)
         # The planted multiple is gone in full: what is left is the short
         # representative, give or take one more copy of `(f, g)` where `k`
         # rounded the other way.
-        short_bits = max(
-            max(abs(v) for v in short_f), max(abs(v) for v in short_g)
-        ).bit_length()
+        short_bits = _bits(short_f, short_g)
         self.assertLessEqual(
             widest, max(short_bits, small_bits) + degree.bit_length() + 1
         )
@@ -690,7 +697,7 @@ class ReduceTest(absltest.TestCase):
         # decline to run rather than subtract a rounding artefact.
         degree = 8
         f, g = _draw(degree, 21), _draw(degree, 22)
-        bits = max(max(abs(v) for v in f), max(abs(v) for v in g)).bit_length()
+        bits = _bits(f, g)
         big_f, big_g = _draw(degree, 23), _draw(degree, 24)
         reduced_f, reduced_g, _ = keygen.reduce(
             keygen.to_limbs(big_f, bits),
@@ -705,19 +712,33 @@ class ReduceTest(absltest.TestCase):
 class NtruSolveTest(parameterized.TestCase):
     """Algorithm 6 end to end — the first point where the equation can be checked."""
 
-    def _coprime_seed(self, degree: int) -> int:
-        """A draw whose descent bottoms out at a coprime pair.
+    def _coprime_chain(self, degree: int) -> list[tuple[list[int], list[int]]]:
+        """A draw whose descent bottoms out at a coprime pair, and that descent.
 
         Roughly half of them do not, which is not a defect: Algorithm 5 answers
         a non-coprime bottom by drawing again, and `ok` is how the solver says
         so. Searching here keeps that retry out of the assertions below.
+
+        The chain comes back rather than the seed because finding the seed
+        *is* the chain — an `O(n²)` unbounded-integer descent per candidate —
+        and a caller handed the seed alone would descend a second time to get
+        what this already computed.
         """
         for seed in range(degree, degree + 40):
-            f, g = _draw(degree, seed), _draw(degree, seed + 1)
+            chain = [(_draw(degree, seed), _draw(degree, seed + 1))]
             for _ in range(degree.bit_length() - 1):
-                f, g = falcon_reference.field_norm(f), falcon_reference.field_norm(g)
-            if math.gcd(f[0], g[0]) == 1 and (f[0] % 2 or g[0] % 2):
-                return seed
+                current_f, current_g = chain[-1]
+                chain.append(
+                    (
+                        falcon_reference.field_norm(current_f),
+                        falcon_reference.field_norm(current_g),
+                    )
+                )
+            bottom_f, bottom_g = chain[-1]
+            if math.gcd(bottom_f[0], bottom_g[0]) == 1 and (
+                bottom_f[0] % 2 or bottom_g[0] % 2
+            ):
+                return chain
         raise AssertionError(f"no coprime bottom for degree {degree}")
 
     @parameterized.parameters(*arith.DEGREES)
@@ -737,9 +758,8 @@ class NtruSolveTest(parameterized.TestCase):
         wide — so a reduction that quietly did nothing would pass the equation
         and fail here.
         """
-        seed = self._coprime_seed(degree)
-        f, g = _draw(degree, seed), _draw(degree, seed + 1)
-        bits = max(max(abs(v) for v in f), max(abs(v) for v in g)).bit_length()
+        f, g = self._coprime_chain(degree)[0]
+        bits = _bits(f, g)
 
         big_f, big_g, width, ok = keygen.ntru_solve(
             keygen.to_limbs(f, bits), keygen.to_limbs(g, bits), bits, arith.Q
@@ -767,27 +787,10 @@ class NtruSolveTest(parameterized.TestCase):
         measured is the right one.
         """
         degree = 512
-        seed = self._coprime_seed(degree)
-        source_f, source_g = _draw(degree, seed), _draw(degree, seed + 1)
-        bits = max(
-            max(abs(v) for v in source_f), max(abs(v) for v in source_g)
-        ).bit_length()
-
         levels = degree.bit_length() - 1
-        chain = [(source_f, source_g)]
-        for _ in range(levels):
-            current_f, current_g = chain[-1]
-            chain.append(
-                (
-                    falcon_reference.field_norm(current_f),
-                    falcon_reference.field_norm(current_g),
-                )
-            )
-
+        chain = self._coprime_chain(degree)
         bottom_f, bottom_g = chain[-1]
-        bottom_bits = max(
-            max(abs(v) for v in bottom_f), max(abs(v) for v in bottom_g)
-        ).bit_length()
+        bottom_bits = _bits(bottom_f, bottom_g)
         solved_f, solved_g, ok = keygen.base_case(
             _pack(bottom_f[0], bottom_bits),
             _pack(bottom_g[0], bottom_bits),
@@ -803,18 +806,13 @@ class NtruSolveTest(parameterized.TestCase):
 
         for depth in range(levels - 1, -1, -1):
             level_f, level_g = chain[depth]
-            level_bits = max(
-                max(abs(v) for v in level_f), max(abs(v) for v in level_g)
-            ).bit_length()
+            level_bits = _bits(level_f, level_g)
             limbs_f = _pack_poly(level_f, level_bits)
             limbs_g = _pack_poly(level_g, level_bits)
 
             lifted_f, lifted_bits = keygen.lift(big_f, limbs_g, big_bits, level_bits)
             lifted_g, _ = keygen.lift(big_g, limbs_f, big_bits, level_bits)
-            widest_lift = max(
-                max(abs(v) for v in _unpack(lifted_f)),
-                max(abs(v) for v in _unpack(lifted_g)),
-            ).bit_length()
+            widest_lift = _bits(_unpack(lifted_f), _unpack(lifted_g))
             big_f, big_g, big_bits = keygen.reduce(lifted_f, lifted_g, limbs_f, limbs_g)
             values_f, values_g = _unpack(big_f), _unpack(big_g)
 

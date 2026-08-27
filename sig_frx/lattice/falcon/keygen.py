@@ -578,10 +578,15 @@ def lift_bits(lower_bits: int, other_bits: int, degree: int) -> int:
     `F'(x²)` is empty at every odd position, so the convolution sums `degree/2`
     products rather than `degree` of them. Each is one coefficient of each
     operand, and the negacyclic wrap flips signs without touching magnitudes.
+
+    `degree` is the **result's**, where [`norm_bits`](#norm_bits) takes its
+    input's — the two steps move in opposite directions, so each names the end
+    it is sized from. Both refuse a degree their step cannot reach: a lift lands
+    at twice its operand's degree, so 1 is not one of them.
     """
-    if degree < 1 or degree & (degree - 1):
-        raise ValueError(f"degree {degree} is not a power of two")
-    return lower_bits + other_bits + max(degree // 2 - 1, 0).bit_length()
+    if degree < 2 or degree & (degree - 1):
+        raise ValueError(f"degree {degree} is not a power of two above 1")
+    return lower_bits + other_bits + (degree // 2 - 1).bit_length()
 
 
 def lift(
@@ -692,11 +697,6 @@ def _view(values: ArrayLike) -> tuple[np.ndarray, np.ndarray, int]:
     return _host_summary(*_magnitudes(values))
 
 
-def _summarize(step: tuple[Any, Any, Any]) -> tuple[np.ndarray, np.ndarray, int]:
-    """The same, off a step that already computed them — no second device call."""
-    return _host_summary(step[1], step[2])
-
-
 def _width(values: ArrayLike) -> int:
     """The bit length of the widest magnitude in `values`, read back to the host."""
     return _view(values)[2]
@@ -749,17 +749,24 @@ def _subtract_multiple(
     value, because every operation here is exact modulo `2^(L·15)` and the
     answer fits.
 
+    **The wrap is applied to the operand, not to the products.** Every step
+    here is exact modulo `2^(L·15)`, so `-(a·d)` and `(-a)·d` are the same
+    limbs — and one is a single carry scan over the gathered array while the
+    other is one per digit of `k`. Negating first is what makes the digit loop
+    below cost four multiplies rather than four multiplies and four negations.
+
     Compiled, and that is the whole reason `shift` arrives as a value rather
     than as a Python integer. A step is a few hundred carry scans; dispatched
     one at a time they cost more than the arithmetic by an order of magnitude,
     and a shift baked in as a constant would have meant one compilation per
     step rather than one per level.
     """
-    gathered = fnp.take(fnp.asarray(wide), source, axis=0)
-    total = fnp.zeros_like(fnp.asarray(wide))
+    values = fnp.asarray(wide)
+    gathered = fnp.take(values, source, axis=0)
+    signed = _pick(fnp.asarray(flip), _negate(gathered), gathered)
+    total = fnp.zeros_like(values)
     for level in range(fnp.asarray(digits).shape[0]):
-        scaled = bigint.mul_small(gathered, digits[level][None, :, None])
-        terms = fnp.where(fnp.asarray(flip)[..., None], _negate(scaled), scaled)
+        terms = bigint.mul_small(signed, digits[level][None, :, None])
         while terms.shape[1] > 1:
             half = terms.shape[1] // 2
             terms = bigint.add(terms[:, :half], terms[:, half:])
@@ -793,22 +800,27 @@ def reduce(
     specification's own `while k ≠ 0`, run against a `k` that is deliberately
     truncated rather than one that is merely rounded.
 
-    ## The loop runs on the host, and that is what keeps the shift static
+    ## The loop runs on the host; the shift it decides is spent on the device
 
     A step's shift is `width(F) − width(f) − _CHUNK`, which depends on the
     values rather than on their budgets — and their budgets are no guide, since
     [`norm_bits`](#norm_bits) runs 2.10x wide by the bottom, so a shift taken
     from the bound would scale `f` clean out of existence rather than merely
-    imprecisely. Read the width back instead and the shift is an ordinary
-    Python integer, which is what [`bigint.shift_left`](bigint.py) already
-    takes. So the data-dependent shift
-    [`bigint.shift_right`](bigint.py) defers never has to exist: the
-    dependence is real, and it is resolved on the host, one level up from the
-    limbs. What crosses back is 120 bits of a 9,000-bit number.
+    imprecisely. Reading the width back is what makes it knowable, and it is
+    knowable *here*, as a Python integer.
+
+    It is then handed to [`_subtract_multiple`](#_subtract_multiple) as a value
+    rather than as a constant, which is a separate decision and a compile-time
+    one: baked in, each of the few hundred steps would compile a program of its
+    own. That is the caller [`bigint.shift_left_dynamic`](bigint.py) exists for
+    — and it is the *left* shift, because a step scales its correction up to
+    meet `F` rather than scaling `F` down to meet the correction, which is why
+    [`bigint.shift_right`](bigint.py)'s deferral still stands.
 
     The arithmetic all stays on device — `k·f`, the subtraction and the lift
     are the wide operations and none of them moves. What the host does is
-    decide the exponent and run the transform, which is `m` doubles wide.
+    decide the exponent and run the transform, which is `m` doubles wide; what
+    crosses back is 120 bits of a 9,000-bit number.
 
     Returning the width rather than a bound is the other half of that choice.
     A reduced width has no proof to lean on — it is a property of the basis,
@@ -832,7 +844,8 @@ def reduce(
     exponent = small_width - _SMALL_WINDOW
     f_fft = fft.fft(_floats(view_f, exponent))
     g_fft = fft.fft(_floats(view_g, exponent))
-    denominator = (f_fft * np.conj(f_fft) + g_fft * np.conj(g_fft)).real
+    f_conjugate, g_conjugate = np.conj(f_fft), np.conj(g_fft)
+    denominator = (f_fft * f_conjugate + g_fft * g_conjugate).real
 
     source, wrapped = _convolution_indices(degree)
     device_source = fnp.asarray(source)
@@ -841,9 +854,10 @@ def reduce(
     while width > small_width:
         shift = max(0, width - small_width - _CHUNK)
         scaled = exponent + shift
-        numerator = fft.fft(_floats(view_big_f, scaled)) * np.conj(f_fft) + fft.fft(
-            _floats(view_big_g, scaled)
-        ) * np.conj(g_fft)
+        numerator = (
+            fft.fft(_floats(view_big_f, scaled)) * f_conjugate
+            + fft.fft(_floats(view_big_g, scaled)) * g_conjugate
+        )
         quotient = numerator / denominator
         if not np.isfinite(quotient).all():
             break
@@ -853,9 +867,7 @@ def reduce(
         # evaluation domain is free: it commutes with the transform below, so
         # this costs a scan of `m` doubles and no second transform.
         peak = float(np.max(np.abs(quotient)))
-        if peak == 0.0:
-            break
-        excess = max(0, int(np.ceil(np.log2(peak))) - _CHUNK)
+        excess = max(0, int(np.ceil(np.log2(peak))) - _CHUNK) if peak else 0
         k = np.round(fft.ifft(quotient / 2.0**excess).real).astype(np.int64)
         if not k.any():
             break
@@ -863,30 +875,32 @@ def reduce(
 
         # A term's sign is the wrap's, flipped again where `k` itself is
         # negative, and its digits are `k` cut into limbs the multiply can take.
+        magnitude = np.abs(k)
         flip = fnp.asarray(wrapped ^ (k < 0)[None, :])
         digits = fnp.asarray(
             np.stack(
                 [
-                    (np.abs(k) >> (bigint.LIMB_BITS * level)) & int(bigint.MASK)
+                    (magnitude >> (bigint.LIMB_BITS * level)) & int(bigint.MASK)
                     for level in range(levels)
                 ]
             ).astype(np.uint32)
         )
         amount = fnp.asarray(np.int32(applied))
-        candidate_f = _subtract_multiple(
+        candidate_f, magnitude_f, negative_f = _subtract_multiple(
             values_f, wide_f, device_source, flip, digits, amount
         )
-        candidate_g = _subtract_multiple(
+        candidate_g, magnitude_g, negative_g = _subtract_multiple(
             values_g, wide_g, device_source, flip, digits, amount
         )
-        next_f, next_g = _summarize(candidate_f), _summarize(candidate_g)
+        next_f = _host_summary(magnitude_f, negative_f)
+        next_g = _host_summary(magnitude_g, negative_g)
         next_width = max(next_f[2], next_g[2])
         # A step that does not shorten is where the truncated `k` has run out of
         # meaning, and stopping on it is what makes the loop terminate: the
         # width is a non-negative integer and every step it takes lowers it.
         if next_width >= width:
             break
-        values_f, values_g = candidate_f[0], candidate_g[0]
+        values_f, values_g = candidate_f, candidate_g
         view_big_f, view_big_g = next_f, next_g
         width = next_width
 
@@ -917,20 +931,21 @@ def ntru_solve(
     degree = values_f.shape[0]
     levels = degree.bit_length() - 1
 
-    chain = [(values_f, values_g, bits)]
-    for _ in range(levels):
-        current_f, current_g, current_bits = chain[-1]
-        next_f, next_bits = field_norm(current_f, current_bits)
-        next_g, _ = field_norm(current_g, current_bits)
-        chain.append((next_f, next_g, next_bits))
+    # A level's width bound follows the entry width and the degree alone, so
+    # both descents produce the same sequence of bounds and only `f`'s is kept.
+    descent_f, descent_g = descend(values_f, bits, levels), descend(
+        values_g, bits, levels
+    )
+    chain_f = [values_f, *(value for value, _ in descent_f)]
+    chain_g = [values_g, *(value for value, _ in descent_g)]
+    bottom_bits = descent_f[-1][1]
 
-    bottom_f, bottom_g, bottom_bits = chain[-1]
-    big_f, big_g, ok = base_case(bottom_f[0], bottom_g[0], bottom_bits, q)
+    big_f, big_g, ok = base_case(chain_f[-1][0], chain_g[-1][0], bottom_bits, q)
     big_f, big_g = big_f[None, :], big_g[None, :]
     big_bits = max(_width(big_f), _width(big_g))
 
     for depth in range(levels - 1, -1, -1):
-        level_f, level_g, _ = chain[depth]
+        level_f, level_g = chain_f[depth], chain_g[depth]
         # Measured on both sides, not bounded. The descent's bound runs 2.10x
         # wide by the bottom, and sizing the lift from it would put roughly four
         # times the channels on the widest product in the whole recursion.
