@@ -54,6 +54,12 @@ this file is the map plus the rules every change must respect.
   line. The values agree, so a round trip, a reference comparison and a
   known-answer test all pass — pin it (`.sum(axis=-1, dtype=np.uint32)`), and
   assert the *dtype* in the host-vs-traced case, not only the values.
+  The rule has exactly one suspension, and it inverts rather than relaxes: inside
+  the `double_precision` scope
+  [Falcon's rational transform](docs/reference/conventions.md#falcons-second-transform-runs-in-double-precision)
+  opens, a lane *widens* and `uint32.sum()` returns `uint64`. It applies to
+  everything the scope calls, not only the floats it was opened for, so integers
+  stay outside it or pin their accumulator.
 - **Standards-exact, or it is not done.** Every scheme reproduces its
   specification byte for byte, gated on the published known-answer tests. A
   scheme that verifies its own signatures has demonstrated nothing — a

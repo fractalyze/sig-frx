@@ -230,6 +230,47 @@ operations vectorized over the leading axes; a backend that regressed on that
 would be a reason to revisit, and the shared shape is what keeps either outcome
 a small change.
 
+## Falcon's second transform runs in double precision
+
+Verification lives in `Z_q` and uses the integer NTT above. Key generation and
+signing work over the rationals instead, embedded in `C`, and that transform —
+[`fft.py`](../../sig_frx/lattice/falcon/fft.py) — carries a requirement the
+integer one does not.
+
+**The precision is a security property, not a numerical nicety.** Falcon's
+analysis assumes double precision, and `ffSampling` is where that is
+load-bearing: too little of it moves the sampled distribution away from the ideal
+one, which is what leaks the secret basis. A `float32` mantissa is 24 bits
+against 53.
+
+On the host that costs nothing, because numpy is `complex128` natively. Traced it
+costs a scope, so a traced caller wraps the whole operation in `double_precision`
+and every entry point **raises** outside it rather than returning a narrowed
+result — the stack's own signal there is a warning, which is the wrong shape for
+a difference a security analysis rests on. How that scope behaves in general
+belongs to FRX rather than to this repo and is described in
+[`conventions/frx.md`](https://github.com/fractalyze/claude-plugins/blob/main/plugins/playbook/conventions/frx.md).
+The edge that decides the calling convention here is that it scopes an operation
+and not a call, so it is the **caller's** to open: a callee that opened one and
+returned would hand back a wide array that narrows on the caller's next line.
+
+It is also the one place this repo's first non-negotiable is suspended, since an
+integer lane widens inside the scope. Nothing in the transform holds integers, so
+a caller that does keeps them outside it or pins the accumulator dtype.
+
+**Byte-exactness against the reference implementation is deliberately not a
+requirement**, and dropping it is what lets this module take the compiler as it
+is. Signing is randomized by design — §3.9 draws the salt per signature — so two
+correct implementations disagree on output by construction and there is no single
+signature to reproduce. What must hold is that a signature verifies and
+interoperates, which is why the gate is [the reference implementation driven as
+an oracle](testing.md#a-standard-that-publishes-no-vectors-still-gets-gated)
+rather than a table of expected outputs. Under `jit` a multiply-add is contracted
+into a fused `fma`, which rounds once where the reference rounds twice — a result
+that differs in the last place and is *more* accurate. Suppressing it is a change
+global to the compiler, and one scheme's test methodology is the wrong reason to
+make every other workload pay for it.
+
 ## Keys and signatures are bytes at the seam
 
 They cross the `Signature` seam as `uint8` arrays in the standard's encoding, not

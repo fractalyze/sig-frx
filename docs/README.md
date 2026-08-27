@@ -11,7 +11,7 @@ scheme is held to, **[`schemes/`](schemes)** is one design-notes page per scheme
 | Question                                                                                     | Where                                    |
 | -------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | What does this implementation claim against an adversary who can measure it — and what not?  | [`security.md`](reference/security.md)   |
-| How a scheme is written — the batch axis, the namespace rule, rejection loops, the NTT       | [`conventions.md`](reference/conventions.md) |
+| How a scheme is written — the batch axis, the namespace rule, rejection loops, the transforms and their precision | [`conventions.md`](reference/conventions.md) |
 | What it is gated on — the transcribed reference, the published vectors, what the harness refuses | [`testing.md`](reference/testing.md) |
 | What a number about it may claim — CI budgets, and recorded measurements                     | [`measurement.md`](reference/measurement.md) |
 
