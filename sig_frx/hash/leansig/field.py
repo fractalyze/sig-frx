@@ -1,13 +1,14 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """KoalaBear residues, and the wide host integers that decompose into them.
 
-Two things in leanSig are integers before they are field elements. The sponge's
-capacity packs a hashing task's shape into 32-bit slots
-([`poseidon.py`](poseidon.py)), and the message hash packs a 32-byte root and a
-`(epoch << 8) | prefix` tweak ([`encoding.py`](encoding.py)). Every one of them
-is wider than an array lane — the root is 256 bits, the tweak 40 — so each stays
-a Python integer on the host and only the limbs, all below `PRIME`, ever cross
-onto a device ([`../../../CLAUDE.md`](../../../CLAUDE.md)).
+Several things in leanSig are integers before they are field elements. The
+sponge's capacity packs a hashing task's shape into 32-bit slots
+([`poseidon.py`](poseidon.py)), the message hash packs a 32-byte root and a
+`(epoch << 8) | prefix` tweak ([`encoding.py`](encoding.py)), and the chain and
+tree hashes pack a position ([`tweakable.py`](tweakable.py)). Every one of them
+is wider than an array lane — the root is 256 bits, the tweaks 40 and 56 — so
+each stays a host integer and only the limbs, all below `PRIME`, ever cross onto
+a device ([`../../../CLAUDE.md`](../../../CLAUDE.md)).
 
 That is the whole module. It exists rather than staying private to its first
 caller because the decomposition has a second one, which is the question
@@ -23,10 +24,10 @@ wants the decomposition placed for a hash, and the placement is a reversal
 `to_field(limbs[::-1])` per call site would leave the reversal optional at each
 of them, and a forgotten one is a silently different hash — it round-trips, it
 self-checks, and only an upstream vector for that particular family catches it.
-Two more call sites are already scheduled: the chain and tree tweaks arrive with
-the family that hashes with them ([`params.py`](params.py)). Reversing a host
-list is not the device-side placement `poseidon.py` reserves to itself — its own
-docstring carves this case out.
+The chain and tree tweaks were the fourth and fifth call sites to want it, and
+they are what made the column form below necessary. Reversing a host list is not
+the device-side placement `poseidon.py` reserves to itself — its own docstring
+carves this case out.
 
 The conversion is `astype` and never a bitcast: the dtype's storage is a
 Montgomery representative, so reinterpreting the bytes yields a different number
@@ -72,16 +73,31 @@ def to_field(canonical: ArrayLike) -> Array:
     return fnp.asarray(np.asarray(canonical, dtype=np.int64).astype(F))
 
 
-def lane_reversed_limbs(value: int, num_limbs: int) -> Array:
+def lane_reversed_limbs(value: int | np.ndarray, num_limbs: int) -> Array:
     """`value` base-p, as the lane-reversed field vector a leanSig hash takes.
 
     The composite every caller wants: decompose, place, convert. Host-only for
     the reason the module docstring gives — `value` is wider than a lane.
+
+    **One value, or a column of them.** A Python integer gives `[num_limbs]`, and
+    a host integer array of shape `[B]` gives `[B, num_limbs]` — the batch a
+    Merkle level or a chain step tweaks with, where the level is shared and the
+    index is per entry ([`tweakable.py`](tweakable.py)). The two are one function
+    because they are one operation: `%` and `//` are elementwise, so the column
+    form is the scalar one with nothing removed, and writing it twice would
+    leave two places for the reversal to be forgotten in.
+
+    The widths do differ, and that difference is the column form's only real
+    constraint. A scalar caller packs something no integer dtype holds — a
+    256-bit root, a four-slot capacity shape — so it must stay a Python integer.
+    A column arrives as `int64`, which caps it at `2^63`; every packed tweak is
+    far below that, and anything that is not is refused by the limb-fit check
+    below rather than wrapping silently.
     """
-    return to_field(_int_to_base_p(value, num_limbs)[::-1])
+    return to_field(np.stack(_int_to_base_p(value, num_limbs), axis=-1)[..., ::-1])
 
 
-def _int_to_base_p(value: int, num_limbs: int) -> list[int]:
+def _int_to_base_p(value: int | np.ndarray, num_limbs: int) -> list[int | np.ndarray]:
     """`value` as `num_limbs` base-p limbs, least significant first.
 
     Private because `lane_reversed_limbs` is what callers want; kept as its own
@@ -89,18 +105,23 @@ def _int_to_base_p(value: int, num_limbs: int) -> list[int]:
     so this is gated directly.
 
     Host-only, and the packing is why: every caller decomposes something wider
-    than a lane, so only a Python integer holds the input without truncating.
-    Each limb that comes back is below `PRIME` and may then cross onto a device.
+    than a lane, so only a Python integer — or a host `int64` column — holds the
+    input without truncating. Each limb that comes back is below `PRIME` and may
+    then cross onto a device.
 
     A short decomposition is rejected rather than truncated — dropping the high
     part would silently change the hash it feeds, which is upstream's reasoning
-    for the same rejection.
+    for the same rejection. `np.any` is what makes that check read the same for
+    a scalar and for a column: one entry that does not fit rejects the batch,
+    because the alternative is a wrong hash for that entry alone.
     """
     limbs = []
     remaining = value
     for _ in range(num_limbs):
-        limbs.append(remaining % PRIME)
-        remaining //= PRIME
-    if remaining:
+        # `divmod` rather than `%` then `//=`, which on an ndarray would floor
+        # divide the caller's array in place.
+        remaining, limb = divmod(remaining, PRIME)
+        limbs.append(limb)
+    if np.any(remaining):
         raise ValueError(f"value does not fit in {num_limbs} base-p limbs")
     return limbs

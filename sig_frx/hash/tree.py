@@ -27,8 +27,15 @@ Two directions, and they are not symmetric because their callers are not:
 
 hash-frx's `Compression` does not fit and this does not use it: that one is an
 n-to-1 truncated-permutation compression over a field `Permutation`, while these
-nodes are a byte hash tweaked by an address. The two share the word and nothing
+nodes are a tweaked hash the family supplies. The two share the word and nothing
 else.
+
+**Nothing here is about bytes.** The walk pairs nodes, selects a side and hashes,
+and none of those is a byte operation — so the arrays are built at the family's
+own `dtype` rather than at `uint8`, which is what lets leanSig climb the same
+tree over KoalaBear digests ([`leansig/tweakable.py`](leansig/tweakable.py)).
+The one operand that is *not* the digest dtype is the left/right condition, which
+is a boolean at every family.
 """
 
 from __future__ import annotations
@@ -41,13 +48,19 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hash import adrs, adrs_encoding, bytestring
+from sig_frx.hash import adrs, adrs_encoding, bytestring, tweakable
 from sig_frx.hash.tweakable import NodeHash
 
-# Builds the addresses of the given nodes at one height: `(height, indices)`. The
-# indices are concrete where a whole tree is built and traced where a batch walks
-# its paths, so a builder takes them as they come rather than on the host.
-NodeAddresses = Callable[[int, ArrayLike], bytestring.ByteString]
+# Builds the tweaks of the given nodes at one height: `(height, indices)`.
+#
+# **Which namespace a builder admits is the builder's own fact.** FIPS 205's
+# takes its indices as they come — concrete where a whole tree is built, traced
+# where a batch walks its paths — so `root_from_path` hands it whatever it was
+# given. leanSig's cannot: its tweak packs an index past a 32-bit lane, so it is
+# host-only and raises on a tracer (`leansig/tweakable.py`). The walk itself
+# never learns the difference, which is the point of taking a builder, but a
+# caller choosing where to put its `@jit` boundary does have to know.
+NodeAddresses = Callable[[int, ArrayLike], tweakable.Tweak]
 
 
 @dataclass(frozen=True)
@@ -80,7 +93,7 @@ def xmss_node_addresses(position: TreePosition, *, compressed: bool) -> NodeAddr
     takes a builder and never learns what one encodes.
     """
 
-    def build(height: int, indices: ArrayLike) -> bytestring.ByteString:
+    def build(height: int, indices: ArrayLike) -> tweakable.Tweak:
         return adrs.encode_batch(
             adrs.hash_tree(
                 layer=position.layer,
@@ -107,7 +120,7 @@ def reduce_levels(
     FORS reduce all `k` of its trees in one pass: its node numbering is contiguous
     across them, so a level's pairs are exactly the per-tree pairs.
     """
-    current = fnp.asarray(nodes, dtype=fnp.uint8)
+    current = fnp.asarray(nodes, dtype=tweak.dtype)
     for level in range(levels):
         if current.shape[0] % 2:
             raise ValueError(
@@ -157,7 +170,7 @@ def auth_path(
     `[len(indices), levels, n]`, lowest level first — the order `root_from_path`
     consumes them in.
     """
-    nodes = fnp.asarray(leaves, dtype=fnp.uint8)
+    nodes = fnp.asarray(leaves, dtype=tweak.dtype)
     leaf_indices = np.asarray(indices, dtype=np.int64).reshape(-1)
     if np.any(leaf_indices < 0) or np.any(leaf_indices >= nodes.shape[0]):
         raise ValueError(
@@ -174,7 +187,7 @@ def auth_path(
 def _shifted(node_addresses: NodeAddresses, by: int) -> NodeAddresses:
     """A builder whose heights are offset, for reducing one level at a time."""
 
-    def build(height: int, indices: ArrayLike) -> bytestring.ByteString:
+    def build(height: int, indices: ArrayLike) -> tweakable.Tweak:
         return node_addresses(height + by, indices)
 
     return build
@@ -204,8 +217,8 @@ def root_from_path(
     is put to is a shift and a mask against a static level, so the walk is the same
     expression over a concrete index and a traced one.
     """
-    nodes = fnp.asarray(leaves, dtype=fnp.uint8)
-    sibling_paths = fnp.asarray(paths, dtype=fnp.uint8)
+    nodes = fnp.asarray(leaves, dtype=tweak.dtype)
+    sibling_paths = fnp.asarray(paths, dtype=tweak.dtype)
     leaf_indices = bytestring.index_column(indices)
     if sibling_paths.shape[0] != nodes.shape[0] or len(leaf_indices) != nodes.shape[0]:
         raise ValueError(
@@ -215,9 +228,7 @@ def root_from_path(
 
     for level in range(sibling_paths.shape[1]):
         siblings = sibling_paths[:, level, :]
-        on_the_right = fnp.asarray((leaf_indices >> level) & 1, dtype=fnp.uint8)[
-            :, None
-        ]
+        on_the_right = fnp.asarray((leaf_indices >> level) & 1, dtype=bool)[:, None]
         left = fnp.where(on_the_right, siblings, nodes)
         right = fnp.where(on_the_right, nodes, siblings)
         nodes = tweak.h(

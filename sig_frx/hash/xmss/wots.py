@@ -218,7 +218,7 @@ def ltree_compression(
     layers, trees, types, ltrees = _leading_columns(positions, 1)
 
     def compress(ends: Array) -> Array:
-        nodes = fnp.asarray(ends, dtype=fnp.uint8).reshape(
+        nodes = fnp.asarray(ends, dtype=hashes.dtype).reshape(
             len(positions), leaves, hashes.n
         )
         remaining = leaves
@@ -229,7 +229,7 @@ def ltree_compression(
                 len(positions) * parents, 2 * hashes.n
             )
             hashed = hashes.h(
-                repeat_per_entry(pub_seed, parents),
+                repeat_per_entry(pub_seed, parents, dtype=hashes.dtype),
                 adrs.encode_batch(
                     Adrs(
                         np.repeat(layers, parents),

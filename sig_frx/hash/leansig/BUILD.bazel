@@ -83,3 +83,26 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# The tweakable hash family — the chain step, the Merkle node and the leaf — plus
+# the packed tweaks each is positioned by. It reaches `//sig_frx/hash:tree` for
+# the `NodeAddresses` seam it fills rather than for the walk, which its callers
+# drive.
+py_library(
+    name = "tweakable",
+    srcs = [
+        "__init__.py",
+        "tweakable.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":field",
+        ":params",
+        ":poseidon",
+        "//sig_frx/hash:tree",
+        "//sig_frx/hash:tweakable",
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)

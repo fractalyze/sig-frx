@@ -60,6 +60,7 @@ class _Recorder:
         self.n = _N
         self.m = 30
         self.compressed_address = compressed
+        self.dtype = fnp.uint8
         self.widths: set[int] = set()
 
     def _record(self, address: ArrayLike) -> Array:
