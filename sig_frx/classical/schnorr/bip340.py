@@ -46,13 +46,28 @@ _CURVE = secp.SECP256K1
 # `SHA256(SHA256(tag) || SHA256(tag) || x)`).
 _AUX = hashlib.sha256(b"BIP0340/aux").digest()
 _NONCE = hashlib.sha256(b"BIP0340/nonce").digest()
-CHALLENGE = hashlib.sha256(b"BIP0340/challenge").digest()
+_CHALLENGE = hashlib.sha256(b"BIP0340/challenge").digest()
 
 
 def tagged(prefix: bytes, payload: bytes) -> bytes:
     """BIP-340's `SHA256(SHA256(tag) || SHA256(tag) || x)`, shared because
     BIP-327 incorporates it by reference rather than defining its own."""
     return hashlib.sha256(prefix + prefix + payload).digest()
+
+
+def challenge(nonce: bytes, public_key: bytes, message: bytes) -> int:
+    """BIP-340's `e`, reduced.
+
+    Reduced here rather than by the callers so that no unreduced challenge can
+    reach a field op — the same reason `_challenge_scalars` gives, now owed by
+    one function rather than by each caller that spells the tagged hash out.
+    BIP-327 derives its own challenge this way, which is why this is shared
+    rather than private.
+    """
+    return (
+        int.from_bytes(tagged(_CHALLENGE, nonce + public_key + message), "big")
+        % _CURVE.n
+    )
 
 
 @dataclass(frozen=True)
@@ -119,10 +134,7 @@ class Bip340:
         k = k0 if ry % 2 == 0 else n - k0
         r_bytes = rx.to_bytes(32, "big")
 
-        e = (
-            int.from_bytes(tagged(CHALLENGE, r_bytes + p_bytes + message_bytes), "big")
-            % n
-        )
+        e = challenge(r_bytes, p_bytes, message_bytes)
         scalar = _CURVE.scalar
         signature = r_bytes + int(scalar(k) + scalar(e) * d).to_bytes(32, "big")
         result = np.frombuffer(signature, dtype=np.uint8).copy()
@@ -272,18 +284,11 @@ class Bip340:
     ) -> list[int]:
         """`e_i`: each tagged challenge digest, already reduced mod n.
 
-        Reduced here rather than by the callers so no unreduced challenge
-        can reach a field op (the module gotcha in `secp.py`).
+        `challenge` reduces, so no unreduced value can reach a field op (the
+        module gotcha in `secp.py`).
         """
         return [
-            int.from_bytes(
-                tagged(
-                    CHALLENGE,
-                    entry[:32].tobytes() + key.tobytes() + row.tobytes(),
-                ),
-                "big",
-            )
-            % _CURVE.n
+            challenge(entry[:32].tobytes(), key.tobytes(), row.tobytes())
             for key, row, entry in zip(keys, messages, signatures)
         ]
 

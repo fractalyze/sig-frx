@@ -43,6 +43,21 @@ def _load(repo: str, file_name: str) -> dict[str, Any]:
         return json.load(handle)
 
 
+def _keys(data: dict[str, Any], case: dict[str, Any]) -> list[bytes]:
+    """A case's cosigner keys, in the order the case names."""
+    return [bytes.fromhex(data["pubkeys"][i]) for i in case["key_indices"]]
+
+
+def _tweak_pairs(
+    data: dict[str, Any], case: dict[str, Any]
+) -> list[tuple[bytes, bool]]:
+    """A case's `(tweak, is_xonly)` pairs, in application order."""
+    return [
+        (bytes.fromhex(data["tweaks"][i]), xonly)
+        for i, xonly in zip(case["tweak_indices"], case["is_xonly"], strict=True)
+    ]
+
+
 def _aggregate(data: dict[str, Any], case: dict[str, Any]) -> musig2.KeyAggContext:
     """A case's `key_indices` and `tweak_indices` applied in published order."""
     pubkeys = [bytes.fromhex(data["pubkeys"][i]) for i in case["key_indices"]]
@@ -109,7 +124,7 @@ class NonceGenTest(absltest.TestCase):
         super().setUp()
         self.data = _load("bip327_nonce_gen_vectors", "nonce_gen_vectors.json")
 
-    def _generate(self, case: dict[str, Any]) -> tuple[Any, bytes]:
+    def _generate(self, case: dict[str, Any]) -> tuple[musig2.SecNonce, bytes]:
         return musig2.nonce_gen(
             bytes.fromhex(case["rand_"]),
             bytes.fromhex(case["pk"]),
@@ -237,21 +252,28 @@ class _SignVectors(absltest.TestCase):
         self.data = _load("bip327_sign_verify_vectors", "sign_verify_vectors.json")
 
     def _keys(self, case: dict[str, Any]) -> list[bytes]:
-        return [bytes.fromhex(self.data["pubkeys"][i]) for i in case["key_indices"]]
+        return _keys(self.data, case)
 
     def _pnonces(self, case: dict[str, Any]) -> list[bytes]:
         return [bytes.fromhex(self.data["pnonces"][i]) for i in case["nonce_indices"]]
 
-    def _session(self, case: dict[str, Any]) -> Any:
+    def _session(self, case: dict[str, Any]) -> musig2.Session:
         return musig2.Session(
             aggnonce=bytes.fromhex(self.data["aggnonces"][case["aggnonce_index"]]),
             pubkeys=self._keys(case),
             message=bytes.fromhex(self.data["msgs"][case["msg_index"]]),
         )
 
-    def _secnonce(self, case: dict[str, Any]) -> Any:
+    def _secnonce(self, case: dict[str, Any]) -> musig2.SecNonce:
         index = case.get("secnonce_index", 0)
         return musig2.SecNonce.from_bytes(bytes.fromhex(self.data["secnonces"][index]))
+
+    def _sign(self, case: dict[str, Any]) -> bytes:
+        return musig2.sign(
+            self._secnonce(case),
+            bytes.fromhex(self.data["sk"]),
+            self._session(case),
+        )
 
 
 class SignTest(_SignVectors):
@@ -262,12 +284,9 @@ class SignTest(_SignVectors):
         self.assertNotEmpty(cases)
         for index, case in enumerate(cases):
             with self.subTest(case=index, comment=case.get("comment", "")):
-                psig = musig2.sign(
-                    self._secnonce(case),
-                    bytes.fromhex(self.data["sk"]),
-                    self._session(case),
+                self.assertEqual(
+                    self._sign(case).hex().upper(), case["expected"].upper()
                 )
-                self.assertEqual(psig.hex().upper(), case["expected"].upper())
 
     def test_an_aggregate_nonce_of_infinity_still_signs(self) -> None:
         """`R'` at infinity falls back to the generator rather than aborting —
@@ -280,10 +299,7 @@ class SignTest(_SignVectors):
         )
         aggnonce = bytes.fromhex(self.data["aggnonces"][case["aggnonce_index"]])
         self.assertEqual(aggnonce, bytes(66))
-        psig = musig2.sign(
-            self._secnonce(case), bytes.fromhex(self.data["sk"]), self._session(case)
-        )
-        self.assertEqual(psig.hex().upper(), case["expected"].upper())
+        self.assertEqual(self._sign(case).hex().upper(), case["expected"].upper())
 
     def test_a_faulty_cosigner_key_is_blamed_and_a_faulty_aggnonce_is_not(
         self,
@@ -300,11 +316,7 @@ class SignTest(_SignVectors):
         for index, case in enumerate(cases):
             with self.subTest(case=index, comment=case["comment"]):
                 with self.assertRaises(musig2.InvalidContributionError) as caught:
-                    musig2.sign(
-                        self._secnonce(case),
-                        bytes.fromhex(self.data["sk"]),
-                        self._session(case),
-                    )
+                    self._sign(case)
                 self.assertEqual(caught.exception.signer, case["error"]["signer"])
                 self.assertEqual(caught.exception.contrib, case["error"]["contrib"])
 
@@ -317,11 +329,7 @@ class SignTest(_SignVectors):
             if c["error"].get("message", "").startswith("first secnonce")
         )
         with self.assertRaises(ValueError):
-            musig2.sign(
-                self._secnonce(case),
-                bytes.fromhex(self.data["sk"]),
-                self._session(case),
-            )
+            self._sign(case)
 
     def test_a_signer_outside_the_key_list_refuses_to_sign(self) -> None:
         """Optional in BIP-327 and taken: a partial signature under a key the
@@ -333,11 +341,7 @@ class SignTest(_SignVectors):
             if "must be included" in c["error"].get("message", "")
         )
         with self.assertRaises(ValueError):
-            musig2.sign(
-                self._secnonce(case),
-                bytes.fromhex(self.data["sk"]),
-                self._session(case),
-            )
+            self._sign(case)
 
     def test_the_secnonce_round_trips_through_its_bytes(self) -> None:
         raw = bytes.fromhex(self.data["secnonces"][0])
@@ -399,7 +403,7 @@ class PartialSigAggTest(absltest.TestCase):
         super().setUp()
         self.data = _load("bip327_sig_agg_vectors", "sig_agg_vectors.json")
 
-    def _session(self, case: dict[str, Any]) -> Any:
+    def _session(self, case: dict[str, Any]) -> musig2.Session:
         return musig2.Session(
             aggnonce=bytes.fromhex(case["aggnonce"]),
             pubkeys=[
@@ -442,7 +446,7 @@ class PartialSigAggTest(absltest.TestCase):
         for case in cases:
             session = self._session(case)
             signatures.append(musig2.partial_sig_agg(self._psigs(case), session))
-            keys.append(session.key_context().xonly_bytes())
+            keys.append(session.key_context.xonly_bytes())
             messages.append(message)
 
         verdicts = scheme.verify(
@@ -453,19 +457,6 @@ class PartialSigAggTest(absltest.TestCase):
         )
         self.assertLen(verdicts, len(cases))
         self.assertTrue(bool(np.all(np.asarray(verdicts))))
-
-    def test_a_tweaked_session_still_verifies(self) -> None:
-        """Tweaking moves the aggregate key, and the signature has to follow it
-        — `tacc` is what carries that, and nothing before this stage spent it."""
-        case = next(c for c in self.data["valid_test_cases"] if c["tweak_indices"])
-        session = self._session(case)
-        untweaked = musig2.Session(
-            aggnonce=session.aggnonce, pubkeys=session.pubkeys, message=session.message
-        )
-        self.assertNotEqual(
-            session.key_context().xonly_bytes(),
-            untweaked.key_context().xonly_bytes(),
-        )
 
     def test_a_partial_signature_over_the_group_order_names_its_signer(self) -> None:
         cases = self.data["error_test_cases"]
@@ -500,7 +491,7 @@ class DeterministicSignTest(absltest.TestCase):
         return musig2.deterministic_sign(
             bytes.fromhex(self.data["sk"]),
             bytes.fromhex(case["aggothernonce"]),
-            [bytes.fromhex(self.data["pubkeys"][i]) for i in case["key_indices"]],
+            _keys(self.data, case),
             bytes.fromhex(self.data["msgs"][case["msg_index"]]),
             rand=_optional(case["rand"]),
             tweaks=[
@@ -582,7 +573,7 @@ class TweakedSigningTest(absltest.TestCase):
         super().setUp()
         self.data = _load("bip327_tweak_vectors", "tweak_vectors.json")
 
-    def _session(self, case: dict[str, Any]) -> Any:
+    def _session(self, case: dict[str, Any]) -> musig2.Session:
         return musig2.Session(
             aggnonce=bytes.fromhex(self.data["aggnonce"]),
             pubkeys=[

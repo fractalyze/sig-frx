@@ -259,10 +259,6 @@ py_binary(
 #
 # Two local runs of this target read 2.5x apart from each other, which is why
 # neither sized it — the CPU leg is the one that decides.
-#
-# The 51.7 s predates the signing, aggregation and deterministic stages, so it
-# understates the target as it now stands — re-read it from the first CI run
-# after those land rather than trusting the figure above to still describe it.
 py_test(
     name = "musig2_test",
     size = "medium",

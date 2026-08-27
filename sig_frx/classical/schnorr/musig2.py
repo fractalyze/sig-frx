@@ -42,6 +42,7 @@ and the sum is one reduction rather than a Python fold.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -303,8 +304,7 @@ def nonce_gen(
     if len(public_key) != _POINT_SIZE:
         raise ValueError(f"a public key is {_POINT_SIZE} bytes, not {len(public_key)}")
     if secret_key is not None:
-        mask = bip340.tagged(_AUX_TAG, rand)
-        rand = bytes(a ^ b for a, b in zip(secret_key, mask, strict=True))
+        rand = _mask_secret(secret_key, rand)
 
     prefixed = _message_prefix(message)
     scalars = [
@@ -321,9 +321,7 @@ def nonce_gen(
     if 0 in scalars:
         raise ValueError("the nonce derivation produced a zero scalar")
 
-    points = [secp.host_multiple_of_g(_CURVE, scalar) for scalar in scalars]
-    pubnonce = b"".join(secp.compressed_bytes(_CURVE, x, y) for x, y in points)
-    return SecNonce(scalars[0], scalars[1], public_key), pubnonce
+    return SecNonce(scalars[0], scalars[1], public_key), _publish(scalars)
 
 
 def _lift_all(parsed: list[tuple[int, int]], contrib: str) -> np.ndarray:
@@ -392,6 +390,51 @@ def _point_ext(data: bytes) -> np.ndarray | None:
     return points
 
 
+def _tweaked_context(
+    pubkeys: Sequence[bytes], tweaks: Sequence[tuple[bytes, bool]]
+) -> KeyAggContext:
+    """The aggregate key with its tweaks applied, in the order given.
+
+    Order is part of what the key commits to, so it is a rule rather than a
+    loop — and one both `Session` and `deterministic_sign` reach for, which is
+    why it is not written inside either.
+    """
+    context = key_agg(pubkeys)
+    for tweak, is_xonly in tweaks:
+        context = context.apply_tweak(tweak, is_xonly)
+    return context
+
+
+def _mask_secret(secret_key: bytes, rand: bytes) -> bytes:
+    """The secret folded into the caller's randomness, so a nonce stays
+    unpredictable even where the randomness was not."""
+    mask = bip340.tagged(_AUX_TAG, rand)
+    return bytes(a ^ b for a, b in zip(secret_key, mask, strict=True))
+
+
+def _public_key(secret_key: bytes) -> tuple[int, bytes]:
+    """A secret's scalar and its compressed public key.
+
+    The range and width checks are `secp.secret_scalar`'s rather than spelled
+    again here — a 31-byte secret whose value happens to be in range is refused
+    there and would not be by a bare `int.from_bytes`.
+    """
+    _, secret = secp.secret_scalar(
+        _CURVE, np.frombuffer(secret_key, dtype=np.uint8), "secret key"
+    )
+    return secret, secp.compressed_bytes(
+        _CURVE, *secp.host_multiple_of_g(_CURVE, secret)
+    )
+
+
+def _publish(scalars: Sequence[int]) -> bytes:
+    """The public half of a nonce pair: each scalar's point, compressed."""
+    return b"".join(
+        secp.compressed_bytes(_CURVE, *secp.host_multiple_of_g(_CURVE, scalar))
+        for scalar in scalars
+    )
+
+
 @dataclass(frozen=True)
 class Session:
     """Everything the cosigners must already agree on before anyone signs.
@@ -411,11 +454,19 @@ class Session:
     message: bytes
     tweaks: Sequence[tuple[bytes, bool]] = ()
 
+    def __post_init__(self) -> None:
+        # Frozen against rebinding, but a caller's list stays theirs to mutate
+        # — which a memoized derivation would silently outlive. Copying to
+        # tuples is what makes `key_context` safe to cache.
+        object.__setattr__(self, "pubkeys", tuple(self.pubkeys))
+        object.__setattr__(self, "tweaks", tuple(self.tweaks))
+
+    @functools.cached_property
     def key_context(self) -> KeyAggContext:
-        context = key_agg(self.pubkeys)
-        for tweak, is_xonly in self.tweaks:
-            context = context.apply_tweak(tweak, is_xonly)
-        return context
+        """The tweaked aggregate key. Derived once: a session is signed against
+        and verified against repeatedly, and every one of those re-ran a
+        `u`-term multi-scalar multiplication."""
+        return _tweaked_context(self.pubkeys, self.tweaks)
 
 
 @dataclass(frozen=True)
@@ -423,6 +474,7 @@ class _SessionValues:
     """The derived quantities both signing and verification need."""
 
     keys: KeyAggContext
+    key_parity: int
     coefficient: int
     nonce_x: int
     nonce_even: bool
@@ -430,7 +482,7 @@ class _SessionValues:
 
 
 def _session_values(session: Session) -> _SessionValues:
-    keys = session.key_context()
+    keys = session.key_context
     if len(session.aggnonce) != _PUBNONCE_SIZE:
         raise InvalidContributionError(None, "aggnonce")
 
@@ -447,9 +499,11 @@ def _session_values(session: Session) -> _SessionValues:
 
     first = _point_ext(session.aggnonce[:_POINT_SIZE])
     second = _point_ext(session.aggnonce[_POINT_SIZE:])
-    terms = [point for point in (first, second) if point is not None]
+    terms = []
+    if first is not None:
+        terms.append(first)
     if second is not None:
-        terms[-1] = secp.multiple(_CURVE, [coefficient], second)
+        terms.append(secp.multiple(_CURVE, [coefficient], second))
     nonce = secp.sum_points(_CURVE, np.concatenate(terms)) if terms else None
 
     # An aggregate nonce that cancels to the identity is a session the
@@ -460,18 +514,14 @@ def _session_values(session: Session) -> _SessionValues:
     else:
         nonce_x, nonce_y = secp.affine_ints(_CURVE, nonce)[0]
 
-    challenge = (
-        int.from_bytes(
-            bip340.tagged(
-                bip340.CHALLENGE,
-                nonce_x.to_bytes(_SCALAR_SIZE, "big") + aggregate_key + session.message,
-            ),
-            "big",
-        )
-        % _CURVE.n
+    # BIP-327 signs under BIP-340's challenge, reduction included — spelling
+    # the tagged hash out here would make this the third owner of that rule.
+    challenge = bip340.challenge(
+        nonce_x.to_bytes(_SCALAR_SIZE, "big"), aggregate_key, session.message
     )
     return _SessionValues(
         keys=keys,
+        key_parity=1 if keys.has_even_y() else _CURVE.n - 1,
         coefficient=coefficient,
         nonce_x=nonce_x,
         nonce_even=nonce_y % 2 == 0,
@@ -487,20 +537,13 @@ def _signer_coefficient(session: Session, public_key: bytes) -> int:
     aggregated is well-formed and simply fails to combine, so the coordinator
     learns only that aggregation failed and not who to ask.
     """
-    if public_key not in list(session.pubkeys):
+    if public_key not in session.pubkeys:
         raise ValueError("the signer's public key is not in the session's key list")
     return _coefficient(
         bip340.tagged(_KEYAGG_LIST, b"".join(session.pubkeys)),
         _second_key(session.pubkeys),
         public_key,
     )
-
-
-def _secret_scalar(secret_key: bytes, role: str) -> int:
-    value = int.from_bytes(secret_key, "big")
-    if not 0 < value < _CURVE.n:
-        raise ValueError(f"the {role} is out of range")
-    return value
 
 
 def sign(secnonce: SecNonce, secret_key: bytes, session: Session) -> bytes:
@@ -519,14 +562,12 @@ def sign(secnonce: SecNonce, secret_key: bytes, session: Session) -> bytes:
         if not 0 < scalar < _CURVE.n:
             raise ValueError(f"the {role} secnonce value is out of range")
 
-    secret = _secret_scalar(secret_key, "secret key")
-    public_key = secp.compressed_bytes(_CURVE, *secp.host_multiple_of_g(_CURVE, secret))
+    secret, public_key = _public_key(secret_key)
     if public_key != secnonce.public_key:
         raise ValueError("the secnonce was drawn for a different public key")
 
     weight = _signer_coefficient(session, public_key)
-    parity = 1 if values.keys.has_even_y() else _CURVE.n - 1
-    effective = parity * values.keys.gacc * secret % _CURVE.n
+    effective = values.key_parity * values.keys.gacc * secret % _CURVE.n
     total = (
         first + values.coefficient * second + values.challenge * weight * effective
     ) % _CURVE.n
@@ -562,8 +603,7 @@ def partial_sig_agg(psigs: Sequence[bytes], session: Session) -> bytes:
             raise InvalidContributionError(signer, "psig")
         total = (total + share) % _CURVE.n
 
-    parity = 1 if values.keys.has_even_y() else _CURVE.n - 1
-    total = (total + values.challenge * parity * values.keys.tacc) % _CURVE.n
+    total = (total + values.challenge * values.key_parity * values.keys.tacc) % _CURVE.n
     return values.nonce_x.to_bytes(_SCALAR_SIZE, "big") + total.to_bytes(
         _SCALAR_SIZE, "big"
     )
@@ -599,9 +639,14 @@ def partial_sig_verify(
     if total >= _CURVE.n:
         return False
 
-    x, parity = _parse_point(pubnonces[signer][:_POINT_SIZE], signer, "pubnonce")
-    x2, parity2 = _parse_point(pubnonces[signer][_POINT_SIZE:], signer, "pubnonce")
-    points = _lift_all([(x, parity), (x2, parity2)], "pubnonce")
+    nonce = pubnonces[signer]
+    points = _lift_all(
+        [
+            _parse_point(nonce[at : at + _POINT_SIZE], signer, "pubnonce")
+            for at in (0, _POINT_SIZE)
+        ],
+        "pubnonce",
+    )
     commitment = secp.sum_points(
         _CURVE,
         np.concatenate(
@@ -611,11 +656,9 @@ def partial_sig_verify(
     if not values.nonce_even:
         commitment = secp.multiple(_CURVE, [_CURVE.n - 1], commitment)
 
-    key_x, key_parity = _parse_point(pubkeys[signer], signer, "pubkey")
-    key_point = _lift_all([(key_x, key_parity)], "pubkey")
+    key_point = _lift_all([_parse_point(pubkeys[signer], signer, "pubkey")], "pubkey")
     weight = _signer_coefficient(session, pubkeys[signer])
-    parity_factor = 1 if values.keys.has_even_y() else _CURVE.n - 1
-    scaled = values.challenge * weight * parity_factor * values.keys.gacc % _CURVE.n
+    scaled = values.challenge * weight * values.key_parity * values.keys.gacc % _CURVE.n
 
     left = secp.multiple(_CURVE, [total], _CURVE.generator)
     right = secp.sum_points(
@@ -652,14 +695,8 @@ def deterministic_sign(
     the coordinator needs both and there is no round in which to send them
     separately.
     """
-    signing_key = secret_key
-    if rand is not None:
-        mask = bip340.tagged(_AUX_TAG, rand)
-        signing_key = bytes(a ^ b for a, b in zip(secret_key, mask, strict=True))
-
-    context = key_agg(pubkeys)
-    for tweak, is_xonly in tweaks:
-        context = context.apply_tweak(tweak, is_xonly)
+    signing_key = secret_key if rand is None else _mask_secret(secret_key, rand)
+    context = _tweaked_context(pubkeys, tweaks)
 
     preimage = (
         signing_key
@@ -679,21 +716,16 @@ def deterministic_sign(
     if 0 in scalars:
         raise ValueError("the deterministic nonce derivation produced a zero scalar")
 
-    points = [secp.host_multiple_of_g(_CURVE, scalar) for scalar in scalars]
-    pubnonce = b"".join(secp.compressed_bytes(_CURVE, x, y) for x, y in points)
-    own_key = secp.compressed_bytes(
-        _CURVE,
-        *secp.host_multiple_of_g(_CURVE, _secret_scalar(secret_key, "secret key")),
-    )
+    pubnonce = _publish(scalars)
+    _, own_key = _public_key(secret_key)
 
-    # `nonce_agg` blames by position, and position one here is the aggregate the
-    # coordinator supplied rather than a cosigner — so its verdict is renamed
-    # rather than passed through, which is what the published cases require.
+    # `nonce_agg` blames by position, and only position one can fail: position
+    # zero is the pubnonce built just above, from scalars already checked
+    # non-zero. So every verdict it can reach here names the aggregate the
+    # coordinator supplied, which is nobody's contribution.
     try:
         aggnonce = nonce_agg([pubnonce, other_nonces])
     except InvalidContributionError as error:
-        if error.signer == 0:
-            raise
         raise InvalidContributionError(None, "aggothernonce") from error
 
     session = Session(
