@@ -73,16 +73,11 @@ py_library(
     ],
 )
 
-# `medium` for the margin rather than the runtime, sized from the worst run on
-# the slowest leg per ../../../../docs/reference/measurement.md. The most recent
-# fresh CI run reads 35.6 s on the CPU leg and 48.5 s on the GPU leg, so the GPU
-# leg is the one deciding — it was the faster of the two when this was first
-# sized, and the order has since swapped. 48.5 s is 81% of `small`'s 60 s, far
-# past the half where the page moves a target up, and an earlier revision proved
-# it the expensive way by timing out there and taking the suite red. A
-# workstation reads 0.32x the CPU leg, which is the number that argues for
-# `small` and the reason this says re-check against a CI run, not a workstation,
-# before shrinking it. Nearly all of the cost is compiling the traced leg.
+# `medium`, decided by the GPU leg: 48.5 s against the CPU leg's 35.6 s, the two
+# having swapped order since this was first sized. That is 81% of `small`'s
+# 60 s, well past the half-a-budget rule in
+# ../../../../docs/reference/measurement.md, and an earlier revision proved it by
+# timing out there. Nearly all of it is compiling the traced leg.
 py_test(
     name = "mode_test",
     size = "medium",
@@ -110,27 +105,12 @@ py_library(
     ],
 )
 
-# `small`, and unlike its siblings this one is sized from CI rather than argued
-# up for margin. On the CPU leg: 11.2 / 10.2 / 20.8 s when the encoding slice
-# landed, 13.0 s today. The worst is 20.8 s against `small`'s 60 s — 35% of it,
-# where ../../../../docs/reference/measurement.md moves a target up at half.
-#
-# Those CPU numbers are the 2.2x run-to-run spread that page describes, caught in
-# the act: the first two runs would have argued this was a fifth of its budget.
-# Do not re-derive the headroom from a subset of them — **a run past 30 s moves
-# this to `medium`**, and the honest reading today is 1.4x of margin rather than
-# the 5x the first two suggested.
-#
-# The GPU leg read 10.6 / 10.7 / 9.2 s then and 19.9 / 20.1 s now. Nothing here
-# changed; the hash-frx pin moved twice in between and no run isolated which
-# change did it. It matters only in that the leg no longer sits at half the CPU
-# one — both now land near that 35%, so the 30 s trip-wire above is the GPU
-# leg's too.
-#
-# It sits under `mode_test` beside it because its traced leg compiles two
-# width-24 compressions rather than a 25-chunk sponge. A later slice adding
-# traced cases at the leaf shape should expect to pay what `mode_test` pays and
-# re-check against a CI run, never against a workstation.
+# `small`, decided by the worst CPU run: 20.8 s against 20.1 s on the GPU leg —
+# 35% of the 60 s budget, where ../../../../docs/reference/measurement.md moves a
+# target up at half. The CPU leg spread 2x across runs of this branch, so **a run
+# past 30 s on either leg moves this to `medium`**. It undercuts `mode_test`
+# because its traced leg compiles two width-24 compressions rather than a
+# 25-chunk sponge.
 py_test(
     name = "encoding_test",
     size = "small",
@@ -161,42 +141,15 @@ py_library(
     ],
 )
 
-# `large`, sized from CI, and the **GPU leg decides it** — the slower of the two
-# and so the one ../../../../docs/reference/measurement.md points at. The 3.4x
-# executor factor deliberately does not apply here; that one is the CPU leg's.
-# This target's current sources have had exactly one fresh run: 52.0 s on the CPU
-# leg and **75.6 s on the GPU leg**, which is 25% of `medium`.
+# `large`, decided by the GPU leg: 75.6 s against 52.0 s on the CPU leg. That is
+# 25% of `medium`, but this leg has been measured up to 2.3x slower under load,
+# which puts a bad run at ~176 s — 59% of it, past the half-a-budget rule in
+# ../../../../docs/reference/measurement.md. The only run this target ever had
+# under `medium` agrees, at 152.2 s.
 #
-# It keeps `large` rather than shrinking to fit that number, because the leg it
-# came from is not steady and one sample cannot see that. Two runs of this leg
-# share six freshly-executed targets, and every one of them moved: 1.45x to
-# 2.33x, median 1.8x, with the leg's total fresh test time going 1547.9 s to
-# 3265.1 s across *fewer* targets. A budget covers the worst run rather than the
-# typical one, so 75.6 s on that leg is ~176 s — 59% of `medium`, past the half
-# where the page moves a target up. The only run this target has ever had under
-# `medium` agrees, at **152.2 s**, 51% of it.
-#
-# That pair also retires a reading this comment used to carry. The 1.77x it
-# showed here is the median of the six, not something this suite does — and it
-# does not contradict measurement.md's 1.07x, which the page already scopes to
-# "a property of a quiet box rather than of the leg". This is the same leg on a
-# loud one, and the page's threshold is coarse enough to cover it.
-#
-# Two traps sit behind that misreading and both are cheap to repeat. A `size`
-# edit is itself a cache miss, so the 86.1 s this read under `large` and the
-# 152.2 s it read under `medium` are two different actions rather than one
-# target's spread — the sources were byte-identical across them. And a `(cached)`
-# line is a replayed duration, not a measurement: the 86.1 s that appears in a
-# third run is the first run's execution seen twice. A merge run replays the
-# whole package that way, so a fresh sample only ever comes from sources that
-# changed.
-#
-# The cost is compile, not arithmetic, and it is spread rather than concentrated
-# — as shares of the classes' total on one local GPU leg, over a process start
-# that is not in them: the tree walk 35% (a `TEST` leaf and eight vmapped
-# width-24 levels in one graph), the tree 20%, the `PROD` leaf 19%, the chain
-# walk 14%, the two compressions 6% each. There is no single case that trimming
-# would meaningfully shorten.
+# One sample, because a target only re-runs when its own inputs change: a merge
+# run replays this whole package as `(cached)`, and so does any run that did not
+# touch it. Gather more from PRs that do.
 py_test(
     name = "tweakable_test",
     size = "large",
