@@ -144,3 +144,18 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# The line between a caller mistake and a verdict, which six schemes' `verify`
+# used to draw separately. `small`: the batch preamble is shape arithmetic over
+# operands a few bytes wide, and the one traced case compiles a slice.
+py_test(
+    name = "batch_test",
+    size = "small",
+    srcs = ["batch_test.py"],
+    deps = [
+        "//sig_frx:batch",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)

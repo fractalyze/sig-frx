@@ -73,6 +73,7 @@ py_library(
         ":hashes",
         ":params",
         ":wots",
+        "//sig_frx:batch",
         "//sig_frx:context",
         "//sig_frx/hash:tree",
         "//sig_frx/hash:wots",

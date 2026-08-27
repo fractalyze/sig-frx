@@ -59,6 +59,16 @@ py_library(
     ],
 )
 
+# The batch preamble every scheme's `verify` shares, and the per-standard
+# reading of what a wrong width means. Top level for `:arrays`' reason — the
+# hash-based and the lattice packages both open `verify` with it.
+py_library(
+    name = "batch",
+    srcs = ["batch.py"],
+    visibility = ["//visibility:public"],
+    deps = [requirement("frx")],
+)
+
 # The pre-hash variants' shared record, over `:context`'s framing. Top level
 # because both standards define one and each scheme family is its own package.
 py_library(

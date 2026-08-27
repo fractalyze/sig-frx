@@ -151,5 +151,11 @@ class Signature(Protocol):
 
         `context` applies to the whole batch, matching how a verifier is deployed:
         one protocol domain, many signatures.
+
+        A wrong rank, or a batch whose parts do not line up, is a caller mistake
+        and raises; a wrong *width* is every entry's answer at once, and whether
+        that answer is `False` or an exception is the implementing standard's to
+        say. [`batch.py`](batch.py) holds that rule and each scheme's reading of
+        it, so the six that open `verify` with it cannot drift again.
         """
         ...

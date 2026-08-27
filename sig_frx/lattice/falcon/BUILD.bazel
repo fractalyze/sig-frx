@@ -112,6 +112,7 @@ py_library(
     deps = [
         ":arith",
         ":encoding",
+        "//sig_frx:batch",
         "//sig_frx:context",
         "//sig_frx:hashes",
         "//sig_frx:signature",

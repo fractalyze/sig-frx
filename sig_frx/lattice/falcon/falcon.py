@@ -106,6 +106,7 @@ from frx.typing import ArrayLike
 from hash_frx import SHAKE256_RATE
 
 from sig_frx import context as context_rules
+from sig_frx.batch import require_batch
 from sig_frx.hashes import shake256
 from sig_frx.lattice import rejection
 from sig_frx.lattice.falcon import arith, encoding
@@ -327,37 +328,23 @@ class Falcon:
         """
         context_rules.require_empty(context, "Falcon (FN-DSA)")
         params = self.params
-        keys = fnp.asarray(public_key, dtype=fnp.uint8)
-        signatures = fnp.asarray(signature, dtype=fnp.uint8)
-        bodies = fnp.asarray(message, dtype=fnp.uint8)
-        if keys.ndim != 2:
-            raise ValueError(
-                f"a public key batch is [B, {params.public_key_size}], got shape "
-                f"{tuple(keys.shape)}"
-            )
-        batch = keys.shape[0]
-        if signatures.ndim != 2 or signatures.shape[0] != batch:
-            raise ValueError(
-                f"one signature per public key, as a [B, {params.signature_size}] "
-                f"batch: got {batch} keys and signatures of shape "
-                f"{tuple(signatures.shape)}"
-            )
-        if bodies.ndim != 2 or bodies.shape[0] != batch:
-            raise ValueError(
-                f"one message per public key, as a [B, L] batch: got {batch} keys "
-                f"and messages of shape {tuple(bodies.shape)}"
-            )
-        if (
-            keys.shape[1] != params.public_key_size
-            or signatures.shape[1] != params.signature_size
-        ):
-            return fnp.zeros(batch, dtype=bool)
+        operands = require_batch(
+            public_key,
+            message,
+            signature,
+            public_key_size=params.public_key_size,
+            signature_size=params.signature_size,
+        )
+        if not operands.well_formed:
+            return fnp.zeros(operands.size, dtype=bool)
 
         # The hoist: decoded and transformed once for the batch, outside the
         # mapped body, so the transform is not re-entered per row.
-        h, key_ok = encoding.pk_decode(keys, params.n)
+        h, key_ok = encoding.pk_decode(operands.public_key, params.n)
         h_hat = arith.ntt(arith.to_field(h))
-        return key_ok & frx.vmap(self._verify_one)(bodies, signatures, h_hat)
+        return key_ok & frx.vmap(self._verify_one)(
+            operands.message, operands.signature, h_hat
+        )
 
     def _verify_one(self, message: Array, signature: Array, h_hat: Array) -> Array:
         """One entry of Algorithm 16, as the body `verify` maps.

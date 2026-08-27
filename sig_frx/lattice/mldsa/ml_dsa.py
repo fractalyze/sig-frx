@@ -68,6 +68,7 @@ from frx.typing import ArrayLike
 from sig_frx import context as ctx
 from sig_frx import prehash
 from sig_frx.arrays import namespace
+from sig_frx.batch import require_batch
 from sig_frx.hashes import shake256
 from sig_frx.lattice import rejection
 from sig_frx.lattice.mldsa import arith, encoding, sampling
@@ -490,32 +491,18 @@ class MlDsa:
         verdict the standard defines.
         """
         params = self.params
-        keys = fnp.asarray(public_key, dtype=fnp.uint8)
-        signatures = fnp.asarray(signature, dtype=fnp.uint8)
-        bodies = fnp.asarray(messages, dtype=fnp.uint8)
-        if keys.ndim != 2:
-            raise ValueError(
-                f"a public key batch is [B, {params.public_key_size}], got shape "
-                f"{tuple(keys.shape)}"
-            )
-        batch = keys.shape[0]
-        if signatures.ndim != 2 or signatures.shape[0] != batch:
-            raise ValueError(
-                f"one signature per public key, as a [B, {params.signature_size}] "
-                f"batch: got {batch} keys and signatures of shape "
-                f"{tuple(signatures.shape)}"
-            )
-        if bodies.ndim != 2 or bodies.shape[0] != batch:
-            raise ValueError(
-                f"one message per public key, as a [B, L] batch: got {batch} keys "
-                f"and messages of shape {tuple(bodies.shape)}"
-            )
-        if (
-            keys.shape[1] != params.public_key_size
-            or signatures.shape[1] != params.signature_size
-        ):
-            return fnp.zeros(batch, dtype=bool)
-        return frx.vmap(self._verify_one)(keys, bodies, signatures)
+        operands = require_batch(
+            public_key,
+            messages,
+            signature,
+            public_key_size=params.public_key_size,
+            signature_size=params.signature_size,
+        )
+        if not operands.well_formed:
+            return fnp.zeros(operands.size, dtype=bool)
+        return frx.vmap(self._verify_one)(
+            operands.public_key, operands.message, operands.signature
+        )
 
     def _verify_one(self, public_key: Array, message: Array, signature: Array) -> Array:
         """One entry of Algorithm 8, as the body `verify_internal` maps.

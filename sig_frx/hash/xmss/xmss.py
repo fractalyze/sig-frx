@@ -71,6 +71,7 @@ from frx.typing import ArrayLike
 from hash_frx import Sha256
 
 from sig_frx import context as context_rules
+from sig_frx.batch import WrongWidth, require_batch
 from sig_frx.hash import tree
 from sig_frx.hash.wots import WotsParams
 from sig_frx.hash.xmss import adrs, wots
@@ -520,28 +521,25 @@ class Xmss:
         """
         context_rules.require_empty(context, "XMSS (RFC 8391)")
         params = self.params
-        keys = fnp.asarray(public_key, dtype=fnp.uint8)
-        if keys.ndim != 2 or keys.shape[1] != self.public_key_size:
-            raise ValueError(
-                f"a public key batch is [B, {self.public_key_size}], got shape "
-                f"{tuple(keys.shape)}"
-            )
-        batch = keys.shape[0]
-        signatures = fnp.asarray(signature, dtype=fnp.uint8)
-        if signatures.shape != (batch, self.signature_max_size):
-            # RFC 8391 defines no verdict for a mis-sized signature the way FIPS
-            # 205 §Algorithm 20 does, so this is a caller that built the batch
-            # wrongly rather than a rejection the standard asks for.
-            raise ValueError(
-                f"a signature batch is [{batch}, {self.signature_max_size}], got "
-                f"shape {tuple(signatures.shape)}"
-            )
-        messages = fnp.asarray(message, dtype=fnp.uint8)
-        if messages.ndim != 2 or messages.shape[0] != batch:
-            raise ValueError(
-                f"one message per public key, as a [B, L] batch: got {batch} keys "
-                f"and messages of shape {tuple(messages.shape)}"
-            )
+        # RFC 8391 defines no verdict for a mis-sized key or signature the way
+        # the FIPS standards do, so either is a caller that built the batch
+        # wrongly rather than a rejection the standard asks for. That makes this
+        # the one scheme here whose widths are both errors, which is why it names
+        # them rather than taking the default (`batch.py`).
+        operands = require_batch(
+            public_key,
+            message,
+            signature,
+            public_key_size=self.public_key_size,
+            signature_size=self.signature_max_size,
+            public_key_width=WrongWidth.ERROR,
+            signature_width=WrongWidth.ERROR,
+        )
+        keys, messages, signatures = (
+            operands.public_key,
+            operands.message,
+            operands.signature,
+        )
 
         roots, pub_seeds = keys[:, : params.n], keys[:, params.n :]
         indices, randomizers, bodies = self._parse_signature(signatures)

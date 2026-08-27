@@ -76,6 +76,7 @@ from hash_frx import block_size as block_size_of
 
 from sig_frx import context as ctx
 from sig_frx import hashes
+from sig_frx.batch import WrongWidth, require_batch
 from sig_frx.hash import bytestring, tweakable
 from sig_frx.hash.shrincs import fxmss, stateless
 
@@ -340,28 +341,23 @@ class Shrincs:
         `[B, L]`, and the result is `bool[B]`. `context` applies to the whole
         batch.
         """
-        keys = fnp.asarray(public_key, dtype=fnp.uint8)
-        if keys.ndim != 2 or keys.shape[1] != self.public_key_size:
-            raise ValueError(
-                f"a public key batch is [B, {self.public_key_size}], got shape "
-                f"{tuple(keys.shape)}"
-            )
-        batch = keys.shape[0]
-        signatures = fnp.asarray(signature, dtype=fnp.uint8)
-        if signatures.ndim != 2 or signatures.shape[0] != batch:
-            raise ValueError(
-                f"one signature per public key, as a [B, {self.signature_max_size}] "
-                f"batch: got {batch} keys and signatures of shape "
-                f"{tuple(signatures.shape)}"
-            )
-        messages = fnp.asarray(message, dtype=fnp.uint8)
-        if messages.ndim != 2 or messages.shape[0] != batch:
-            raise ValueError(
-                f"one message per public key, as a [B, L] batch: got {batch} keys "
-                f"and messages of shape {tuple(messages.shape)}"
-            )
-        if signatures.shape[1] != self.signature_max_size:
-            return fnp.zeros(batch, dtype=bool)
+        # SLH-DSA's reading, which this scheme inherits along with the leg that
+        # reaches it: the signature's width is a verdict, the key's is not.
+        operands = require_batch(
+            public_key,
+            message,
+            signature,
+            public_key_size=self.public_key_size,
+            signature_size=self.signature_max_size,
+            public_key_width=WrongWidth.ERROR,
+        )
+        if not operands.well_formed:
+            return fnp.zeros(operands.size, dtype=bool)
+        keys, messages, signatures = (
+            operands.public_key,
+            operands.message,
+            operands.signature,
+        )
 
         # Both paths run for every entry and the indicator selects — there is no
         # branch to take, here or under a tracer. The stateless leg is reached as

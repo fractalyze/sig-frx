@@ -59,6 +59,7 @@ py_library(
         ":encoding",
         ":sampling",
         "//sig_frx:arrays",
+        "//sig_frx:batch",
         "//sig_frx:context",
         "//sig_frx:hashes",
         "//sig_frx:prehash",
