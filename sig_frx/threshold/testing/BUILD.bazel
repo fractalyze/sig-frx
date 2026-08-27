@@ -13,6 +13,7 @@ py_test(
     deps = [
         "//sig_frx/threshold:ed25519_sha512",
         "//sig_frx/threshold:frost",
+        "//sig_frx/threshold:group",
         "//sig_frx/threshold:secp256k1_sha256",
         "@rules_python//python/runfiles",
         requirement("absl_py"),

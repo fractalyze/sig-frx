@@ -1,10 +1,15 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """FROST (RFC 9591): the two-round threshold Schnorr protocol, one skeleton.
 
-The RFC defines the protocol once and five ciphersuites over it, so the round
-functions here take a `Ciphersuite` and never name a curve; a ciphersuite is
-constants and hash instantiations, nothing more. The seam is not
-`Signature`'s: a threshold scheme signs in two communication rounds with
+The RFC defines the protocol once and five ciphersuites over it, so nothing
+here names a curve; a ciphersuite is constants and hash instantiations,
+nothing more. It arrives through one of two seams, and which one a function
+takes is the point: a `Ciphersuite` where the RFC's own transcript is being
+derived, and the protocol-agnostic
+[`PrimeOrderGroup`](group.py) everywhere else — the dealer, the
+interpolation, the commitment-list validation. A second threshold protocol
+over these curves reuses the latter and brings its own transcript. The seam
+is not `Signature`'s: a threshold scheme signs in two communication rounds with
 per-participant state, which is the shape problem a stateful scheme's `sign`
 already answered — its own named surface, with the seam left whole. What
 *is* unchanged is verification: the aggregate output is a standard Schnorr
@@ -28,28 +33,30 @@ vectors start from).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
+
+from sig_frx.threshold.group import PrimeOrderGroup
 
 
-class Ciphersuite(Protocol):
+@runtime_checkable
+class Ciphersuite(PrimeOrderGroup, Protocol):
     """What RFC 9591 §6 instantiates per suite: the group and five hashes.
 
-    Elements travel serialized (`bytes`), scalars as Python integers in
-    `[0, order)`. `deserialize_element` validates per the suite (on-curve,
-    canonical, not the identity) and raises `ValueError` on anything else —
-    the MUST-abort conditions of §5.2 and §5.3 surface as exceptions here.
+    The group half is [`PrimeOrderGroup`](group.py), and it is not this
+    RFC's — it is what any threshold protocol over the same curves needs,
+    and what a second one reuses. What §6 adds is `h1`–`h5`, and those are
+    Schnorr's: the binding factor, the challenge and the nonce derivation
+    are FROST's own transcript, so a protocol with a different transcript
+    brings its own hashes to the same group rather than these. Which seam a
+    function takes says which half it needs; the signatures are where that
+    is written down.
 
-    `scalar_field` is the suite's zk_dtypes field for `order`: the round
-    functions run their mod-order formula cores on it, while scalars still
-    cross this seam as integers. Its constructor and int operands abort at
-    `order` and above instead of reducing, while negative ints reduce
-    (fractalyze/zk_dtypes#179) — the seam's scalar contract and the
-    identifier checks keep every operand in range.
+    `element_size` is here rather than on the group because its readers are
+    each suite's own `verify`, unpacking that suite's `R ‖ z` — a §6.x
+    constant read off `self`, not a value crossing the group seam.
     """
 
-    order: int
     element_size: int
-    scalar_field: Any
 
     def h1(self, message: bytes) -> int: ...
 
@@ -60,22 +67,6 @@ class Ciphersuite(Protocol):
     def h4(self, message: bytes) -> bytes: ...
 
     def h5(self, message: bytes) -> bytes: ...
-
-    def serialize_scalar(self, scalar: int) -> bytes: ...
-
-    def deserialize_scalar(self, data: bytes) -> int: ...
-
-    def scalar_base_mult(self, scalar: int) -> bytes: ...
-
-    def deserialize_element(self, data: bytes) -> Any: ...
-
-    def element_add(self, left: Any, right: Any) -> Any: ...
-
-    def element_scalar_mult(self, element: Any, scalar: int) -> Any: ...
-
-    def identity_element(self) -> Any: ...
-
-    def serialize_element(self, element: Any) -> bytes: ...
 
 
 @dataclass(frozen=True)
@@ -135,18 +126,18 @@ def commit(
     )
 
 
-def _require_nonzero_scalar(cs: Ciphersuite, identifier: int) -> None:
+def _require_nonzero_scalar(group: PrimeOrderGroup, identifier: int) -> None:
     """RFC 9591's identifier domain check: a NonZeroScalar, `[1, order-1]`.
 
     Runs before an identifier meets a field op — an out-of-range int
     operand aborts instead of reducing (see the Protocol docstring).
     """
-    if not 1 <= identifier <= cs.order - 1:
+    if not 1 <= identifier <= group.order - 1:
         raise ValueError("a participant identifier is a NonZeroScalar")
 
 
 def _validated_commitment_list(
-    cs: Ciphersuite, commitment_list: list[Commitment]
+    group: PrimeOrderGroup, commitment_list: list[Commitment]
 ) -> dict[int, tuple[Any, Any]]:
     """§5.2's MUST-checks on the list: sorted, distinct, deserializable.
 
@@ -162,20 +153,20 @@ def _validated_commitment_list(
         )
     decoded = {}
     for entry in commitment_list:
-        _require_nonzero_scalar(cs, entry.identifier)
+        _require_nonzero_scalar(group, entry.identifier)
         decoded[entry.identifier] = (
-            cs.deserialize_element(entry.hiding),
-            cs.deserialize_element(entry.binding),
+            group.deserialize_element(entry.hiding),
+            group.deserialize_element(entry.binding),
         )
     return decoded
 
 
 def encode_group_commitment_list(
-    cs: Ciphersuite, commitment_list: list[Commitment]
+    group: PrimeOrderGroup, commitment_list: list[Commitment]
 ) -> bytes:
     """RFC 9591 §4.3: the byte string the binding factors hash over."""
     return b"".join(
-        cs.serialize_scalar(entry.identifier) + entry.hiding + entry.binding
+        group.serialize_scalar(entry.identifier) + entry.hiding + entry.binding
         for entry in commitment_list
     )
 
@@ -199,18 +190,18 @@ def compute_binding_factors(
 
 
 def compute_group_commitment(
-    cs: Ciphersuite,
+    group: PrimeOrderGroup,
     decoded_commitments: dict[int, tuple[Any, Any]],
     binding_factors: dict[int, int],
 ) -> Any:
     """RFC 9591 §4.5: `Σ (D_i + [ρ_i]E_i)`, over already-decoded elements."""
-    group_commitment = cs.identity_element()
+    group_commitment = group.identity_element()
     for identifier, (hiding, binding_commitment) in decoded_commitments.items():
-        binding = cs.element_scalar_mult(
+        binding = group.element_scalar_mult(
             binding_commitment, binding_factors[identifier]
         )
-        group_commitment = cs.element_add(
-            cs.element_add(group_commitment, hiding), binding
+        group_commitment = group.element_add(
+            group.element_add(group_commitment, hiding), binding
         )
     return group_commitment
 
@@ -226,7 +217,7 @@ def compute_challenge(
 
 
 def derive_interpolating_value(
-    cs: Ciphersuite, participants: list[int], identifier: int
+    group: PrimeOrderGroup, participants: list[int], identifier: int
 ) -> int:
     """RFC 9591 §4.2: the Lagrange coefficient `λ_i` at zero."""
     if identifier not in participants:
@@ -234,8 +225,8 @@ def derive_interpolating_value(
     if len(set(participants)) != len(participants):
         raise ValueError("a participant appears more than once")
     for entry in participants:
-        _require_nonzero_scalar(cs, entry)
-    field = cs.scalar_field
+        _require_nonzero_scalar(group, entry)
+    field = group.scalar_field
     numerator, denominator = field(1), field(1)
     for other in participants:
         if other == identifier:
@@ -360,9 +351,9 @@ def verify_share(
     return cs.scalar_base_mult(share) == cs.serialize_element(expected)
 
 
-def polynomial_evaluate(cs: Ciphersuite, x: int, coefficients: list[int]) -> int:
+def polynomial_evaluate(group: PrimeOrderGroup, x: int, coefficients: list[int]) -> int:
     """RFC 9591 Appendix C.1.1: Horner evaluation over the scalar field."""
-    field = cs.scalar_field
+    field = group.scalar_field
     x_field = field(x)
     value = field(0)
     for coefficient in reversed(coefficients):
@@ -371,7 +362,7 @@ def polynomial_evaluate(cs: Ciphersuite, x: int, coefficients: list[int]) -> int
 
 
 def secret_share_split(
-    cs: Ciphersuite,
+    group: PrimeOrderGroup,
     secret: int,
     coefficients: list[int],
     max_participants: int,
@@ -381,38 +372,40 @@ def secret_share_split(
     `coefficients` are the dealer's random non-constant terms — a parameter,
     never drawn here, which is what lets the vectors' shares reproduce.
     """
-    if not 2 <= max_participants < cs.order:
+    if not 2 <= max_participants < group.order:
         raise ValueError("MAX_PARTICIPANTS is at least 2 and below the order")
-    polynomial = [secret % cs.order] + [c % cs.order for c in coefficients]
+    polynomial = [secret % group.order] + [c % group.order for c in coefficients]
     return [
-        (i, polynomial_evaluate(cs, i, polynomial))
+        (i, polynomial_evaluate(group, i, polynomial))
         for i in range(1, max_participants + 1)
     ]
 
 
-def vss_commit(cs: Ciphersuite, secret: int, coefficients: list[int]) -> list[bytes]:
+def vss_commit(
+    group: PrimeOrderGroup, secret: int, coefficients: list[int]
+) -> list[bytes]:
     """RFC 9591 Appendix C.2: the coefficient commitments `[φ_0, …, φ_t]`.
 
     `φ_0 = [s]B` is the group public key, which is why the dealer publishes
     this vector rather than the key alone.
     """
-    return [cs.scalar_base_mult(c) for c in [secret, *coefficients]]
+    return [group.scalar_base_mult(c) for c in [secret, *coefficients]]
 
 
 def vss_verify(
-    cs: Ciphersuite, identifier: int, share: int, commitment: list[bytes]
+    group: PrimeOrderGroup, identifier: int, share: int, commitment: list[bytes]
 ) -> bool:
     """RFC 9591 Appendix C.2: `[f(i)]B = Σ i^j·φ_j` — a participant's check."""
-    _require_nonzero_scalar(cs, identifier)
-    field = cs.scalar_field
+    _require_nonzero_scalar(group, identifier)
+    field = group.scalar_field
     power = field(1)
-    expected = cs.identity_element()
+    expected = group.identity_element()
     for coefficient_commitment in commitment:
-        expected = cs.element_add(
+        expected = group.element_add(
             expected,
-            cs.element_scalar_mult(
-                cs.deserialize_element(coefficient_commitment), int(power)
+            group.element_scalar_mult(
+                group.deserialize_element(coefficient_commitment), int(power)
             ),
         )
         power = power * identifier
-    return cs.scalar_base_mult(share) == cs.serialize_element(expected)
+    return group.scalar_base_mult(share) == group.serialize_element(expected)
