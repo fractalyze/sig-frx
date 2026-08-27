@@ -63,11 +63,13 @@ would run once per level per channel rather than once per level.
 
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any
 
+import frx
 import frx.numpy as fnp
 import numpy as np
+from frx import lax
 from frx.typing import ArrayLike
 
 from sig_frx.lattice.falcon import bigint
@@ -186,3 +188,164 @@ def to_limbs(coefficients: ArrayLike, bits: int) -> Any:
         [bigint.to_limbs(int(value) % span, limbs) for value in values.reshape(-1)]
     )
     return fnp.asarray(packed.reshape(*values.shape, limbs))
+
+
+# -- the base case: Algorithm 6 at degree 1 -----------------------------------
+
+
+def _is_even(a: Any) -> Any:
+    """Whether the value is even, which is one bit of one limb."""
+    return fnp.asarray(a)[..., 0] & np.uint32(1) == np.uint32(0)
+
+
+def _is_zero(a: Any) -> Any:
+    return fnp.all(fnp.asarray(a) == np.uint32(0), axis=-1)
+
+
+def _select(condition: Any, when: Any, otherwise: Any) -> Any:
+    """`where` over whole numbers: the predicate is per value, not per limb."""
+    return fnp.where(fnp.asarray(condition)[..., None], when, otherwise)
+
+
+def _negate(a: Any) -> Any:
+    """`-a`, which two's complement makes a subtraction from zero."""
+    return bigint.sub(fnp.zeros_like(a), a)
+
+
+def _halve_cofactors(p: Any, q: Any, x: Any, y: Any) -> tuple[Any, Any]:
+    """Halve `(p, q)` so that `p·x + q·y` halves with it.
+
+    The cofactors are only both even about half the time, and a pair that is not
+    cannot be halved as it stands. `(p + y, q - x)` is the same value of
+    `p·x + q·y` written through a pair that can be — the two corrections cancel,
+    `y·x - x·y` — and it is even in every case *because* one of `x`, `y` is odd,
+    which is [`base_case`](#base_case)'s precondition and the whole of what that
+    precondition is for. With `p` odd and `q` even the evenness of `p·x + q·y`
+    forces `x` even and so `y` odd; the mirrored case forces `x` odd; and with
+    both odd it forces `x` and `y` to share a parity, which the precondition
+    makes odd. This is the binary extended GCD's halving step — Menezes, van
+    Oorschot and Vanstone, *Handbook of Applied Cryptography*, Algorithm 14.61.
+    """
+    both_even = _is_even(p) & _is_even(q)
+    shifted_p = _select(both_even, p, bigint.add(p, y))
+    shifted_q = _select(both_even, q, bigint.sub(q, x))
+    return (
+        bigint.shift_right(shifted_p, 1, signed=True),
+        bigint.shift_right(shifted_q, 1, signed=True),
+    )
+
+
+@partial(frx.jit, static_argnums=(1,))
+def _solve(state: tuple[Any, ...], trips: int, x: Any, y: Any) -> tuple[Any, ...]:
+    """The extended binary GCD's loop, as one program — Algorithm 14.61's steps.
+
+    `frx.jit` because the loop is the point: eager, this is `trips` dispatches —
+    25,210 of them at `n = 1024` — of a body doing real work on 421 limbs, and
+    the whole reason #26 chose a bounded-precision device form over the host is
+    that traced it compiles into one executable instead. `trips` is static so
+    that a program is built once per width, the way
+    [`mldsa.sampling`](../mldsa/sampling.py) compiles its own sequential sampler.
+
+    **Each of the three cases is computed once, not once per branch it serves.**
+    Halving `(a, b)` and halving `(c, d)` never both happen, so the operands are
+    selected first and the one result is scattered back; the same holds for
+    `u - v` against `v - u` and for the cofactor pairs that follow them. A
+    `where` is elementwise over the limbs where an `add` or `sub` is an
+    `associative_scan` over all of them, so folding the pairs takes the body from
+    ten scans to five and pays eight selects for it.
+    """
+
+    def step(_: Any, state: tuple[Any, ...]) -> tuple[Any, ...]:
+        u, v, a, b, c, d = state
+        # `u` odd is the discriminant: zero is even, so an exhausted loop lands
+        # on no branch at all and every register holds.
+        u_odd = ~_is_even(u)
+        both_odd = u_odd & ~_is_even(v)
+        halve_u = ~u_odd & ~_is_zero(u)
+        halve_v = u_odd & ~both_odd
+        take_u = both_odd & bigint.at_least(u, v)
+        take_v = both_odd & ~take_u
+
+        # One halving. Whichever pair is live is the one selected in; when
+        # neither is, the result is discarded by both selects below.
+        halved_p, halved_q = _halve_cofactors(
+            _select(halve_u, a, c), _select(halve_u, b, d), x, y
+        )
+        # One subtraction per register, oriented by which operand is larger.
+        difference = bigint.sub(_select(take_u, u, v), _select(take_u, v, u))
+        reduced_p = bigint.sub(_select(take_u, a, c), _select(take_u, c, a))
+        reduced_q = bigint.sub(_select(take_u, b, d), _select(take_u, d, b))
+
+        return (
+            _select(halve_u, bigint.shift_right(u, 1), _select(take_u, difference, u)),
+            _select(halve_v, bigint.shift_right(v, 1), _select(take_v, difference, v)),
+            _select(halve_u, halved_p, _select(take_u, reduced_p, a)),
+            _select(halve_u, halved_q, _select(take_u, reduced_q, b)),
+            _select(halve_v, halved_p, _select(take_v, reduced_p, c)),
+            _select(halve_v, halved_q, _select(take_v, reduced_q, d)),
+        )
+
+    return lax.fori_loop(0, trips, step, state)
+
+
+def base_case(f: ArrayLike, g: ArrayLike, bits: int) -> tuple[Any, Any, Any]:
+    """Algorithm 6 at degree 1: `u·f - v·g = gcd(f, g)`, over signed limbs.
+
+    The descent bottoms out at one coefficient apiece and the recursion turns
+    around here — `(F, G) = (v·q, u·q)` is what satisfies `fG - gF = q` at this
+    level, so the Bezout pair is the whole deliverable. The gcd comes back with
+    it because Algorithm 6 redraws the key when it is not 1, and a caller that
+    only learned "not 1" would have to recompute this to find out by how much.
+
+    **A both-even pair comes back with `gcd` zero**, which is not a gcd and is
+    unmistakably not one. The halving step needs one operand odd, and a pair that
+    is not has gcd at least 2 — a key Algorithm 6 redraws — so the loop declines
+    it rather than carrying a common-power-of-two prefix for a case its caller
+    throws away. Reported rather than left to the caller because the wrong answer
+    here is *quiet*: the first halving drops a factor of two the loop never
+    restores, so a `gcd` computed through it is incorrect rather than merely
+    even, and a caller testing `gcd != 1` would be reading a number that no
+    longer means what it says.
+
+    Everything after the first step is safe without a check. A subtract leaves
+    the other operand odd and a halving does not touch it, so once one of the two
+    is odd it stays that way for the whole loop.
+
+    The trip count is fixed at `4·bits + 2`, which is a proof rather than a
+    sample. Write `phi` for `bits(u) + bits(v)`: a halving drops it by exactly
+    one, so there are at most `2·bits` halvings; a subtract leaves an even value
+    and is therefore always followed by one, so there are at most a halving's
+    worth plus one of those. Randomly drawn operands need about `2.2·bits` and
+    the reserve is the rest — a count fitted to what was sampled would return a
+    `v` that is not the gcd on the keys that need more, and nothing would raise.
+    A tracer cannot stop on a value, so the loop runs its bound every time and
+    holds `u == 0` as a no-op once it converges.
+    """
+    limbs = bigint.limb_count(bits + 3)
+    wide_f, wide_g = bigint.sign_extend(f, limbs), bigint.sign_extend(g, limbs)
+
+    # The loop runs on magnitudes; the identity is over the signed operands, so
+    # the signs come back at the end rather than being dropped.
+    f_negative, g_negative = bigint.is_negative(wide_f), bigint.is_negative(wide_g)
+    x = _select(f_negative, _negate(wide_f), wide_f)
+    y = _select(g_negative, _negate(wide_g), wide_g)
+
+    one = fnp.broadcast_to(fnp.asarray(bigint.to_limbs(1, limbs)), x.shape)
+    zero = fnp.zeros_like(one)
+    # `v` is where the gcd lands: the loop runs until `u` is zero.
+    _, gcd, _, _, c, d = _solve((x, y, one, zero, zero, one), 4 * bits + 2, x, y)
+
+    # A both-even pair is the one input the halving step has no answer for, and
+    # the answer it produces instead is not merely coarse: the first halving
+    # drops a factor of two the loop never restores, so `gcd` would come back
+    # *wrong* rather than merely even. Reported as zero, which is not a gcd and
+    # is unmistakably not one, because the caller's question is whether it is 1.
+    both_even = _is_even(x) & _is_even(y)
+    gcd = _select(both_even, zero, gcd)
+
+    # `c·x + d·y = gcd` over magnitudes becomes `u·f - v·g = gcd` over the
+    # operands: a negative operand flips its cofactor's sign, and `v` carries the
+    # subtraction the identity is written with.
+    u = _select(f_negative, _negate(c), c)
+    v = _select(g_negative, d, _negate(d))
+    return u, v, gcd

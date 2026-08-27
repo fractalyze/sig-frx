@@ -24,6 +24,9 @@ polynomial, still descends, and still ends up at degree 1.
 
 from __future__ import annotations
 
+import math
+import random
+
 import numpy as np
 from absl.testing import absltest, parameterized
 
@@ -46,6 +49,18 @@ def _draw(degree: int, seed: int) -> list[int]:
     rng = np.random.default_rng(seed)
     draws = rng.normal(0.0, 1.43300980528773, size=(degree, 4096 // degree))
     return [int(v) for v in np.round(draws).astype(np.int64).sum(axis=1)]
+
+
+def _pack(value: int, bits: int) -> np.ndarray:
+    """One wide signed integer as limbs, in two's complement.
+
+    Not [`keygen.to_limbs`](../keygen.py): that one is the descent's entry point
+    and goes through `int64`, because what it packs is the four-bit Gaussian
+    draw. The base case's operands are thousands of bits, which is the whole
+    reason they are limbs by the time they reach it.
+    """
+    limbs = bigint.limb_count(bits + 2)
+    return bigint.to_limbs(value % (1 << (limbs * bigint.LIMB_BITS)), limbs)
 
 
 def _unpack(limbs: object) -> list[int]:
@@ -176,6 +191,89 @@ class DescentTest(parameterized.TestCase):
                     widest,
                     MEASURED_WIDTHS[level],
                     delta=max(8, MEASURED_WIDTHS[level] // 20),
+                )
+
+
+class BaseCaseTest(parameterized.TestCase):
+    """Algorithm 6 at degree 1 — the Bezout pair, against Python `int`.
+
+    The descent ends at one coefficient apiece and the recursion turns around on
+    `u·f - v·g = gcd(f, g)`. That identity is the whole gate: a `u` and `v` that
+    satisfy it are correct whatever route produced them, and no published vector
+    reaches inside key generation to say otherwise.
+
+    **The widths are the ones the base case actually sees.** #26 measured 3,161
+    bits at `n = 512` and 6,302 at `n = 1024`, and a loop that is right at 120
+    bits says nothing about a loop whose trip count and register width are both
+    two orders larger. The small width is here to be checkable by hand when the
+    wide ones fail, not to stand in for them.
+    """
+
+    # The base case's measured widths, plus a small one for a legible failure.
+    WIDTHS = (120, 3161, 6302)
+
+    @staticmethod
+    def _coprime_pair(bits: int, seed: int) -> tuple[int, int]:
+        """Two coprime integers of `bits` bits, one of them free to be even.
+
+        `gcd = 1` is what Algorithm 6 requires and what a key that fails it is
+        redrawn for, so a coprime pair is the case the solver runs on. Both even
+        is the one combination the identity cannot hold for, and it is excluded
+        by coprimality rather than by construction.
+        """
+        rng = random.Random(seed)
+        while True:
+            f = rng.getrandbits(bits) | (1 << (bits - 1))
+            g = rng.getrandbits(bits) | (1 << (bits - 1))
+            if math.gcd(f, g) == 1:
+                return f, g
+
+    @parameterized.parameters(*WIDTHS)
+    def test_the_bezout_identity_holds(self, bits: int) -> None:
+        f, g = self._coprime_pair(bits, bits)
+        u, v, gcd = keygen.base_case(_pack(f, bits), _pack(g, bits), bits)
+
+        self.assertEqual(bigint.from_limbs(np.asarray(gcd), signed=True), 1)
+        self.assertEqual(
+            bigint.from_limbs(np.asarray(u), signed=True) * f
+            - bigint.from_limbs(np.asarray(v), signed=True) * g,
+            1,
+        )
+
+    @parameterized.parameters(*WIDTHS)
+    def test_a_shared_factor_is_reported_rather_than_asserted(self, bits: int) -> None:
+        # Algorithm 6 restarts the draw when the base case is not coprime, so the
+        # solver has to be able to ask. Returning the gcd is what lets it: a
+        # boolean would say a key was rejected without saying by how much.
+        f, g = self._coprime_pair(bits - 1, bits)
+        wide = bits + 2
+        _, _, gcd = keygen.base_case(_pack(3 * f, wide), _pack(3 * g, wide), wide)
+        self.assertEqual(bigint.from_limbs(np.asarray(gcd), signed=True), 3)
+
+    def test_a_both_even_pair_is_declined_rather_than_answered(self) -> None:
+        # The halving step needs one operand odd. A pair that is not has gcd at
+        # least 2 and is a key Algorithm 6 redraws — but the loop's answer for it
+        # is not merely coarse, it is wrong, so the zero is what keeps a caller
+        # testing `gcd != 1` from reading a number that no longer means anything.
+        f, g = self._coprime_pair(120, 21)
+        _, _, gcd = keygen.base_case(_pack(2 * f, 122), _pack(2 * g, 122), 122)
+        self.assertEqual(bigint.from_limbs(np.asarray(gcd), signed=True), 0)
+
+    def test_a_negative_operand_keeps_the_identity(self) -> None:
+        # The descent's coefficients are signed and the base case inherits that.
+        # The identity is over the signed values, so a sign that is dropped on
+        # the way in produces a `u` and `v` that satisfy it for the wrong pair.
+        f, g = self._coprime_pair(120, 7)
+        for signs in ((1, -1), (-1, 1), (-1, -1)):
+            signed_f, signed_g = signs[0] * f, signs[1] * g
+            with self.subTest(signs=signs):
+                u, v, _ = keygen.base_case(
+                    _pack(signed_f, 120), _pack(signed_g, 120), 120
+                )
+                self.assertEqual(
+                    bigint.from_limbs(np.asarray(u), signed=True) * signed_f
+                    - bigint.from_limbs(np.asarray(v), signed=True) * signed_g,
+                    1,
                 )
 
 

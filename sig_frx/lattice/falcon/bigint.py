@@ -282,28 +282,70 @@ def mul_small(a: ArrayLike, scalar: ArrayLike) -> Any:
     return _normalize((product & MASK) + shifted)
 
 
-def shift_right(a: ArrayLike, bits: int) -> Any:
+def is_negative(a: ArrayLike) -> Any:
+    """Whether limbs read as two's complement are negative — the top bit."""
+    values = fnp.asarray(a)
+    return (values[..., -1] >> np.uint32(LIMB_BITS - 1)) & np.uint32(1) != 0
+
+
+def _sign_fill(values: Any) -> Any:
+    """The one limb a two's-complement value extends with — all ones, or none.
+
+    A negative value's limbs are all ones above its magnitude, which is the same
+    rule read from both ends: [`shift_right`](#shift_right) moves it in at the
+    top and [`sign_extend`](#sign_extend) appends it past the end.
+    """
+    return fnp.where(is_negative(values), MASK, np.uint32(0))[..., None]
+
+
+def sign_extend(a: ArrayLike, limbs: int) -> Any:
+    """The same value at a wider limb budget, read as two's complement.
+
+    Widening a magnitude is a pad with zeros and widening a signed value is a
+    pad with its sign; they differ exactly where the value is negative. The
+    caller is a layer whose working registers need more room than the operands
+    they are derived from, which is what the base case's cofactors are.
+    """
+    values = fnp.asarray(a)
+    extra = limbs - values.shape[-1]
+    if extra <= 0:
+        return values
+    return fnp.concatenate(
+        [values, fnp.broadcast_to(_sign_fill(values), (*values.shape[:-1], extra))],
+        axis=-1,
+    )
+
+
+def shift_right(a: ArrayLike, bits: int, *, signed: bool = False) -> Any:
     """`a >> bits` over limbs, for a `bits` known at trace time.
 
-    A data-dependent shift is deliberately absent. Babai's reduction wants one
-    and will need it, but it is not written here until that caller exists —
-    a traced shift amount costs a gather per limb, which is not a price this
-    module's current callers should pay for a generality none of them uses.
+    `signed` shifts the sign bit in rather than zeros, which is the difference
+    between halving a magnitude and halving a two's-complement value. The base
+    case's Bezout cofactors are the caller: they go negative by construction and
+    are halved once per step, so a logical shift there turns `-3` into something
+    near `2^(L*15)` and the identity stops holding without anything raising.
+
+    A data-dependent shift *amount* is still deliberately absent. Babai's
+    reduction wants one and will need it, but it is not written here until that
+    caller exists — a traced amount costs a gather per limb, which is not a
+    price this module's current callers should pay for a generality none of them
+    uses.
     """
     values = fnp.asarray(a)
     limbs = values.shape[-1]
     whole, part = divmod(bits, LIMB_BITS)
+    fill = (
+        _sign_fill(values) if signed else fnp.zeros((*values.shape[:-1], 1), np.uint32)
+    )
     if whole >= limbs:
-        return fnp.zeros_like(values)
+        return fnp.broadcast_to(fill, values.shape)
     moved = fnp.concatenate(
-        [values[..., whole:], fnp.zeros((*values.shape[:-1], whole), np.uint32)],
+        [values[..., whole:], fnp.broadcast_to(fill, (*values.shape[:-1], whole))],
         axis=-1,
     )
     if part == 0:
         return moved
-    upper = fnp.concatenate(
-        [moved[..., 1:], fnp.zeros((*moved.shape[:-1], 1), np.uint32)], axis=-1
-    )
+    upper = fnp.concatenate([moved[..., 1:], fill], axis=-1)
     return (moved >> np.uint32(part)) | ((upper << np.uint32(LIMB_BITS - part)) & MASK)
 
 
@@ -406,12 +448,6 @@ def _limb_span(channels: int, limbs: int) -> np.ndarray:
     for _ in range(limbs):
         place = (place << LIMB_BITS) % mods
     return _frozen(place.astype(np.uint32))
-
-
-def is_negative(a: ArrayLike) -> Any:
-    """Whether limbs read as two's complement are negative — the top bit."""
-    values = fnp.asarray(a)
-    return (values[..., -1] >> np.uint32(LIMB_BITS - 1)) & np.uint32(1) != 0
 
 
 def to_rns(a: ArrayLike, channels: int, *, signed: bool = False) -> Any:

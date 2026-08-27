@@ -146,7 +146,12 @@ class PositionalTest(parameterized.TestCase):
 
     @parameterized.parameters(*WIDTHS)
     def test_shifts_agree_with_int_across_limb_boundaries(self, bits: int) -> None:
-        """Amounts that are and are not multiples of the limb width, plus the ends."""
+        """Amounts that are and are not multiples of the limb width, plus the ends.
+
+        This is also what holds `shift_right`'s default at *unsigned*: the fill
+        is shared with the signed path, so a change there that forgot the default
+        would land here.
+        """
         limbs = bigint.limb_count(bits)
         modulus = _modulus(limbs)
         value = random.Random(bits + 3).getrandbits(bits) % modulus
@@ -161,6 +166,60 @@ class PositionalTest(parameterized.TestCase):
                 self.assertEqual(
                     bigint.from_limbs(bigint.shift_left(packed, amount)),
                     (value << amount) % modulus,
+                )
+
+    @parameterized.parameters(*WIDTHS)
+    def test_a_signed_shift_halves_a_negative_value(self, bits: int) -> None:
+        """`>>` on a two's-complement value, which is what halving a cofactor is.
+
+        The unsigned shift is not merely imprecise here — it reads a negative
+        value as a number near `2^(L*15)` and shifts a zero in, so `-3 >> 1`
+        comes back astronomically large rather than as `-2`. Nothing raises, so
+        the case is constructed: the base case's Bezout cofactors are negative
+        about half the time and are halved once per step.
+        """
+        limbs = bigint.limb_count(bits + 2)
+        modulus = _modulus(limbs)
+        rng = random.Random(bits + 11)
+        values = [-1, -2, -3, -(modulus // 4), -(rng.getrandbits(bits) | 1), 0, 5]
+        for value in values:
+            packed = bigint.to_limbs(value % modulus, limbs)
+            for amount in (1, 15, 16, 31):
+                with self.subTest(value=value, amount=amount):
+                    self.assertEqual(
+                        bigint.from_limbs(
+                            bigint.shift_right(packed, amount, signed=True), signed=True
+                        ),
+                        value >> amount,
+                    )
+
+    @parameterized.parameters(*WIDTHS)
+    def test_sign_extend_widens_without_changing_the_value(self, bits: int) -> None:
+        """A wider budget for the same integer, which is what a working register is.
+
+        Zero-padding is right for a magnitude and wrong for a signed value, and
+        the two agree on every non-negative input — so a positive-only check
+        passes against a `sign_extend` that does not extend anything.
+        """
+        limbs = bigint.limb_count(bits + 2)
+        modulus = _modulus(limbs)
+        rng = random.Random(bits + 17)
+        for value in (-1, -(rng.getrandbits(bits) | 1), 0, 1, rng.getrandbits(bits)):
+            packed = bigint.to_limbs(value % modulus, limbs)
+            for extra in (1, 5):
+                with self.subTest(value=value, extra=extra):
+                    widened = bigint.sign_extend(packed, limbs + extra)
+                    self.assertEqual(np.asarray(widened).shape[-1], limbs + extra)
+                    self.assertEqual(bigint.from_limbs(widened, signed=True), value)
+
+    def test_sign_extend_leaves_a_budget_it_cannot_narrow(self) -> None:
+        # Narrowing would drop limbs, which is a different operation and not one
+        # this has any business guessing at.
+        packed = bigint.to_limbs(12345, 8)
+        for limbs in (8, 3):
+            with self.subTest(limbs=limbs):
+                self.assertEqual(
+                    np.asarray(bigint.sign_extend(packed, limbs)).shape[-1], 8
                 )
 
     def test_at_least_compares_many_values_against_one_bound(self) -> None:
