@@ -1,12 +1,20 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""leanSig's verifier — the signature Ethereum's lean consensus checks per slot.
+"""leanSig — the signature Ethereum's lean consensus makes and checks per slot.
 
 A generalized XMSS: one one-time key per slot across a 2^32-slot lifetime, its
 chains and its Merkle tree hashed by Poseidon over KoalaBear, its wire form SSZ.
 The layers below this one each landed with their own upstream gate — the two
 permutations, the compression and sponge modes, the encoding pipeline, the
-tweakable family, the codec — and this is the assembly: the walk that turns a
-signature back into a root and compares it to the key's.
+tweakable family, the codec, the signer's tree — and this is the assembly: the
+walk that turns a signature back into a root and compares it to the key's, and
+the one that produces the signature in the first place.
+
+**`verify` is the seam's and the other two are not.** `keygen` and `sign` here
+take and return what leanSig actually has — a materialized signing state rather
+than a byte string, and a slot the caller names — which is the shape
+[`signature.py`](../../signature.py) reserves for a stateful scheme. The class
+docstring says which of that rule's demands each one meets, and
+[`signing.py`](signing.py) holds the machinery.
 
 **The slot arrives as `position`, and that is a seam field rather than a
 scheme's own argument.** leanSig's verifier takes the slot as an input, unlike
@@ -50,10 +58,8 @@ refuse.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from functools import lru_cache, partial
+from collections.abc import Sequence
 
-import frx
 import frx.numpy as fnp
 import numpy as np
 from frx import Array
@@ -63,50 +69,31 @@ from sig_frx import context as context_rules
 from sig_frx.batch import require_batch
 from sig_frx.hash import tree, wots
 from sig_frx.hash import tweakable as shared_tweakable
-from sig_frx.hash.leansig import encoding, ssz, tweakable
+from sig_frx.hash.leansig import encoding, field, signing, ssz, tweakable
 from sig_frx.hash.leansig.field import F
 from sig_frx.hash.leansig.params import PRESETS, LeanSigParams
 
 
-@lru_cache(maxsize=None)
-def _codeword(params: LeanSigParams) -> Callable[..., tuple[Array, Array]]:
-    """`encoding.target_sum_encode` over a leading batch axis, per preset.
-
-    **`target_sum_encode` rather than `message_hash`**, which is the whole of
-    what makes the codeword unforgeable and is easy to get wrong here because the
-    two take the same operands and differ by one `&`. The verifier walks each
-    chain `base - 1 - digit` steps from the value the signature released, so a
-    codeword whose digits are all at least the signed one's reaches the same
-    endpoints and rebuilds the same root — *any* codeword does, given released
-    values that match it. The target sum is what makes that set a single point:
-    two codewords that dominate elementwise and sum alike are equal. Drop the
-    filter and the scheme is forgeable while every published vector still
-    passes, which is why one is built here that fails only on this
-    ([`verify_vectors.py`](testing/verify_vectors.py)).
-
-    Upstream spells the same thing as `target_sum_encode(...) is None` in its
-    `verify` phase 2, so this is its rejection rather than an extra one.
-
-    `frx.vmap` around the one-signature body rather than a second transcription
-    of it over a batch axis — [`tweakable.py`](tweakable.py)'s `_compression` and
-    `_leaf_sponge` are the same shape, and `ml_dsa.py` gives the reason: a
-    batch-shaped copy is a second thing to keep in agreement with the first.
-    """
-
-    return frx.vmap(partial(encoding.target_sum_encode, params=params))
-
-
 class LeanSig:
-    """leanSig at one preset — the verifier, over the layers below it.
+    """leanSig at one preset — the scheme, over the layers below it.
 
     Built with `named` unless a test wants a preset upstream does not ship. The
     parameter set is the only choice: one field, one pair of permutations, one
     encoding, so there is nothing else for a caller to select.
 
-    `keygen` and `sign` are not here yet. A stateful scheme's signer has to hand
-    back the position it advanced past, which is not the seam's `sign`
-    (`signature.py`), and at `PROD` it needs the materialized signing state
-    upstream publishes rather than a seed — both belong with that slice.
+    **`verify` is the seam's; `keygen` and `sign` are not, and this carries no
+    conformance pin.** `signature.py` reserves that shape for a stateful scheme,
+    and leanSig is one twice over: its secret key is a materialized signing
+    state rather than a byte string of a size the parameter set fixes, and its
+    signer takes the slot as an argument. What it does *not* need is the
+    advanced state the rule asks a stateful `sign` to hand back — the two
+    precedents return an advanced key (`Xmss`) or an advanced counter
+    (`Shrincs`) because in both the position lives inside what the caller
+    passed. Here the caller names the slot, so a spent one is spent at the call
+    site rather than inside an object, and what moves is the *prepared window* —
+    which `advance_preparation` moves explicitly, returning the key that has
+    moved. That is the same demand the rule makes, met by the surface the scheme
+    actually has.
     """
 
     def __init__(self, params: LeanSigParams) -> None:
@@ -194,8 +181,8 @@ class LeanSig:
         message_elements = encoding.encode_messages(message_bytes, params=params)
         epoch_elements = encoding.encode_epochs(slots, params=params)
 
-        digits, on_layer = _codeword(params)(
-            message_elements, parameters, epoch_elements, rho
+        digits, on_layer = encoding.codewords(
+            message_elements, parameters, epoch_elements, rho, params=params
         )
         leaves = self._family.leaf(
             parameters,
@@ -242,6 +229,133 @@ class LeanSig:
             )
         return slots
 
+    # -- key generation and signing ----------------------------------------
+
+    def keygen(
+        self, prf_key: bytes, parameter: Sequence[int]
+    ) -> tuple[Array, signing.SecretKey]:
+        """A key pair over the whole lifetime: `(public key bytes, secret key)`.
+
+        `prf_key` is the 32-byte master seed and `parameter` the public
+        parameter's `parameter_length` canonical residues, in leanSpec's order —
+        the order a published key states them in, which is the reverse of the
+        one everything here hashes over ([`field.py`](field.py)).
+
+        **Both are taken rather than drawn.** Upstream's `key_gen` reaches
+        `os.urandom` and `secrets.randbelow` itself, so its keys are not
+        reproducible from anything; taking them is what makes a key a function
+        of published bytes, and it is the same choice
+        [`xmss.py`](../xmss/xmss.py)'s `keygen` makes about RFC 8391's three
+        seeds.
+
+        The public key comes back as bytes because that is what a verifier takes
+        — `verify` is the seam's and reads the SSZ container — while the secret
+        key does not, for the reason `signing.SecretKey` records.
+
+        The whole lifetime is built, and a sub-range is refused rather than
+        supported: upstream fills an unbuilt window's tree with fresh OS
+        randomness, so a partial key is not a function of its inputs at all
+        ([`signing.py`](signing.py)). That makes this a `TEST`-preset operation —
+        a `PROD` lifetime is `2^32` leaves.
+        """
+        root, secret = signing.keygen(
+            self._family, prf_key, self._parameter(parameter), params=self.params
+        )
+        return (
+            ssz.encode_public_key(root, secret.parameter, params=self.params),
+            secret,
+        )
+
+    def sign(
+        self,
+        secret_key: signing.SecretKey,
+        message: ArrayLike,
+        *,
+        position: int,
+    ) -> Array:
+        """Sign one 32-byte root at slot `position`: -> uint8 `[signature_size]`.
+
+        One message, because signing is one message — the batch axis belongs to
+        verification, which is the side that meets many signatures.
+
+        **Deterministic in `(secret key, slot, message)`**, and that is a
+        security property rather than a convenience: the randomness the search
+        settles on is derived from the seed and the attempt number, so signing
+        one slot twice yields the same signature rather than a second one over a
+        different codeword ([`prf.py`](prf.py)). It is still the caller's job not
+        to sign two *different* messages at one slot, which is what a
+        synchronized one-time scheme forbids and what no signer can check.
+
+        `position` is the same slot `verify` takes per entry, here one value
+        because there is one signature. It must be inside the prepared window —
+        `advance_preparation` is what moves that.
+        """
+        params = self.params
+        if secret_key.params != params:
+            raise ValueError(
+                "this key was generated at a different preset, and the position "
+                "packing differs by preset — so signing with it would produce a "
+                "signature that is wrong rather than one that fails a check"
+            )
+        slot = _slot(position, self.signatures_per_key)
+        prepared = secret_key.prepared
+        if slot not in prepared:
+            raise ValueError(
+                f"slot {slot} is outside the prepared interval "
+                f"[{prepared.start}, {prepared.stop}); call "
+                f"advance_preparation to slide the window forward"
+            )
+        root = np.asarray(message, dtype=np.uint8)
+        if root.shape != (encoding.MESSAGE_BYTES,):
+            raise ValueError(
+                f"leanSig signs a {encoding.MESSAGE_BYTES}-byte root, got shape "
+                f"{tuple(root.shape)}"
+            )
+
+        randomness, digits = signing.search(secret_key, slot, bytes(root))
+        return ssz.encode_signature(
+            signing.combined_path(secret_key, slot),
+            randomness,
+            signing.release(self._family, secret_key, slot, digits),
+            params=params,
+        )
+
+    def advance_preparation(self, secret_key: signing.SecretKey) -> signing.SecretKey:
+        """The key with its prepared window slid one bottom tree forward.
+
+        The state move this scheme has, and the reason `sign` needs none: what a
+        leanSig signer advances past is not a position inside the key — the
+        caller names that — but the window of slots it can serve without
+        rebuilding a bottom tree. A key already reaching the end of its lifetime
+        comes back unchanged.
+        """
+        return signing.advance_preparation(self._family, secret_key)
+
+    def _parameter(self, parameter: Sequence[int]) -> Array:
+        """The public parameter, checked and then placed for a hash.
+
+        Both checks are for the same reason [`ssz.py`](ssz.py)'s decode carries
+        its range check: the cast into the field *reduces*, so a value at or
+        above the prime would become a different, well-formed element and
+        generate a key for a parameter the caller did not name. Refusing is what
+        upstream's `Fp` validation path does with the same input.
+        """
+        residues = np.asarray(parameter, dtype=np.int64).reshape(-1)
+        if residues.size != self.params.parameter_length:
+            raise ValueError(
+                f"the public parameter is {self.params.parameter_length} field "
+                f"elements, got {residues.size}"
+            )
+        outside = (residues < 0) | (residues >= field.PRIME)
+        if np.any(outside):
+            raise ValueError(
+                f"a public parameter is canonical residues in [0, "
+                f"{field.PRIME}); {int(np.count_nonzero(outside))} of "
+                f"{residues.size} are not, the first being "
+                f"{int(residues[np.argmax(outside)])}"
+            )
+        return field.lane_reversed(residues)
+
     def _chain_ends(
         self, parameters: Array, hashes: Array, digits: Array, slots: np.ndarray
     ) -> Array:
@@ -275,6 +389,19 @@ class LeanSig:
             ),
         )
         return walked.reshape(batch, dimension, params.hash_length)
+
+
+def _slot(position: int, lifetime: int) -> int:
+    """One slot, as the host integer every position here is.
+
+    A slot at or past the key's lifetime is a caller mistake rather than a
+    verdict, which is the same reading `verify` gives its `[B]` column — there is
+    no leaf to index, so there is nothing to compute an answer from.
+    """
+    slot = int(position)
+    if not 0 <= slot < lifetime:
+        raise ValueError(f"this key covers slots [0, {lifetime}); got {slot}")
+    return slot
 
 
 def named(name: str) -> LeanSig:

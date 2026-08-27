@@ -77,6 +77,28 @@ def to_field(canonical: ArrayLike) -> Array:
     return fnp.asarray(np.asarray(canonical, dtype=np.int64).astype(F))
 
 
+def lane_reversed(canonical: ArrayLike) -> Array:
+    """Canonical residues in leanSpec's order -> the lane-reversed field array.
+
+    The placement half of `lane_reversed_limbs`, for values that are residues
+    already and so have nothing to decompose. A PRF squeeze is what wants it —
+    SHAKE128 hands back a digest as `hash_length` residues read big-endian
+    ([`prf.py`](prf.py)) — and so is a public parameter arriving as the numbers a
+    key pair published rather than as bytes.
+
+    Here rather than at either caller for the reason the module docstring gives:
+    the reversal spelled per call site is a reversal that can be forgotten at
+    one, and a forgotten one is a silently different hash. The last axis is the
+    one that moves, so a `[N, k]` batch reverses each row and a `[k]` vector
+    reverses itself.
+
+    Host-side, like everything else here. The traced counterpart is
+    [`ssz.py`](ssz.py)'s, which reverses residues that arrived in lanes off the
+    wire and goes through `poseidon`'s own seam to do it.
+    """
+    return to_field(np.asarray(canonical, dtype=np.int64)[..., ::-1])
+
+
 def lane_reversed_limbs(value: int | np.ndarray, num_limbs: int) -> Array:
     """`value` base-p, as the lane-reversed field vector a leanSig hash takes.
 

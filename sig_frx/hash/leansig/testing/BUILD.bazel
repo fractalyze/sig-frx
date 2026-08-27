@@ -33,6 +33,72 @@ py_library(
     ],
 )
 
+# What leanSpec's PRF derives, at both presets. Values only, like the other
+# vector libraries here; the provenance lives in the module.
+py_library(
+    name = "prf_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "prf_vectors.py",
+    ],
+)
+
+# The key pair and the six signatures one substituted seed produces. It reaches
+# `prf_vectors` for that seed rather than restating it, the way
+# `encoding_vectors` reaches `mode_vectors` — one value, one home.
+py_library(
+    name = "signing_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "signing_vectors.py",
+    ],
+    deps = [":prf_vectors"],
+)
+
+py_test(
+    name = "prf_test",
+    size = "small",
+    srcs = ["prf_test.py"],
+    deps = [
+        ":harness",
+        ":prf_vectors",
+        "//sig_frx/hash/leansig:prf",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The signer's whole surface: key generation, the sliding window, and six
+# signatures byte-compared against upstream. `medium` rather than `small`
+# because every case builds a `TEST` key pair — 256 slots of 4 chains, then 8
+# Merkle levels — and the sign cases each grind a block of randomness on top of
+# that. The seconds this budget should quote are CI's and are not in yet; per
+# ../../../../docs/reference/measurement.md a local number does not size a
+# budget, so this is one bucket above what a workstation run argues for and gets
+# re-read from the CPU leg once it has run.
+py_test(
+    name = "signing_test",
+    size = "medium",
+    srcs = ["signing_test.py"],
+    deps = [
+        ":harness",
+        ":signing_vectors",
+        "//sig_frx/hash/leansig",
+        "//sig_frx/hash/leansig:encoding",
+        "//sig_frx/hash/leansig:field",
+        "//sig_frx/hash/leansig:params",
+        "//sig_frx/hash/leansig:prf",
+        "//sig_frx/hash/leansig:signing",
+        "//sig_frx/hash/leansig:ssz",
+        "//sig_frx/hash/leansig:tweakable",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 py_test(
     name = "field_test",
     size = "small",
