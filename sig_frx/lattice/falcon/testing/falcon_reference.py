@@ -211,3 +211,43 @@ def verify(pk: bytes, message: bytes, signature: bytes, name: str) -> bool:
     s1 = centered([(ci - pi) % Q for ci, pi in zip(c, product)])
     norm = sum(x * x for x in s1) + sum(x * x for x in s2)
     return norm <= params["squared_norm_bound"]
+
+
+def exact_negacyclic_mul(a: list[int], b: list[int]) -> list[int]:
+    """`(a · b) mod (x^m + 1)` over Python integers, at any coefficient width.
+
+    Distinct from [`negacyclic_mul`](#negacyclic_mul) above, which reduces mod
+    `q` and holds its accumulator in `int64`. The NTRU descent's coefficients
+    pass 9,000 bits and are not reduced by anything, so numpy cannot hold them
+    and the loop is the price of an oracle that is exact rather than nearly.
+    """
+    degree = len(a)
+    out = [0] * degree
+    for i, left in enumerate(a):
+        if left == 0:
+            continue
+        for j, right in enumerate(b):
+            position = i + j
+            if position < degree:
+                out[position] += left * right
+            else:
+                out[position - degree] -= left * right
+    return out
+
+
+def field_norm(a: list[int]) -> list[int]:
+    """`N(f) = f_e² - x·f_o²`, Algorithm 6's descent, one level.
+
+    `f(x) = f_e(x²) + x·f_o(x²)` splits by parity, and the norm lands in
+    `Z[x]/(x^(m/2) + 1)`. The wrap that makes the last term of `x·f_o²` come
+    back with a flipped sign is the same one `exact_negacyclic_mul` applies, and
+    it is the only place the ring shows through.
+    """
+    half = len(a) // 2
+    even = exact_negacyclic_mul(a[0::2], a[0::2])
+    odd = exact_negacyclic_mul(a[1::2], a[1::2])
+    out = list(even)
+    out[0] += odd[half - 1]
+    for i in range(1, half):
+        out[i] -= odd[i - 1]
+    return out

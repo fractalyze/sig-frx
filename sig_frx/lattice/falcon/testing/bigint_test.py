@@ -163,6 +163,22 @@ class PositionalTest(parameterized.TestCase):
                     (value << amount) % modulus,
                 )
 
+    def test_at_least_compares_many_values_against_one_bound(self) -> None:
+        """`[m, L]` against `[L]`, which is how every caller actually asks.
+
+        The elementwise operations broadcast for free and this one does not: it
+        gathers at an index derived from both operands, so a shape mismatch
+        surfaced as a gather error rather than as an answer. Found by the
+        descent above this, whose centering step compares a whole polynomial
+        against a single modulus.
+        """
+        limbs = bigint.limb_count(120)
+        bound = bigint.to_limbs(1 << 100, limbs)
+        values = [0, (1 << 100) - 1, 1 << 100, (1 << 100) + 1, (1 << 119)]
+        stacked = np.stack([bigint.to_limbs(v, limbs) for v in values])
+        got = np.asarray(bigint.at_least(stacked, bound))
+        np.testing.assert_array_equal(got, np.array([v >= 1 << 100 for v in values]))
+
     @parameterized.parameters(*WIDTHS)
     def test_at_least_orders_by_magnitude(self, bits: int) -> None:
         """Including the equal case, which has no most-significant differing limb."""

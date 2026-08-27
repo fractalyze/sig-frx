@@ -179,3 +179,26 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# Provisionally `large`, for the reason the sibling `bigint_test` had to be
+# corrected: a workstation number sizes nothing, and that target's local 7.2 s
+# became 26.1 s on the CPU leg. Scaling this one's local 38 s by the same factor
+# lands past half of `medium`'s 300 s once the CPU leg's spread is counted, so
+# it starts at the bucket that cannot time out and tightens against CI.
+#
+# The cost is the module, not the oracle: a level's shapes depend on its width,
+# so the descent compiles ten distinct programs per parameter set. Real key
+# generation pays that once per key.
+py_test(
+    name = "keygen_test",
+    size = "large",
+    srcs = ["keygen_test.py"],
+    deps = [
+        ":falcon_reference",
+        "//sig_frx/lattice/falcon:arith",
+        "//sig_frx/lattice/falcon:bigint",
+        "//sig_frx/lattice/falcon:keygen",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
