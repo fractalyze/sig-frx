@@ -58,6 +58,14 @@ jobs:
           # a green leg really did run on the device. Preallocation is off
           # because bazel runs the test actions concurrently against that one
           # device, and each process would otherwise claim most of its memory.
+          #
+          # `gpu` currently resolves to one runner. `build3-gpu-1` and
+          # `build3-gpu-2` carry the hardware but not the CUDA runtime, and
+          # every job that landed on them failed at plugin init — 52 of 62
+          # targets, which reads as broken code rather than a broken host. The
+          # label is off them until the runtime is installed; re-adding it
+          # before that restores the failure. Strictness above is per test, so
+          # nothing here catches a mislabelled runner first.
           - backend: gpu
             runs_on: [self-hosted, gpu]
             platforms: cuda
