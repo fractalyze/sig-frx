@@ -217,9 +217,11 @@ py_library(
 # The assembly: the chain walk, the leaf and the Merkle climb wired to each
 # other and to the codec.
 #
-# `medium` on one local CPU sample of 12.8 s, and the GPU leg is unmeasured —
-# re-read both from CI, which is the only place a fresh sample of this package
-# comes from (a merge run replays it as `(cached)`).
+# `medium` on 12.8 s CPU (local) and 42.7 s GPU (CI run 33079092342, fresh on
+# both legs). `small` is what the CPU number alone would have argued for and it
+# is wrong: 42.7 s is already 71% of that bucket's 60 s before any load, and this
+# leg has been measured moving as a whole by up to 2.33x on a busy runner. The
+# GPU leg decides here, which is the case `measurement.md` describes.
 #
 # Cheaper than this package's own prediction that a verify suite would be its
 # most expensive target, and the reason is the preset rather than the work:
