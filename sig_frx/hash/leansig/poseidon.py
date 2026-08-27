@@ -196,6 +196,26 @@ def undo_lane_reversal(vector: Array) -> Array:
     return vector[::-1]
 
 
+def join_digests(digests: Array) -> Array:
+    """`[..., count, n]` lane-reversed digests as the single operand they join to.
+
+    A Merkle leaf hashes a whole slot's chain ends, and upstream names them as
+    `count` separate operands. Handing `sponge` that many is the same pre-image
+    as handing it one joined vector — but only if the join reverses the *digest
+    order* as well, since `R(a ‖ b) = R(b) ‖ R(a)` applies to pieces exactly as
+    `_join` applies it to a compression's operands. A plain `reshape(-1)` is a
+    different pre-image, and one that hashes and self-checks.
+
+    So it lives here, beside `_join` and `undo_lane_reversal`, rather than at the
+    caller: the whole of this module's docstring is that a second module which
+    open-codes the convention has turned a boundary into a habit. What it buys
+    the caller is op count — at `PROD` a leaf is 46 digests, so the alternative
+    is 46 slices feeding a 49-way concatenate inside the trace, against one
+    reverse and one reshape outside it.
+    """
+    return digests[..., ::-1, :].reshape(*digests.shape[:-2], -1)
+
+
 def _join(pieces: Sequence[Array]) -> Array:
     """Concatenate lane-reversed `pieces` listed in leanSpec's order.
 

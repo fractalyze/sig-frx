@@ -118,9 +118,10 @@ def _int_to_base_p(value: int | np.ndarray, num_limbs: int) -> list[int | np.nda
     limbs = []
     remaining = value
     for _ in range(num_limbs):
-        limbs.append(remaining % PRIME)
-        # Not `//=`: an in-place floor divide would mutate a caller's array.
-        remaining = remaining // PRIME
+        # `divmod` rather than `%` then `//=`, which on an ndarray would floor
+        # divide the caller's array in place.
+        remaining, limb = divmod(remaining, PRIME)
+        limbs.append(limb)
     if np.any(remaining):
         raise ValueError(f"value does not fit in {num_limbs} base-p limbs")
     return limbs

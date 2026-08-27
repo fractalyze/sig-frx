@@ -41,6 +41,7 @@ from frx import Array
 from frx.typing import ArrayLike
 from hash_frx import ByteHash
 
+from sig_frx.hash.tweakable import batched
 from sig_frx.hash.xmss.adrs import with_key_and_mask
 from sig_frx.hash.xmss.params import CoreHash, XmssParams
 
@@ -162,8 +163,8 @@ class Rfc8391Hashes:
             fnp.concatenate(
                 [
                     self._padding(_PADDING_HASH, batch),
-                    _batched(randomizer, batch),
-                    _batched(root, batch),
+                    batched(randomizer, batch),
+                    batched(root, batch),
                     fnp.asarray(encoded, dtype=fnp.uint8),
                     messages,
                 ],
@@ -193,7 +194,7 @@ class Rfc8391Hashes:
         if addresses.ndim == 1:
             addresses = addresses[None, :]
         batch = addresses.shape[0]
-        payloads = _batched(payload, batch)
+        payloads = batched(payload, batch)
         if payloads.shape[-1] != mask_words * self.n:
             raise ValueError(
                 f"this hash takes {mask_words * self.n} bytes, got "
@@ -218,7 +219,7 @@ class Rfc8391Hashes:
         batch = message.shape[0]
         return self._digest(
             fnp.concatenate(
-                [self._padding(separator, batch), _batched(key, batch), message],
+                [self._padding(separator, batch), batched(key, batch), message],
                 axis=-1,
             )
         )
@@ -262,14 +263,6 @@ def _rows(value: ArrayLike) -> Array:
     """A `[k]` operand as the `[1, k]` batch of one it stands for."""
     array = fnp.asarray(value, dtype=fnp.uint8)
     return array[None, :] if array.ndim == 1 else array
-
-
-def _batched(value: ArrayLike, batch: int) -> Array:
-    """Broadcast a shared `[k]` operand to `[B, k]`, or pass a `[B, k]` through."""
-    array = fnp.asarray(value, dtype=fnp.uint8)
-    if array.ndim == 1:
-        return fnp.broadcast_to(array, (batch, array.shape[0]))
-    return array
 
 
 def _to_byte(value: int, length: int) -> bytes:

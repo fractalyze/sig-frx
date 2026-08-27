@@ -45,13 +45,21 @@ path (see `docs/reference/security.md`).
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypeAlias, runtime_checkable
 
 import frx.numpy as fnp
+import numpy as np
 from frx import Array
 from frx.typing import ArrayLike, DTypeLike
 from hash_frx import ByteHash, Hmac, Mgf1
 from hash_frx import block_size as block_size_of
+
+# What a family is tweaked by: FIPS 205 and RFC 8391 encode an address into
+# bytes, leanSig packs a position into field elements. Named here rather than in
+# a consumer because the protocols below are what take one, and spelled as an
+# array rather than as `bytestring.ByteString` because only two of the three
+# families produce bytes.
+Tweak: TypeAlias = np.ndarray | Array
 
 
 @runtime_checkable
@@ -106,12 +114,12 @@ class TweakableHash(ChainHash, NodeHash, Protocol):
     # addresses and never names the family.
     compressed_address: bool
 
-    def prf(self, pk_seed: ArrayLike, sk_seed: ArrayLike, adrs: ArrayLike) -> Array:
+    def prf(self, pk_seed: ArrayLike, sk_seed: ArrayLike, adrs: ArrayLike, /) -> Array:
         """Secret-key element from the seeds and a position: -> uint8 `[B, n]`."""
         ...
 
     def prf_msg(
-        self, sk_prf: ArrayLike, opt_rand: ArrayLike, message: ArrayLike
+        self, sk_prf: ArrayLike, opt_rand: ArrayLike, message: ArrayLike, /
     ) -> Array:
         """The per-signature randomizer `R`: -> uint8 `[n]`. One message."""
         ...
@@ -122,18 +130,28 @@ class TweakableHash(ChainHash, NodeHash, Protocol):
         pk_seed: ArrayLike,
         pk_root: ArrayLike,
         message: ArrayLike,
+        /,
     ) -> Array:
         """The message digest a signature is over: -> uint8 `[B, m]`."""
         ...
 
-    def t(self, pk_seed: ArrayLike, adrs: ArrayLike, messages: ArrayLike) -> Array:
+    def t(self, pk_seed: ArrayLike, adrs: ArrayLike, messages: ArrayLike, /) -> Array:
         """Hash of `l` n-byte blocks — a WOTS+ or FORS root: -> uint8 `[B, n]`."""
         ...
 
 
-def _batched(value: ArrayLike, batch: int) -> Array:
-    """Broadcast a shared `[k]` operand to `[B, k]`, or pass a `[B, k]` through."""
-    array = fnp.asarray(value, dtype=fnp.uint8)
+def batched(value: ArrayLike, batch: int, *, dtype: DTypeLike = fnp.uint8) -> Array:
+    """Broadcast a shared `[k]` operand to `[B, k]`, or pass a `[B, k]` through.
+
+    Every family here wants this, at whichever `dtype` its digests are: a public
+    seed or parameter is one value across a key's own tree and one per entry as
+    soon as a batch spans public keys. It takes the dtype rather than naming one
+    for the same reason `tree.py` and `wots.chain` read `tweak.dtype` — the
+    element type belongs to the family — and it defaults to `uint8` because the
+    byte families outnumber the field one and would otherwise pass it at every
+    call.
+    """
+    array = fnp.asarray(value, dtype=dtype)
     if array.ndim == 1:
         return fnp.broadcast_to(array, (batch, array.shape[0]))
     return array
@@ -166,7 +184,9 @@ def hmac(
     )[0]
 
 
-def repeat_per_entry(value: ArrayLike, times: int) -> Array:
+def repeat_per_entry(
+    value: ArrayLike, times: int, *, dtype: DTypeLike = fnp.uint8
+) -> Array:
     """Line a per-entry operand up with an entry-major batch of `times` rows each.
 
     A caller that widens `B` entries into `B · times` hashes — a key pair into its
@@ -176,7 +196,7 @@ def repeat_per_entry(value: ArrayLike, times: int) -> Array:
     untouched, since `_batched` broadcasts it to whatever the row count turns out
     to be.
     """
-    array = fnp.asarray(value, dtype=fnp.uint8)
+    array = fnp.asarray(value, dtype=dtype)
     if array.ndim == 1:
         return array
     return fnp.repeat(array, times, axis=0)
@@ -277,11 +297,11 @@ class Sha2TweakableHash:
         if messages.ndim == 1:
             messages = messages[None, :]
         batch = messages.shape[0]
-        randomizers = _batched(randomizer, batch)
-        seeds = _batched(pk_seed, batch)
+        randomizers = batched(randomizer, batch)
+        seeds = batched(pk_seed, batch)
         inner = self._digest(
             fnp.concatenate(
-                [randomizers, seeds, _batched(pk_root, batch), messages], axis=-1
+                [randomizers, seeds, batched(pk_root, batch), messages], axis=-1
             )
         )
         return self._mgf1(fnp.concatenate([randomizers, seeds, inner], axis=-1), self.m)
@@ -296,8 +316,8 @@ class Sha2TweakableHash:
         if addresses.ndim == 1:
             addresses = addresses[None, :]
         batch = addresses.shape[0]
-        payloads = _batched(payload, batch)
-        seeds = _batched(pk_seed, batch)
+        payloads = batched(payload, batch)
+        seeds = batched(pk_seed, batch)
         padding = fnp.zeros((batch, self._block_size - self.n), dtype=fnp.uint8)
         return self._digest(
             fnp.concatenate([seeds, padding, addresses, payloads], axis=-1)
@@ -397,9 +417,9 @@ class ShakeTweakableHash:
             self._message,
             fnp.concatenate(
                 [
-                    _batched(randomizer, batch),
-                    _batched(pk_seed, batch),
-                    _batched(pk_root, batch),
+                    batched(randomizer, batch),
+                    batched(pk_seed, batch),
+                    batched(pk_root, batch),
                     messages,
                 ],
                 axis=-1,
@@ -419,7 +439,7 @@ class ShakeTweakableHash:
         return self._digest(
             self._chain,
             fnp.concatenate(
-                [_batched(pk_seed, batch), addresses, _batched(payload, batch)],
+                [batched(pk_seed, batch), addresses, batched(payload, batch)],
                 axis=-1,
             ),
         )

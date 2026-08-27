@@ -68,8 +68,9 @@ silent and orders of magnitude over the work.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
-from functools import lru_cache
+from collections.abc import Callable, Iterator, Sequence
+from functools import lru_cache, partial
+from typing import TYPE_CHECKING
 
 import frx
 import frx.numpy as fnp
@@ -86,6 +87,8 @@ from sig_frx.hash.leansig.params import (
     TWEAK_PREFIX_TREE,
     LeanSigParams,
 )
+from sig_frx.hash.tweakable import ChainHash, NodeHash
+from sig_frx.hash.tweakable import batched as _batched
 
 _CHAIN_WIDTH = 16
 """The permutation a chain step runs on — one digest and the tweak fit a narrow
@@ -94,36 +97,36 @@ state, and upstream spends the wide one only where two digests have to."""
 _TREE_WIDTH = 24
 """The permutation both tree hashes run on, interior node and leaf alike."""
 
-# Where each field sits in a packed tweak, transcribed from upstream's
-# `tweak_hash`. The prefix owns the low byte in both, which is what stops a tree
-# tweak and a chain tweak at the same position from packing to the same integer.
-_TREE_LEVEL_SHIFT = 40
-_TREE_INDEX_SHIFT = 8
-_CHAIN_EPOCH_SHIFT = 24
-_CHAIN_INDEX_SHIFT = 16
-_CHAIN_STEP_SHIFT = 8
+# The two packings, transcribed from upstream's `tweak_hash`:
+#
+#     tree   (level << 40) | (index << 8)        | TWEAK_PREFIX_TREE
+#     chain  (epoch << 24) | (chain_index << 16) | (step << 8) | TWEAK_PREFIX_CHAIN
+#
+# Below they are stated as field *widths*, low to high, because that is what a
+# bound has to check and it is the form that cannot disagree with itself: each
+# field's shift is the running sum of the ones under it, so the 40 and the 24
+# above are reproduced rather than restated. The prefix owns the low byte of
+# both, which is the whole of what keeps a chain hash and a tree hash at the
+# same position from packing to the same integer.
+_PREFIX_BITS = 8
 
-# How wide each field may be, derived from the layout rather than restated. A
-# field packed *under* another gets the gap to it; the top field of each tweak
-# has nothing above it to collide with, so what bounds it is the signed host
-# width the shift is performed in.
+# A packed tweak is built in `int64`, so the top field of each layout is bounded
+# by what is left of that rather than by a neighbour it could carry into.
 _HOST_BITS = 63
-_TREE_LEVEL_BITS = _HOST_BITS - _TREE_LEVEL_SHIFT
-_TREE_INDEX_BITS = _TREE_LEVEL_SHIFT - _TREE_INDEX_SHIFT
-_CHAIN_EPOCH_BITS = _HOST_BITS - _CHAIN_EPOCH_SHIFT
-_CHAIN_INDEX_BITS = _CHAIN_EPOCH_SHIFT - _CHAIN_INDEX_SHIFT
-_CHAIN_STEP_BITS = _CHAIN_INDEX_SHIFT - _CHAIN_STEP_SHIFT
+
+_TREE_FIELDS = (("index", 32), ("level", _HOST_BITS - 8 - 32))
+_CHAIN_FIELDS = (("step", 8), ("chain_index", 8), ("epoch", _HOST_BITS - 8 - 8 - 8))
 
 
 def _column(values: ArrayLike, name: str, bits: int) -> np.ndarray:
     """A tweak field as a host `int64` column, bounded by the room it packs into.
 
-    The bound is the whole point, and it is two different hazards wearing one
-    check. A field packed under another does not overflow when it runs past its
-    range — it *carries* into the field above and packs a valid tweak for a
-    different position, which is a wrong digest with nothing to notice it. The
-    top field has no neighbour to corrupt, but its shift happens in `int64`, and
-    a shift past that wraps silently. Neither is caught by the limb-fit check in
+    The bound is the whole point, and it is two hazards wearing one check. A
+    field packed under another does not overflow when it runs past its range —
+    it *carries* into the field above and packs a valid tweak for a different
+    position, which is a wrong digest with nothing to notice it. The top field
+    has no neighbour to corrupt, but its shift happens in `int64`, and a shift
+    past that wraps silently. Neither is caught by the limb-fit check in
     [`field.py`](field.py), which only ever sees the sum.
     """
     column = np.asarray(values, dtype=np.int64).reshape(-1)
@@ -138,26 +141,47 @@ def _column(values: ArrayLike, name: str, bits: int) -> np.ndarray:
     return column
 
 
+def _packed(
+    prefix: int, layout: Sequence[tuple[str, int]], *values: ArrayLike
+) -> np.ndarray:
+    """`values` packed above `prefix` in `layout`'s fields, low to high.
+
+    One packer for both tweaks, so the two cannot drift in how they bound a
+    field or where they put the prefix — only in the layout they hand it.
+    """
+    packed = np.asarray(prefix, dtype=np.int64)
+    shift = _PREFIX_BITS
+    for (name, bits), value in zip(layout, values, strict=True):
+        packed = packed | (_column(value, name, bits) << shift)
+        shift += bits
+    return packed
+
+
 def tree_tweaks(level: int, indices: ArrayLike, *, params: LeanSigParams) -> Array:
     """`TreeTweak(level, index)` for a whole level: -> `[B, tweak_length]`.
 
     `level` is shared — a Merkle walk hashes one level at a time — and `indices`
     is per entry. Host-only, per the module docstring.
     """
-    packed = (
-        (_column(level, "level", _TREE_LEVEL_BITS) << _TREE_LEVEL_SHIFT)
-        | (_column(indices, "index", _TREE_INDEX_BITS) << _TREE_INDEX_SHIFT)
-        | TWEAK_PREFIX_TREE
+    return lane_reversed_limbs(
+        _packed(TWEAK_PREFIX_TREE, _TREE_FIELDS, indices, level), params.tweak_length
     )
-    return lane_reversed_limbs(packed, params.tweak_length)
+
+
+def _chain_base(epochs: ArrayLike, chain_indices: ArrayLike) -> np.ndarray:
+    """A chain tweak with its step left at zero — everything a walk does not move.
+
+    A chain's epoch and index are its own whatever step it is at, so a walk packs
+    them once and each step contributes its own byte. Rebuilding the whole tweak
+    per step is the mistake [`wots.py`](../wots.py)'s `_chain_addresses` records
+    a measurement against: at SLH-DSA-SHA2-128f re-encoding the invariant fields
+    was two fifths of an eager verification.
+    """
+    return _packed(TWEAK_PREFIX_CHAIN, _CHAIN_FIELDS, 0, chain_indices, epochs)
 
 
 def chain_tweaks(
-    epochs: ArrayLike,
-    chain_indices: ArrayLike,
-    step: int,
-    *,
-    params: LeanSigParams,
+    epochs: ArrayLike, chain_indices: ArrayLike, step: int, *, params: LeanSigParams
 ) -> Array:
     """`ChainTweak(epoch, chain_index, step)` for one step: -> `[B, tweak_length]`.
 
@@ -170,13 +194,9 @@ def chain_tweaks(
     Upstream counts steps from one: step zero is the chain start, which is never
     hashed. Host-only, per the module docstring.
     """
-    epoch_column = _column(epochs, "epoch", _CHAIN_EPOCH_BITS)
-    chain_column = _column(chain_indices, "chain_index", _CHAIN_INDEX_BITS)
-    packed = (
-        (epoch_column << _CHAIN_EPOCH_SHIFT)
-        | (chain_column << _CHAIN_INDEX_SHIFT)
-        | (_column(step, "step", _CHAIN_STEP_BITS) << _CHAIN_STEP_SHIFT)
-        | TWEAK_PREFIX_CHAIN
+    step_bits = _CHAIN_FIELDS[0][1]
+    packed = _chain_base(epochs, chain_indices) | (
+        _column(step, "step", step_bits) << _PREFIX_BITS
     )
     return lane_reversed_limbs(packed, params.tweak_length)
 
@@ -186,13 +206,10 @@ def node_tweaks(params: LeanSigParams) -> tree.NodeAddresses:
 
     The same seam `tree.xmss_node_addresses` fills for FIPS 205: the walk takes a
     builder and never learns what one encodes, which is what lets one tree climb
-    over byte addresses and over field elements.
+    over byte addresses and over field elements. Host-only, unlike that one —
+    `tree.NodeAddresses` records what that costs a caller.
     """
-
-    def build(height: int, indices: ArrayLike) -> Array:
-        return tree_tweaks(height, indices, params=params)
-
-    return build
+    return partial(tree_tweaks, params=params)
 
 
 def chain_step_tweaks(
@@ -205,11 +222,20 @@ def chain_step_tweaks(
     `j + 1`, and a caller that spelled that itself would be one rename away from
     hashing every step at the wrong position.
 
-    A generator because `chain` reads its addresses once and forward, so nothing
-    materialises every step at once.
+    Every step is packed in one pass over one array rather than one pass each.
+    The invariant half is `_chain_base`'s reason; the rest is that the base-p
+    decomposition and the field conversion under `lane_reversed_limbs` are the
+    expensive part, and a `[base - 1, B, 2]` array pays them once instead of
+    `base - 1` times — including one host-to-device transfer instead of seven.
+    That is the shape `wots._chain_addresses` already hands `chain`, at addresses
+    far larger than these.
     """
-    for step in range(1, params.base):
-        yield chain_tweaks(epochs, chain_indices, step, params=params)
+    steps = np.arange(1, params.base, dtype=np.int64)
+    _column(steps, "step", _CHAIN_FIELDS[0][1])
+    packed = _chain_base(epochs, chain_indices)[None, :] | (
+        steps[:, None] << _PREFIX_BITS
+    )
+    return iter(lane_reversed_limbs(packed, params.tweak_length))
 
 
 @lru_cache(maxsize=None)
@@ -223,42 +249,29 @@ def _compression(width: int, output_length: int) -> Callable[..., Array]:
 
 
 @lru_cache(maxsize=None)
-def _leaf_sponge(dimension: int, output_length: int) -> Callable[..., Array]:
+def _leaf_sponge(output_length: int) -> Callable[..., Array]:
     """The leaf's sponge over a leading batch axis, with a shared capacity.
 
     The capacity rides `in_axes=None` because it is one value for the whole
     batch — it depends only on the configuration — so the separator is computed
     once per call rather than per leaf.
+
+    The chain ends arrive already joined, by `poseidon.join_digests` and outside
+    this trace. Upstream names them as `dimension` separate operands and handing
+    them over that way is the same pre-image, but it is `dimension` slices into
+    a `dimension + 2`-way concatenate inside the batched body — 48 operands at
+    `PROD`, against one.
     """
 
     def one(parameter: Array, tweak: Array, ends: Array, capacity: Array) -> Array:
-        # The chain ends are `dimension` operands the spec names, not one
-        # vector. The lane reversal reverses the order of the pieces as well as
-        # each piece, so a flattened `[dimension, n]` is a different pre-image —
-        # and one that hashes, self-checks and disagrees only with upstream.
         return poseidon.sponge(
-            (parameter, tweak, *(ends[index] for index in range(dimension))),
+            (parameter, tweak, ends),
             capacity,
             width=_TREE_WIDTH,
             output_length=output_length,
         )
 
     return frx.vmap(one, in_axes=(0, 0, 0, None))
-
-
-def _rows(value: ArrayLike, batch: int) -> Array:
-    """Broadcast a shared `[k]` operand to `[B, k]`, or pass a `[B, k]` through.
-
-    The public parameter is the operand that wants this: one key's own tree
-    shares it across every position, and a batch spanning several public keys
-    carries one per entry. `tweakable._batched` is the same function at `uint8`;
-    this one is at the family's dtype, and merging them would put a dtype
-    argument on a helper whose whole job is that its caller already knows one.
-    """
-    array = fnp.asarray(value, dtype=F)
-    if array.ndim == 1:
-        return fnp.broadcast_to(array, (batch, array.shape[0]))
-    return array
 
 
 class LeanSigTweakableHash:
@@ -295,7 +308,9 @@ class LeanSigTweakableHash:
         tweaks = fnp.asarray(tweak, dtype=F)
         batch = tweaks.shape[0]
         return _compression(_CHAIN_WIDTH, self.n)(
-            _rows(digest, batch), _rows(parameter, batch), tweaks
+            _batched(digest, batch, dtype=F),
+            _batched(parameter, batch, dtype=F),
+            tweaks,
         )
 
     def h(self, parameter: ArrayLike, tweak: ArrayLike, pair: ArrayLike) -> Array:
@@ -314,7 +329,7 @@ class LeanSigTweakableHash:
                 f"a Merkle pair is {2 * self.n} field elements, got {pairs.shape[-1]}"
             )
         return _compression(_TREE_WIDTH, self.n)(
-            _rows(parameter, batch),
+            _batched(parameter, batch, dtype=F),
             tweaks,
             pairs[:, : self.n],
             pairs[:, self.n :],
@@ -338,8 +353,11 @@ class LeanSigTweakableHash:
                 f"a leaf hashes {dimension} digests of {self.n} elements, "
                 f"got shape {ends.shape}"
             )
-        return _leaf_sponge(dimension, self.n)(
-            _rows(parameter, tweaks.shape[0]), tweaks, ends, self.capacity_value
+        return _leaf_sponge(self.n)(
+            _batched(parameter, tweaks.shape[0], dtype=F),
+            tweaks,
+            poseidon.join_digests(ends),
+            self.capacity_value,
         )
 
     @property
@@ -361,3 +379,13 @@ class LeanSigTweakableHash:
             ],
             capacity_length=self._params.capacity,
         )
+
+
+if TYPE_CHECKING:
+    # The two protocols the shared walks take, pinned here so mypy fails this
+    # module when it drifts rather than the walk that calls it —
+    # [`signature.py`](../../signature.py) states the convention for the seam
+    # proper, and this is the same argument one layer down. `TweakableHash` is
+    # deliberately absent: this family has no `prf`, `prf_msg` or `h_msg`.
+    _chain: type[ChainHash] = LeanSigTweakableHash
+    _node: type[NodeHash] = LeanSigTweakableHash

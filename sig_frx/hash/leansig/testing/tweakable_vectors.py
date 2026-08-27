@@ -63,8 +63,8 @@ transcribed vectors — one of these leaves would otherwise be 368 integers.
   root level and an odd index — the two are packed adjacently, so an index that
   carried into the level would still be a valid tweak for a different node.
 - **The leaf** runs at both presets, because it is the one hash whose shape
-  depends on `DIMENSION`: 4 digests pad to three sponge chunks at `TEST` and 46
-  fill exactly 25 at `PROD`, and the domain separator differs with it.
+  depends on `DIMENSION`: 4 digests pad to three sponge chunks at `test` and 46
+  fill exactly 25 at `prod`, and the domain separator differs with it.
 - **The chain walk** covers a full `BASE - 1` walk from the start, a partial walk
   from the middle, and a walk of no steps at all — the last being the identity
   the masked walk has to reproduce for a chain whose digit is already `BASE - 1`.
@@ -108,9 +108,11 @@ class LeafVector(NamedTuple):
     """One `tweak_hash` at `dimension` digests — a Merkle leaf, through the sponge."""
 
     name: str
-    dimension: int
-    """`DIMENSION` at this case's preset, which is what the sponge's shape and its
-    domain separator both depend on."""
+    preset: str
+    """Which preset this case runs at, keyed into `harness.PRESETS`. Named rather
+    than implied by a digest count: `DIMENSION` is what the sponge's shape and its
+    domain separator depend on, so a case that resolved its preset *from* the
+    dimension would answer with a default for one it did not recognise."""
 
     parameter_seed: int
     chain_end_seed: int
@@ -137,8 +139,10 @@ class TreeWalkVector(NamedTuple):
     """One verifier walk: the leaf hash, then one sibling per level to the root."""
 
     name: str
-    dimension: int
+    preset: str
     log_lifetime: int
+    """Not a `LeanSigParams` column yet — the tree slice is what will read it."""
+
     parameter_seed: int
     chain_end_seed: int
     sibling_seed: int
@@ -282,7 +286,7 @@ TREE_NODE_VECTORS: Final = (
 LEAF_VECTORS: Final = (
     LeafVector(
         name="leaf_test_config",
-        dimension=4,
+        preset="test",
         parameter_seed=3101,
         chain_end_seed=3102,
         position=7,
@@ -299,7 +303,7 @@ LEAF_VECTORS: Final = (
     ),
     LeafVector(
         name="leaf_prod_config",
-        dimension=46,
+        preset="prod",
         parameter_seed=3102,
         chain_end_seed=3103,
         position=4000000000,
@@ -379,7 +383,7 @@ CHAIN_WALK_VECTORS: Final = (
 TREE_WALK_VECTORS: Final = (
     TreeWalkVector(
         name="path_test_config_even_leaf",
-        dimension=4,
+        preset="test",
         log_lifetime=8,
         parameter_seed=5101,
         chain_end_seed=5102,
@@ -398,7 +402,7 @@ TREE_WALK_VECTORS: Final = (
     ),
     TreeWalkVector(
         name="path_test_config_odd_leaf",
-        dimension=4,
+        preset="test",
         log_lifetime=8,
         parameter_seed=5102,
         chain_end_seed=5103,
@@ -417,7 +421,7 @@ TREE_WALK_VECTORS: Final = (
     ),
     TreeWalkVector(
         name="path_test_config_last_leaf",
-        dimension=4,
+        preset="test",
         log_lifetime=8,
         parameter_seed=5103,
         chain_end_seed=5104,

@@ -42,27 +42,25 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeAlias
 
 import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hash import adrs, adrs_encoding, bytestring
+from sig_frx.hash import adrs, adrs_encoding, bytestring, tweakable
 from sig_frx.hash.tweakable import NodeHash
 
-# What a builder hands the family as its tweak. Deliberately not
-# `bytestring.ByteString`: FIPS 205's and RFC 8391's builders encode an address
-# into bytes, and leanSig's packs a level and an index into field elements, so
-# the element type is the family's business and naming one here would be a lie
-# in the third caller.
-Tweaks: TypeAlias = np.ndarray | Array
-
-# Builds the tweaks of the given nodes at one height: `(height, indices)`. The
-# indices are concrete where a whole tree is built and traced where a batch walks
-# its paths, so a builder takes them as they come rather than on the host.
-NodeAddresses = Callable[[int, ArrayLike], Tweaks]
+# Builds the tweaks of the given nodes at one height: `(height, indices)`.
+#
+# **Which namespace a builder admits is the builder's own fact.** FIPS 205's
+# takes its indices as they come — concrete where a whole tree is built, traced
+# where a batch walks its paths — so `root_from_path` hands it whatever it was
+# given. leanSig's cannot: its tweak packs an index past a 32-bit lane, so it is
+# host-only and raises on a tracer (`leansig/tweakable.py`). The walk itself
+# never learns the difference, which is the point of taking a builder, but a
+# caller choosing where to put its `@jit` boundary does have to know.
+NodeAddresses = Callable[[int, ArrayLike], tweakable.Tweak]
 
 
 @dataclass(frozen=True)
@@ -95,7 +93,7 @@ def xmss_node_addresses(position: TreePosition, *, compressed: bool) -> NodeAddr
     takes a builder and never learns what one encodes.
     """
 
-    def build(height: int, indices: ArrayLike) -> Tweaks:
+    def build(height: int, indices: ArrayLike) -> tweakable.Tweak:
         return adrs.encode_batch(
             adrs.hash_tree(
                 layer=position.layer,
@@ -189,7 +187,7 @@ def auth_path(
 def _shifted(node_addresses: NodeAddresses, by: int) -> NodeAddresses:
     """A builder whose heights are offset, for reducing one level at a time."""
 
-    def build(height: int, indices: ArrayLike) -> Tweaks:
+    def build(height: int, indices: ArrayLike) -> tweakable.Tweak:
         return node_addresses(height + by, indices)
 
     return build

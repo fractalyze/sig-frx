@@ -100,6 +100,7 @@ py_library(
         ":params",
         ":poseidon",
         "//sig_frx/hash:tree",
+        "//sig_frx/hash:tweakable",
         requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),

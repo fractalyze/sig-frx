@@ -35,6 +35,7 @@ from sig_frx.hash.leansig import tweakable
 from sig_frx.hash.leansig.testing import harness
 from sig_frx.hash.leansig.testing.mode_vectors import (
     DOMAIN_SEPARATOR_VECTORS,
+    DomainSeparatorVector,
     operand_elements,
 )
 from sig_frx.hash.leansig.testing.tweakable_vectors import (
@@ -66,14 +67,28 @@ def _parameter(seed: int) -> fnp.ndarray:
     return harness.lane_reversed(operand_elements(_PROD.parameter_length, seed))
 
 
-def _preset(dimension: int) -> leansig_params.LeanSigParams:
-    """The preset a case's `DIMENSION` names — the only column its leaf reads."""
-    return _PROD if dimension == _PROD.dimension else leansig_params.TEST
+def _chain_ends(seed: int, dimension: int) -> fnp.ndarray:
+    """One slot's `dimension` chain ends — `[dimension, n]`, the leaf's operand."""
+    return fnp.stack([_digest(seed + i) for i in range(dimension)])
 
 
 def _leanspec_rows(values: fnp.ndarray) -> list[list[int]]:
     """A `[B, n]` lane-reversed batch as rows of residues, in upstream's order."""
     return [harness.to_leanspec_order(row) for row in np.asarray(values)]
+
+
+def _assert_one_digest(
+    case: absltest.TestCase, got: fnp.ndarray, expected: tuple[int, ...]
+) -> None:
+    """The three things every single-digest case asserts: value, dtype, shape.
+
+    The dtype is not decoration — the batch here is `frx.vmap` over a
+    one-dimensional mode, which is exactly where a promotion would pass a
+    comparison that reads residues back and nothing else.
+    """
+    case.assertEqual(_leanspec_rows(got), [list(expected)])
+    case.assertEqual(got.dtype, F)
+    case.assertEqual(got.shape, (1, _HASH_LENGTH))
 
 
 class ChainStepTest(parameterized.TestCase):
@@ -91,9 +106,7 @@ class ChainStepTest(parameterized.TestCase):
             _parameter(vector.parameter_seed), tweaks, _digest(vector.digest_seed)
         )
 
-        self.assertEqual(_leanspec_rows(got), [list(vector.output)])
-        self.assertEqual(got.dtype, F)
-        self.assertEqual(got.shape, (1, _HASH_LENGTH))
+        _assert_one_digest(self, got, vector.output)
 
     @parameterized.named_parameters(("host", False), ("traced", True))
     def test_a_batch_is_one_call_over_every_position(self, jit: bool) -> None:
@@ -119,23 +132,16 @@ class ChainStepTest(parameterized.TestCase):
 
         got = step(parameters, tweaks, digests)
 
-        # Row `k` must equal what the same operands give on their own, so the
-        # batch is gated against upstream through the case above rather than
-        # against itself.
+        # Row `k` must equal what row `k`'s own operands give on their own. The
+        # rows are sliced out of the batch rather than rebuilt from the seeds:
+        # rebuilding would let a change to the batch's inputs go on passing
+        # against a differently-built expectation, since every row stays
+        # self-consistent. Upstream is what gates the single-row path, above.
         expected = [
             _leanspec_rows(
-                family.f(
-                    _parameter(v.parameter_seed),
-                    tweakable.chain_tweaks(
-                        [v.epoch],
-                        [v.chain_index],
-                        CHAIN_STEP_VECTORS[0].step,
-                        params=_PROD,
-                    ),
-                    _digest(v.digest_seed),
-                )
+                family.f(parameters[k : k + 1], tweaks[k : k + 1], digests[k : k + 1])
             )[0]
-            for v in CHAIN_STEP_VECTORS
+            for k in range(len(CHAIN_STEP_VECTORS))
         ]
         self.assertEqual(_leanspec_rows(got), expected)
         self.assertEqual(got.dtype, F)
@@ -156,9 +162,7 @@ class TreeNodeTest(parameterized.TestCase):
 
         got = node(_parameter(vector.parameter_seed), tweaks, pair)
 
-        self.assertEqual(_leanspec_rows(got), [list(vector.output)])
-        self.assertEqual(got.dtype, F)
-        self.assertEqual(got.shape, (1, _HASH_LENGTH))
+        _assert_one_digest(self, got, vector.output)
 
     def test_it_is_not_symmetric_in_its_children(self) -> None:
         """Swapping the pair changes the node, so the halves cannot be conflated.
@@ -191,25 +195,24 @@ class LeafTest(parameterized.TestCase):
 
     @parameterized.named_parameters(*harness.both_legs(LEAF_VECTORS))
     def test_it_matches_upstream(self, vector: LeafVector, jit: bool) -> None:
-        preset = _preset(vector.dimension)
+        preset = harness.PRESETS[vector.preset]
         family = tweakable.LeanSigTweakableHash(preset)
         tweaks = tweakable.tree_tweaks(0, [vector.position], params=preset)
-        ends = fnp.stack(
-            [_digest(vector.chain_end_seed + i) for i in range(vector.dimension)]
-        )[None, :, :]
+        ends = _chain_ends(vector.chain_end_seed, preset.dimension)[None, :, :]
         leaf = harness.jitted(family.leaf) if jit else family.leaf
 
         got = leaf(_parameter(vector.parameter_seed), tweaks, ends)
 
-        self.assertEqual(_leanspec_rows(got), [list(vector.output)])
-        self.assertEqual(got.dtype, F)
-        self.assertEqual(got.shape, (1, _HASH_LENGTH))
+        _assert_one_digest(self, got, vector.output)
 
     @parameterized.named_parameters(
-        ("prod", "prod_config", _PROD), ("test", "test_config", leansig_params.TEST)
+        *[
+            (vector.name, vector, harness.PRESETS[vector.name.removesuffix("_config")])
+            for vector in DOMAIN_SEPARATOR_VECTORS
+        ]
     )
     def test_the_capacity_is_the_separator_for_this_presets_shape(
-        self, vector_name: str, preset: leansig_params.LeanSigParams
+        self, vector: DomainSeparatorVector, preset: leansig_params.LeanSigParams
     ) -> None:
         """The `lengths` the family packs, against a separator already gated.
 
@@ -219,13 +222,9 @@ class LeafTest(parameterized.TestCase):
         A leaf digest would catch it too, in a way that says only that some
         operand somewhere is wrong.
         """
-        expected = next(
-            v for v in DOMAIN_SEPARATOR_VECTORS if v.name == vector_name
-        ).output
-
         got = tweakable.LeanSigTweakableHash(preset).capacity_value
 
-        self.assertEqual(harness.to_leanspec_order(got), list(expected))
+        self.assertEqual(harness.to_leanspec_order(got), list(vector.output))
 
     def test_it_refuses_a_chain_end_count_the_preset_does_not_name(self) -> None:
         """The separator is built from `DIMENSION`, so a short leaf is a wrong
@@ -292,20 +291,16 @@ class TreeWalkTest(parameterized.TestCase):
         both ways within a single batched climb.
         """
         vectors = TREE_WALK_VECTORS
-        preset = _preset(vectors[0].dimension)
+        preset = harness.PRESETS[vectors[0].preset]
         family = tweakable.LeanSigTweakableHash(preset)
         positions = [v.position for v in vectors]
+        parameters = fnp.stack([_parameter(v.parameter_seed) for v in vectors])
 
         leaves = family.leaf(
-            fnp.stack([_parameter(v.parameter_seed) for v in vectors]),
+            parameters,
             tweakable.tree_tweaks(0, positions, params=preset),
             fnp.stack(
-                [
-                    fnp.stack(
-                        [_digest(v.chain_end_seed + i) for i in range(v.dimension)]
-                    )
-                    for v in vectors
-                ]
+                [_chain_ends(v.chain_end_seed, preset.dimension) for v in vectors]
             ),
         )
         paths = fnp.stack(
@@ -318,7 +313,7 @@ class TreeWalkTest(parameterized.TestCase):
         def climb(leaf_hashes: fnp.ndarray, siblings: fnp.ndarray) -> fnp.ndarray:
             return tree.root_from_path(
                 family,
-                fnp.stack([_parameter(v.parameter_seed) for v in vectors]),
+                parameters,
                 leaf_hashes,
                 np.asarray(positions),
                 siblings,
@@ -331,15 +326,22 @@ class TreeWalkTest(parameterized.TestCase):
         self.assertEqual(got.dtype, F)
 
 
+_TREE_CASES = [(vector.name, vector) for vector in TREE_VECTORS]
+
+
+def _leaves(vector: TreeVector) -> fnp.ndarray:
+    """The tree's lowest layer — digests standing in for leaf hashes, as upstream
+    took them."""
+    return fnp.stack([_digest(vector.leaf_seed + i) for i in range(1 << vector.depth)])
+
+
 class TreeTest(parameterized.TestCase):
     """`tree.py` builds and opens leanSig's tree, against one upstream built."""
 
-    @parameterized.named_parameters(*[(v.name, v) for v in TREE_VECTORS])
+    @parameterized.named_parameters(*_TREE_CASES)
     def test_the_root_matches_upstream(self, vector: TreeVector) -> None:
         family = tweakable.LeanSigTweakableHash(_PROD)
-        leaves = fnp.stack(
-            [_digest(vector.leaf_seed + i) for i in range(1 << vector.depth)]
-        )
+        leaves = _leaves(vector)
 
         got = tree.root(
             family,
@@ -351,12 +353,10 @@ class TreeTest(parameterized.TestCase):
         self.assertEqual(harness.to_leanspec_order(got), list(vector.root))
         self.assertEqual(got.dtype, F)
 
-    @parameterized.named_parameters(*[(v.name, v) for v in TREE_VECTORS])
+    @parameterized.named_parameters(*_TREE_CASES)
     def test_the_openings_match_upstream(self, vector: TreeVector) -> None:
         family = tweakable.LeanSigTweakableHash(_PROD)
-        leaves = fnp.stack(
-            [_digest(vector.leaf_seed + i) for i in range(1 << vector.depth)]
-        )
+        leaves = _leaves(vector)
 
         got = tree.auth_path(
             family,
@@ -372,16 +372,14 @@ class TreeTest(parameterized.TestCase):
             [[list(sibling) for sibling in path] for path in vector.paths],
         )
 
-    @parameterized.named_parameters(*[(v.name, v) for v in TREE_VECTORS])
+    @parameterized.named_parameters(*_TREE_CASES)
     def test_upstreams_openings_climb_to_upstreams_root(
         self, vector: TreeVector
     ) -> None:
         """Fed upstream's own paths rather than the ones just built, so the climb
         is gated against upstream and not against this file's other direction."""
         family = tweakable.LeanSigTweakableHash(_PROD)
-        leaves = fnp.stack(
-            [_digest(vector.leaf_seed + i) for i in range(1 << vector.depth)]
-        )
+        leaves = _leaves(vector)
         paths = fnp.stack(
             [
                 fnp.stack([harness.lane_reversed(sibling) for sibling in path])

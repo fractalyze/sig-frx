@@ -40,8 +40,6 @@ from sig_frx.hash.leansig.testing.encoding_vectors import (
 )
 from sig_frx.hash.leansig.testing.mode_vectors import operand_elements
 
-PRESETS: dict[str, LeanSigParams] = {"prod": params.PROD, "test": params.TEST}
-
 
 def _digits(codeword: str) -> list[int]:
     """A vector's codeword string as the digits it stands for."""
@@ -137,7 +135,7 @@ class AbortingDecodeTest(parameterized.TestCase):
 
     @parameterized.named_parameters(*harness.both_legs(DECODE_VECTORS))
     def test_it_matches_upstream(self, vector: DecodeVector, jit: bool) -> None:
-        preset = PRESETS[vector.preset]
+        preset = harness.PRESETS[vector.preset]
         elements = harness.lane_reversed(vector.elements)
 
         digits, accepted = _on(encoding.aborting_decode, jit)(elements, params=preset)
@@ -153,12 +151,12 @@ class AbortingDecodeTest(parameterized.TestCase):
     @parameterized.named_parameters(
         *(
             (f"{name}_{seed}", name, seed)
-            for name in PRESETS
+            for name in harness.PRESETS
             for seed in (0, 1, 12345, 99991)
         )
     )
     def test_it_agrees_with_the_transcribed_loop(self, name: str, seed: int) -> None:
-        preset = PRESETS[name]
+        preset = harness.PRESETS[name]
         elements = operand_elements(preset.message_hash_length, seed)
 
         digits, accepted = encoding.aborting_decode(
@@ -179,7 +177,7 @@ class AbortingDecodeTest(parameterized.TestCase):
         # The seeded cases above never abort and never hit a boundary; these do,
         # and running the loop over them costs nothing beyond what upstream was
         # already asked.
-        preset = PRESETS[vector.preset]
+        preset = harness.PRESETS[vector.preset]
 
         digits, accepted = encoding.aborting_decode(
             harness.lane_reversed(vector.elements), params=preset
@@ -201,7 +199,7 @@ class MessageHashTest(parameterized.TestCase):
         # Both in one case rather than two: `target_sum_encode` returns the same
         # digits and only narrows the flag, so a second case would re-run the
         # width-24 compression for one boolean.
-        preset = PRESETS[vector.preset]
+        preset = harness.PRESETS[vector.preset]
         operands = _operands(vector, preset)
         expected = _digits(vector.digits)
 
@@ -223,7 +221,7 @@ class MessageHashTest(parameterized.TestCase):
         # The filter's whole content, stated once so that a vector transcribed
         # with the wrong flag cannot pass quietly.
         for vector in MESSAGE_HASH_VECTORS:
-            preset = PRESETS[vector.preset]
+            preset = harness.PRESETS[vector.preset]
             on_layer = sum(_digits(vector.digits)) == preset.target_sum
             self.assertEqual(vector.on_layer, on_layer, vector.name)
 
