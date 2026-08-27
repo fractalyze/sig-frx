@@ -57,6 +57,11 @@ py_library(
     deps = [":prf_vectors"],
 )
 
+# Two SHAKE128 derivations and their refusals. Host-only — there is no traced
+# leg to compile, since hashing bytes is not array work — so this is the
+# cheapest suite here: 6.2 s on the CPU leg of the run that first carried it
+# (3.8 s on the GPU leg), a tenth of the 60 s budget and well inside the
+# half-a-budget rule in ../../../../docs/reference/measurement.md.
 py_test(
     name = "prf_test",
     size = "small",
@@ -71,13 +76,17 @@ py_test(
 )
 
 # The signer's whole surface: key generation, the sliding window, and six
-# signatures byte-compared against upstream. `medium` rather than `small`
-# because every case builds a `TEST` key pair — 256 slots of 4 chains, then 8
-# Merkle levels — and the sign cases each grind a block of randomness on top of
-# that. The seconds this budget should quote are CI's and are not in yet; per
-# ../../../../docs/reference/measurement.md a local number does not size a
-# budget, so this is one bucket above what a workstation run argues for and gets
-# re-read from the CPU leg once it has run.
+# signatures byte-compared against upstream. Every case builds a `TEST` key pair
+# — 256 slots of 4 chains, then 8 Merkle levels — and each sign case grinds a
+# block of randomness on top of that.
+#
+# `medium` is required rather than cautious, and the CPU leg is what decides it:
+# 74.3 s there on the run that first carried this file, against 59.4 s on the
+# GPU leg, so `small`'s 60 s budget is already exceeded by the slower leg. At
+# `medium` that is a quarter of the 300 s budget, inside the half-a-budget rule
+# in ../../../../docs/reference/measurement.md. A workstation run reads 27 s and
+# argues for `small`; per that page it is right about the local number and the
+# local number is not the one that decides.
 py_test(
     name = "signing_test",
     size = "medium",
