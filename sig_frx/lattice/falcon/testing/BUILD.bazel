@@ -201,14 +201,19 @@ py_test(
 # generation pays that once per key. The base case adds two more programs at
 # 3,161 and 6,302 bits, which grew the target by at most 1.27x — 48.6 s without
 # them against 56.6-61.8 s with, measured by running this same target both ways
-# on one workstation. So the 84.1 s above scales to about 107 s, still 36% of
-# `medium` and inside the threshold. The ratio is what travels between machines;
-# the seconds are the executor's, which is why the bucket is not re-derived from
-# a local duration and a spread factor — doing that is what oversized this
-# target once already.
+# on one workstation. So the 84.1 s above scales to about 107 s. The ratio is
+# what travels between machines; the seconds are the executor's, which is why
+# the bucket is not re-derived from a local duration and a spread factor —
+# doing that is what oversized this target once already.
+#
+# The walk back up costs 2.1x on top of that — 70.3 s against 146.6 s, this
+# target run with and without its end-to-end cases on one workstation — because
+# it adds two compiled programs per level and about 330 reduction steps at
+# `n = 1024`. 2.1x on the 107 s above is ~224 s, which is 75% of `medium` and so
+# past the half-a-budget threshold; `large` puts it at 25%.
 py_test(
     name = "keygen_test",
-    size = "medium",
+    size = "large",
     srcs = ["keygen_test.py"],
     deps = [
         ":falcon_reference",

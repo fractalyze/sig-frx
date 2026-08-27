@@ -7,25 +7,36 @@ Algorithm 5's draw is a *distribution*, which no single output can be right or
 wrong about — so it is checked against `exp(-x²/2σ²)` normalised, over enough
 samples that the sampling noise is smaller than the thing being asserted.
 
-Every level of Algorithm 6's recursion is compared against
-[`falcon_reference.field_norm`](falcon_reference.py), which is the definition
-looped one product at a time over unbounded integers. That is the only oracle
-available here: the coefficients pass 9,000 bits, so no array type can hold the
+Every level of the recursion is compared against
+[`falcon_reference`](falcon_reference.py), which is each definition looped one
+product at a time over unbounded integers. That is the only oracle available
+here: the coefficients pass 9,000 bits, so no array type can hold the
 intermediate and no published vector exists for a step inside key generation.
 
 ## The last level is the one that matters, and the cheap tests never reach it
 
 The descent's whole difficulty is that widths double on the way down, so a test
 that stops at a small degree exercises the easy end and nothing else. The cases
-below run the **full** descent at both parameter sets — nine levels to 3,141
+below run the **full** recursion at both parameter sets — nine levels to 3,141
 bits at `n = 512` and ten to 6,327 at `n = 1024` — and check every level, not
 only the last.
 
 That the actual widths land where
 [#26](https://github.com/fractalyze/sig-frx/issues/26) measured them is asserted
-too. It is what says the descent is the *right* recursion rather than merely a
+too. It is what says the recursion is the *right* one rather than merely a
 self-consistent one: a wrong split or a wrong wrap sign still produces a
 polynomial, still descends, and still ends up at degree 1.
+
+## Coming back up, the equation is the gate and the width is the other half
+
+`f·G - g·F = q` is preserved by every step, so it catches an error anywhere in
+the recursion — and it catches it as an exact integer comparison, because none
+of the arithmetic that produced it was approximate. Babai's rounding moves the
+*width* of the answer and cannot move the equation it satisfies.
+
+Which is exactly why the width is asserted beside it. `q` is satisfied by pairs
+of every size, the un-reduced lift included, so a reduction that quietly did
+nothing would pass the equation and has to be caught somewhere else.
 """
 
 from __future__ import annotations
@@ -216,6 +227,16 @@ def _pack(value: int, bits: int) -> np.ndarray:
     """One signed integer as the `[limbs]` the base case takes."""
     limbs = bigint.limb_count(bits + 2)
     return np.asarray(bigint.to_limbs(value % (1 << (limbs * bigint.LIMB_BITS)), limbs))
+
+
+def _pack_poly(values: Sequence[int], bits: int) -> np.ndarray:
+    """A whole polynomial as `[degree, limbs]`, at any coefficient width.
+
+    [`keygen.to_limbs`](../keygen.py) is the descent's entry point and takes
+    what the Gaussian draw produces, which fits an `int64`. The lift's output
+    does not, so a test that starts from one packs it here instead.
+    """
+    return np.stack([_pack(value, bits) for value in values])
 
 
 def _solve_batch(
@@ -511,6 +532,304 @@ class QualityCheckTest(parameterized.TestCase):
         self.assertFalse(
             bool(np.asarray(keygen.invertible(np.zeros(degree, np.int64))))
         )
+
+
+class LiftBoundTest(absltest.TestCase):
+    """`lift_bits` has to be an upper bound, and be one for the right reason."""
+
+    def test_the_bound_is_attained_by_the_input_that_saturates_it(self) -> None:
+        """The lift sums `degree/2` products, and this is the input where none cancel.
+
+        `lower(x²)` is empty at every odd position, so only half the operand's
+        coefficients ever meet a non-zero one — which is the whole content of
+        the bound, and the thing an input has to reach for it to be tight.
+
+        The constant coefficient is where they can all be made to agree in sign:
+        the term from `i = 0` does not wrap and every other one does, so an
+        operand that is positive at `0` and negative at the remaining even
+        positions puts every product on the same side. One bit of slack remains
+        because a coefficient is `2^w - 1` rather than `2^w`.
+        """
+        for degree, low_bits, high_bits in ((4, 5, 6), (8, 7, 4), (16, 3, 9)):
+            with self.subTest(degree=degree):
+                low = (1 << low_bits) - 1
+                high = (1 << high_bits) - 1
+                lower = [low] * (degree // 2)
+                other = [
+                    0 if i % 2 else (high if i == 0 else -high) for i in range(degree)
+                ]
+                result = falcon_reference.lift(lower, other)
+                widest = max(abs(v) for v in result).bit_length()
+                bound = keygen.lift_bits(low_bits, high_bits, degree)
+                self.assertLessEqual(widest, bound)
+                self.assertLessEqual(bound - widest, 1)
+
+    def test_the_bound_refuses_a_degree_the_lift_has_no_step_for(self) -> None:
+        for degree in (0, 3, 12):
+            with self.subTest(degree=degree):
+                with self.assertRaisesRegex(ValueError, "power of two"):
+                    keygen.lift_bits(4, 4, degree)
+
+
+class LiftTest(parameterized.TestCase):
+    """One step back up, against the definition."""
+
+    @parameterized.parameters(2, 4, 8, 16, 32)
+    def test_agrees_with_the_reference_at_small_degrees(self, degree: int) -> None:
+        lower = _draw(degree // 2, degree)
+        other = _draw(degree, degree + 1)
+        lower_bits = max(abs(v) for v in lower).bit_length()
+        other_bits = max(abs(v) for v in other).bit_length()
+
+        result, bits = keygen.lift(
+            keygen.to_limbs(lower, lower_bits),
+            keygen.to_limbs(other, other_bits),
+            lower_bits,
+            other_bits,
+        )
+
+        expected = falcon_reference.lift(lower, other)
+        self.assertEqual(_unpack(result), expected)
+        self.assertLessEqual(max(abs(v) for v in expected).bit_length(), bits)
+
+    def test_the_substitution_and_the_wrap_sign_are_both_the_right_ones(self) -> None:
+        """Two ways to write this step wrong, and one case that separates each.
+
+        `lower(x²)` at `x` instead of `x²` and `other(-x)` at `+x` are both
+        substitutions that still produce a polynomial of the right degree, so
+        the equation downstream is the only thing that would ever notice. These
+        do it here instead.
+
+        `F' = x` lifts to `x²`, and against `other = x` — whose `other(-x)` is
+        `-x` — the product is `-x³`. Placing `F'` at `x` rather than `x²` would
+        put it at `-x²`, and dropping the sign flip would put it at `+x³`.
+        """
+        cases = (
+            ([0, 1], [0, 1, 0, 0], [0, 0, 0, -1]),
+            ([1, 0], [0, 1, 0, 0], [0, -1, 0, 0]),
+            ([0, 1], [0, 0, 1, 0], [-1, 0, 0, 0]),
+        )
+        for lower, other, expected in cases:
+            with self.subTest(lower=lower, other=other):
+                result, _ = keygen.lift(
+                    keygen.to_limbs(lower, 1), keygen.to_limbs(other, 1), 1, 1
+                )
+                self.assertEqual(_unpack(result), expected)
+                self.assertEqual(falcon_reference.lift(lower, other), expected)
+
+    def test_it_refuses_a_pair_that_does_not_halve(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot lift"):
+            keygen.lift(keygen.to_limbs([1, 2], 2), keygen.to_limbs([1, 2], 2), 2, 2)
+
+
+class ReduceTest(absltest.TestCase):
+    """Algorithm 7 moves `(F, G)` by a multiple of `(f, g)` and nothing else."""
+
+    def test_it_removes_a_planted_multiple_and_leaves_the_pairing_alone(self) -> None:
+        """Both halves of the step, against a case whose answer is known in advance.
+
+        A multiple of `(f, g)` is exactly what the reduction is licensed to
+        take away — and the only thing it can. That is worth saying explicitly,
+        because it rules out the test one would write first: an arbitrary wide
+        `(F, G)` does *not* shorten, since `k` ranges over the ring rather than
+        over the whole space and only the component along `(f, g)` is reachable.
+        The lift's output is close to that line by construction, which is why
+        the reduction works there; here the line is planted so the width has
+        something to be checked against.
+
+        The invariance is the other half and holds unconditionally:
+        `f(G - kg) - g(F - kf)` is `fG - gF` for every `k` there is, so the
+        pairing has to come back bit for bit whether or not `k` was any good.
+        """
+        degree = 16
+        f, g = _draw(degree, 11), _draw(degree, 12)
+        short_f, short_g = _draw(degree, 13), _draw(degree, 14)
+        multiple = [v << 250 for v in _draw(degree, 15)]
+        big_f = [
+            a + b
+            for a, b in zip(short_f, falcon_reference.exact_negacyclic_mul(multiple, f))
+        ]
+        big_g = [
+            a + b
+            for a, b in zip(short_g, falcon_reference.exact_negacyclic_mul(multiple, g))
+        ]
+        before = falcon_reference.ntru_equation(f, g, big_f, big_g)
+
+        small_bits = max(max(abs(v) for v in f), max(abs(v) for v in g)).bit_length()
+        big_bits = max(
+            max(abs(v) for v in big_f), max(abs(v) for v in big_g)
+        ).bit_length()
+        reduced_f, reduced_g, width = keygen.reduce(
+            _pack_poly(big_f, big_bits),
+            _pack_poly(big_g, big_bits),
+            keygen.to_limbs(f, small_bits),
+            keygen.to_limbs(g, small_bits),
+        )
+
+        values_f, values_g = _unpack(reduced_f), _unpack(reduced_g)
+        self.assertEqual(
+            falcon_reference.ntru_equation(f, g, values_f, values_g), before
+        )
+        widest = max(
+            max(abs(v) for v in values_f), max(abs(v) for v in values_g)
+        ).bit_length()
+        self.assertEqual(widest, width)
+        # The planted multiple is gone in full: what is left is the short
+        # representative, give or take one more copy of `(f, g)` where `k`
+        # rounded the other way.
+        short_bits = max(
+            max(abs(v) for v in short_f), max(abs(v) for v in short_g)
+        ).bit_length()
+        self.assertLessEqual(
+            widest, max(short_bits, small_bits) + degree.bit_length() + 1
+        )
+        self.assertLess(widest, big_bits - 200)
+
+    def test_a_pair_already_at_the_basis_width_is_left_alone(self) -> None:
+        # There is nothing above `(f, g)`'s scale to remove, so the loop has to
+        # decline to run rather than subtract a rounding artefact.
+        degree = 8
+        f, g = _draw(degree, 21), _draw(degree, 22)
+        bits = max(max(abs(v) for v in f), max(abs(v) for v in g)).bit_length()
+        big_f, big_g = _draw(degree, 23), _draw(degree, 24)
+        reduced_f, reduced_g, _ = keygen.reduce(
+            keygen.to_limbs(big_f, bits),
+            keygen.to_limbs(big_g, bits),
+            keygen.to_limbs(f, bits),
+            keygen.to_limbs(g, bits),
+        )
+        self.assertEqual(_unpack(reduced_f), big_f)
+        self.assertEqual(_unpack(reduced_g), big_g)
+
+
+class NtruSolveTest(parameterized.TestCase):
+    """Algorithm 6 end to end — the first point where the equation can be checked."""
+
+    def _coprime_seed(self, degree: int) -> int:
+        """A draw whose descent bottoms out at a coprime pair.
+
+        Roughly half of them do not, which is not a defect: Algorithm 5 answers
+        a non-coprime bottom by drawing again, and `ok` is how the solver says
+        so. Searching here keeps that retry out of the assertions below.
+        """
+        for seed in range(degree, degree + 40):
+            f, g = _draw(degree, seed), _draw(degree, seed + 1)
+            for _ in range(degree.bit_length() - 1):
+                f, g = falcon_reference.field_norm(f), falcon_reference.field_norm(g)
+            if math.gcd(f[0], g[0]) == 1 and (f[0] % 2 or g[0] % 2):
+                return seed
+        raise AssertionError(f"no coprime bottom for degree {degree}")
+
+    @parameterized.parameters(*arith.DEGREES)
+    def test_the_equation_closes_exactly_at_full_degree(self, degree: int) -> None:
+        """`f·G - g·F = q`, in integers, at `n = 512` and `n = 1024`.
+
+        The gate this whole issue exists for. Every step of the recursion
+        preserves the equation, so an error anywhere in the descent, the base
+        case or the walk back up lands here and nowhere else — and it lands as
+        an exact integer comparison rather than as a tolerance, because none of
+        the arithmetic that produced it was approximate. The rounding in
+        Babai's `k` moves the *width* of the answer and cannot move the
+        equation it satisfies.
+
+        The width corridor is the second half. `q` is satisfied by pairs of
+        every size, including the un-reduced lift that is thousands of bits
+        wide — so a reduction that quietly did nothing would pass the equation
+        and fail here.
+        """
+        seed = self._coprime_seed(degree)
+        f, g = _draw(degree, seed), _draw(degree, seed + 1)
+        bits = max(max(abs(v) for v in f), max(abs(v) for v in g)).bit_length()
+
+        big_f, big_g, width, ok = keygen.ntru_solve(
+            keygen.to_limbs(f, bits), keygen.to_limbs(g, bits), bits, arith.Q
+        )
+
+        self.assertTrue(bool(np.asarray(ok)))
+        values_f, values_g = _unpack(big_f), _unpack(big_g)
+        equation = falcon_reference.ntru_equation(f, g, values_f, values_g)
+        self.assertEqual(equation[0], arith.Q)
+        self.assertEqual(equation[1:], [0] * (degree - 1))
+        self.assertLessEqual(width, MEASURED_WIDTHS[0] + 8)
+
+    def test_every_level_lands_where_the_issue_measured(self) -> None:
+        """The lift roughly triples the width and the reduction takes it back.
+
+        Run at `n = 512` alone: the widths follow how many squarings have
+        happened rather than what degree they happened at, so both parameter
+        sets walk the same rows and the second one would only re-measure them a
+        level further down.
+
+        Three assertions per level, off one solve. The bound is what says the
+        lift's own budget cannot be short; the corridor is what says the
+        reduction actually ran, since a lift that was never reduced still
+        satisfies the equation; and the equation is what says the pair being
+        measured is the right one.
+        """
+        degree = 512
+        seed = self._coprime_seed(degree)
+        source_f, source_g = _draw(degree, seed), _draw(degree, seed + 1)
+        bits = max(
+            max(abs(v) for v in source_f), max(abs(v) for v in source_g)
+        ).bit_length()
+
+        levels = degree.bit_length() - 1
+        chain = [(source_f, source_g)]
+        for _ in range(levels):
+            current_f, current_g = chain[-1]
+            chain.append(
+                (
+                    falcon_reference.field_norm(current_f),
+                    falcon_reference.field_norm(current_g),
+                )
+            )
+
+        bottom_f, bottom_g = chain[-1]
+        bottom_bits = max(
+            max(abs(v) for v in bottom_f), max(abs(v) for v in bottom_g)
+        ).bit_length()
+        solved_f, solved_g, ok = keygen.base_case(
+            _pack(bottom_f[0], bottom_bits),
+            _pack(bottom_g[0], bottom_bits),
+            bottom_bits,
+            arith.Q,
+        )
+        self.assertTrue(bool(np.asarray(ok)))
+        big_f, big_g = np.asarray(solved_f)[None, :], np.asarray(solved_g)[None, :]
+        big_bits = max(
+            abs(bigint.from_limbs(np.asarray(solved_f), signed=True)),
+            abs(bigint.from_limbs(np.asarray(solved_g), signed=True)),
+        ).bit_length()
+
+        for depth in range(levels - 1, -1, -1):
+            level_f, level_g = chain[depth]
+            level_bits = max(
+                max(abs(v) for v in level_f), max(abs(v) for v in level_g)
+            ).bit_length()
+            limbs_f = _pack_poly(level_f, level_bits)
+            limbs_g = _pack_poly(level_g, level_bits)
+
+            lifted_f, lifted_bits = keygen.lift(big_f, limbs_g, big_bits, level_bits)
+            lifted_g, _ = keygen.lift(big_g, limbs_f, big_bits, level_bits)
+            widest_lift = max(
+                max(abs(v) for v in _unpack(lifted_f)),
+                max(abs(v) for v in _unpack(lifted_g)),
+            ).bit_length()
+            big_f, big_g, big_bits = keygen.reduce(lifted_f, lifted_g, limbs_f, limbs_g)
+            values_f, values_g = _unpack(big_f), _unpack(big_g)
+
+            with self.subTest(depth=depth):
+                self.assertLessEqual(widest_lift, lifted_bits)
+                equation = falcon_reference.ntru_equation(
+                    level_f, level_g, values_f, values_g
+                )
+                self.assertEqual(equation[0], arith.Q)
+                self.assertEqual(equation[1:], [0] * (len(level_f) - 1))
+                self.assertAlmostEqual(
+                    big_bits,
+                    MEASURED_WIDTHS[depth],
+                    delta=max(8, MEASURED_WIDTHS[depth] // 20),
+                )
 
 
 if __name__ == "__main__":

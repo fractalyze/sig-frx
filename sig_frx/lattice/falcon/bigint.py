@@ -285,10 +285,13 @@ def mul_small(a: ArrayLike, scalar: ArrayLike) -> Any:
 def shift_right(a: ArrayLike, bits: int) -> Any:
     """`a >> bits` over limbs, for a `bits` known at trace time.
 
-    A data-dependent shift is deliberately absent. Babai's reduction wants one
-    and will need it, but it is not written here until that caller exists —
-    a traced shift amount costs a gather per limb, which is not a price this
-    module's current callers should pay for a generality none of them uses.
+    A data-dependent shift *right* is still deliberately absent, and the caller
+    that was expected to need one turned out not to. Babai's reduction scales
+    its correction up to meet `F` rather than scaling `F` down to meet the
+    correction, so what it wanted was
+    [`shift_left_dynamic`](#shift_left_dynamic) — which is written, and which
+    carries the cost this docstring used to warn about. Nothing asks for the
+    right-hand form, so it stays unwritten rather than being added for symmetry.
     """
     values = fnp.asarray(a)
     limbs = values.shape[-1]
@@ -354,6 +357,46 @@ def shift_left(a: ArrayLike, bits: int) -> Any:
         [fnp.zeros((*moved.shape[:-1], 1), np.uint32), moved[..., :-1]], axis=-1
     )
     return ((moved << np.uint32(part)) & MASK) | (lower >> np.uint32(LIMB_BITS - part))
+
+
+def shift_left_dynamic(a: ArrayLike, bits: ArrayLike) -> Any:
+    """`a << bits` over limbs, for a `bits` that arrives as a value.
+
+    The one operation here whose shift amount is not a Python integer, and it
+    exists because Babai's reduction's is not one: the correction it subtracts
+    sits wherever the remaining quotient sits, which follows the widths of a
+    particular key rather than the budgets they were allocated from.
+
+    A shift is a slide, so a traced amount turns the limb indexing into a
+    gather — two of them, since a limb of the result is built from the two
+    limbs straddling it. That is the price this module warned about and it is
+    genuinely paid; what buys it back is that a traced amount is also a *loop
+    invariant* shape, so the reduction compiles its step once and runs it a
+    few hundred times, where a Python integer would have compiled a new
+    program per step.
+
+    No branch is needed for a zero intra-limb offset. A limb is under `2^15`
+    and the low half of the pair is shifted by `15 - part`, which at `part = 0`
+    is a shift by the whole limb width and yields zero on its own.
+    """
+    values = fnp.asarray(a)
+    limbs = values.shape[-1]
+    amount = fnp.asarray(bits).astype(np.int32)
+    whole, part = amount // LIMB_BITS, amount % LIMB_BITS
+    positions = fnp.arange(limbs, dtype=np.int32)
+
+    def gathered(source: Any) -> Any:
+        inside = (source >= 0) & (source < limbs)
+        index = fnp.broadcast_to(fnp.clip(source, 0, limbs - 1), values.shape).astype(
+            np.int32
+        )
+        return fnp.where(inside, fnp.take_along_axis(values, index, axis=-1), 0)
+
+    moved = gathered(positions - whole)
+    lower = gathered(positions - whole - 1)
+    return ((moved << part.astype(np.uint32)) & MASK) | (
+        lower >> (np.uint32(LIMB_BITS) - part.astype(np.uint32))
+    )
 
 
 def at_least(a: ArrayLike, b: ArrayLike) -> Any:

@@ -1,24 +1,45 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """Falcon key generation — Algorithm 5's draw, and Algorithm 6 under it.
 
-Three sections, in the order key generation runs them rather than the order
-they were built:
+Four sections, in the order key generation runs them rather than the order they
+were built:
 
 - **Algorithm 5** draws `f` and `g` from a discrete Gaussian and rejects the
   pair unless the basis is short enough and `f` is a unit.
 - **the descent** (Algorithm 6's left-hand side) recurses on the field norm:
   `f` of degree `n` becomes `N(f) = f_e² - x·f_o²` of degree `n/2`.
 - **the base case** closes it at degree 1, where the NTRU equation is Bezout's.
+- **the lift and Babai's reduction** walk back up, each level substituting the
+  level below's answer into its own and shortening what that produces.
 
-The lift back up and Babai's reduction land here too, and the restart loop that
-drives Algorithm 5 lands with the caller that has a loop to put it in — all of
-them [#26](https://github.com/fractalyze/sig-frx/issues/26).
+The restart loop that drives Algorithm 5 lands with the caller that has a loop
+to put it in, and the `ffLDL` tree beside all of this is still to come — both
+[#26](https://github.com/fractalyze/sig-frx/issues/26).
 
-The three share almost nothing: the descent is `bigint`'s residues, the base
-case is `bigint`'s limbs under a `fori_loop`, and Algorithm 5 is `fft` and
-`arith` and a table built with `decimal`. They are one module because they are
-one operation, and the reason to split would be that the file stops being
-readable rather than that the sections differ.
+The four share almost nothing: the descent is `bigint`'s residues, the base
+case is `bigint`'s limbs under a `fori_loop`, the walk up is a host loop over
+`fft`, and Algorithm 5 is `fft` and `arith` and a table built with `decimal`.
+They are one module because they are one operation, and the reason to split
+would be that the file stops being readable rather than that the sections
+differ.
+
+## The two directions are sized differently, and on purpose
+
+Going down, a width is a **bound**: `field_norm` is traced, a tracer cannot
+size a shape from a value, and [`norm_bits`](#norm_bits) is the constant that
+cannot be wrong. Coming up, a width is **measured**. Two things force it. A
+reduced width has no bound to lean on — it is a property of the basis rather
+than of the arithmetic, which is why the reference implementation's own table
+of widths is sampled — and the bound that does exist runs 2.10x wide by the
+bottom, so a lift sized from it would carry four times the channels it needs
+on the widest product in the recursion.
+
+What makes measuring available is that the upward pass is driven from the
+host: [`reduce`](#reduce) has to read a width back anyway to know where the
+next chunk of its quotient sits. So the levels above size themselves from what
+the level below actually produced, and the limbs are trimmed on the way up.
+The arithmetic does not move — `k·f`, the subtraction and the lift are the wide
+operations and all of them stay on device.
 
 ## Coefficients outgrow every lane on the way down, which sets the shape
 
@@ -80,6 +101,7 @@ import decimal
 from functools import lru_cache
 from typing import Any
 
+import frx
 import frx.numpy as fnp
 import numpy as np
 from frx import lax
@@ -204,6 +226,28 @@ def to_limbs(coefficients: ArrayLike, bits: int) -> Any:
     return fnp.asarray(packed.reshape(*values.shape, limbs))
 
 
+def _negate(values: ArrayLike) -> Any:
+    """`-values` in two's complement, which is what every signed step here means."""
+    return bigint.sub(fnp.zeros_like(fnp.asarray(values)), values)
+
+
+def _widen(values: ArrayLike, limbs: int) -> Any:
+    """The same signed value at a wider limb budget.
+
+    Widening a magnitude pads with zeros and widening a two's-complement value
+    pads with its sign; they differ exactly where the value is negative, which
+    is everywhere in this module.
+    """
+    narrow = fnp.asarray(values)
+    pad = limbs - narrow.shape[-1]
+    if pad <= 0:
+        return narrow
+    fill = fnp.where(bigint.is_negative(narrow)[..., None], bigint.MASK, np.uint32(0))
+    return fnp.concatenate(
+        [narrow, fnp.broadcast_to(fill, (*narrow.shape[:-1], pad))], axis=-1
+    ).astype(np.uint32)
+
+
 # -- the base case ---------------------------------------------------------
 
 
@@ -297,19 +341,11 @@ def base_case(f0: ArrayLike, g0: ArrayLike, bits: int, q: int) -> tuple[Any, Any
     # equation the tests assert.
     limbs = bigint.limb_count(bits + 4 + bigint.LIMB_BITS)
 
-    def widen(value: ArrayLike) -> Any:
-        narrow = fnp.asarray(value)
-        pad = limbs - narrow.shape[-1]
-        fill = fnp.where(bigint.is_negative(narrow)[..., None], bigint.MASK, 0)
-        return fnp.concatenate(
-            [narrow, fnp.broadcast_to(fill, (*narrow.shape[:-1], pad))], axis=-1
-        ).astype(np.uint32)
-
     def constant(value: int) -> Any:
         packed = bigint.to_limbs(value % (1 << (limbs * bigint.LIMB_BITS)), limbs)
         return fnp.broadcast_to(fnp.asarray(packed), (*leading, limbs))
 
-    signed_f, signed_g = widen(f0), widen(g0)
+    signed_f, signed_g = _widen(f0, limbs), _widen(g0, limbs)
     negative_f, negative_g = bigint.is_negative(signed_f), bigint.is_negative(signed_g)
     zero = constant(0)
     x = _pick(negative_f, bigint.sub(zero, signed_f), signed_f)
@@ -531,3 +567,376 @@ def invertible(f: ArrayLike) -> Any:
     """
     residues = arith.ntt(arith.to_field(fnp.asarray(f)))
     return fnp.all(residues.astype(np.uint32) != np.uint32(0))
+
+
+# -- the lift back up ---------------------------------------------------------
+
+
+def lift_bits(lower_bits: int, other_bits: int, degree: int) -> int:
+    """The proved bound on `|(F'(x²)·h(-x))_c|` at `degree`.
+
+    `F'(x²)` is empty at every odd position, so the convolution sums `degree/2`
+    products rather than `degree` of them. Each is one coefficient of each
+    operand, and the negacyclic wrap flips signs without touching magnitudes.
+    """
+    if degree < 1 or degree & (degree - 1):
+        raise ValueError(f"degree {degree} is not a power of two")
+    return lower_bits + other_bits + max(degree // 2 - 1, 0).bit_length()
+
+
+def lift(
+    lower: ArrayLike, other: ArrayLike, lower_bits: int, other_bits: int
+) -> tuple[Any, int]:
+    """`lower(x²) · other(-x)` at `other`'s degree — Algorithm 6's step back up.
+
+    The identity the whole recursion turns on: `f(x)·f(-x)` is `N(f)(x²)`, so
+    setting `F = F'(x²)·g(-x)` and `G = G'(x²)·f(-x)` gives
+
+        f·G − g·F = G'(x²)·[f(x)f(-x)] − F'(x²)·[g(x)g(-x)]
+                  = [N(f)·G' − N(g)·F'](x²) = q
+
+    — the level below's solution *is* this level's, once both sides are put back
+    over `x` rather than `x²`. Nothing here is approximate; the product is exact
+    and the equation holds on the nose. What it costs is width, which is why
+    [`reduce`](#reduce) follows immediately.
+
+    Residues carry the product for the same reason they carry the descent's:
+    the convolution is independent per channel. The two operands may arrive at
+    different limb budgets — the lower level's is wider — and
+    [`bigint.to_rns`](bigint.py) reads whichever it is handed.
+    """
+    low, high = fnp.asarray(lower), fnp.asarray(other)
+    degree = high.shape[0]
+    if low.shape[0] * 2 != degree:
+        raise ValueError(f"{low.shape[0]} coefficients cannot lift to degree {degree}")
+    result_bits = lift_bits(lower_bits, other_bits, degree)
+    channels, limbs = bigint.signed_shape(result_bits)
+    mods = bigint.moduli(channels)
+
+    # `lower(x²)`: interleaving with zeros is the whole substitution, since the
+    # coefficient of `x^(2i)` is `lower_i` and every odd position is empty.
+    spread = fnp.reshape(
+        fnp.stack([low, fnp.zeros_like(low)], axis=1), (degree, low.shape[-1])
+    )
+    # `other(-x)`: odd positions change sign and even ones do not.
+    odd = fnp.asarray(np.arange(degree) % 2 == 1)
+    negated = fnp.where(odd[:, None], _negate(high), high)
+
+    def residues(part: Any) -> Any:
+        return fnp.swapaxes(bigint.to_rns(part, channels, signed=True), -1, -2)
+
+    product = negacyclic_mul(residues(spread), residues(negated), mods)
+    result = bigint.from_rns(
+        fnp.swapaxes(product, -1, -2), channels, limbs, signed=True
+    )
+    return result, result_bits
+
+
+# -- Babai's reduction --------------------------------------------------------
+
+# How much of `k` one step takes, and what each operand is read back to.
+# `_CHUNK` is bounded by `float64`: `k` has to survive `round` as an exact
+# integer, which stops at `2^53`, and 50 leaves room for the rounding itself.
+#
+# The windows are the scale that puts the quotient near there, and they are an
+# estimate rather than a guarantee — a level's widths bound `|F|/|f|` measured
+# coefficient-wise, while `k` is a quotient of *evaluations*, and `|f(ζ)|` at
+# the worst root runs well under `f`'s largest coefficient. That gap is real
+# and about 15 bits at the degrees here, so `reduce` rescales by what the
+# quotient turns out to be rather than trusting the estimate. Getting this
+# wrong is quiet: `k` overflows the digits below, the correction is garbage,
+# the step is rejected for making no progress, and the level simply does not
+# reduce.
+_SMALL_WINDOW = 60
+_CHUNK = 50
+_LARGE_WINDOW = _SMALL_WINDOW + _CHUNK
+
+# One limb more than the larger window needs, because a window is limb-aligned
+# and the value's top bit is not: the extra limb is what guarantees the window
+# still holds `_LARGE_WINDOW` bits when the top limb carries only one of them.
+_WINDOW_LIMBS = bigint.limb_count(_LARGE_WINDOW) + 1
+
+
+@frx.jit
+def _magnitudes(values: ArrayLike) -> tuple[Any, Any]:
+    """A signed polynomial's magnitudes and its signs, in one device call."""
+    signed = fnp.asarray(values)
+    negative = bigint.is_negative(signed)
+    return fnp.where(negative[..., None], _negate(signed), signed), negative
+
+
+def _host_summary(magnitude: Any, negative: Any) -> tuple[np.ndarray, np.ndarray, int]:
+    """Magnitudes, signs and the widest bit length among them, on the host.
+
+    The one place this module moves a wide value off the device, and it is
+    small in the way that matters: limbs times degree is roughly constant down
+    the recursion — the coefficients widen exactly as fast as the degree halves
+    — so every level moves about 2,000 limbs, a few kilobytes, however deep it
+    is. What the host then does with them is bookkeeping and a transform over
+    `m` doubles; the arithmetic stays where the limbs live.
+    """
+    limbs, signs = np.asarray(magnitude), np.asarray(negative)
+    used = np.flatnonzero(np.any(limbs != 0, axis=tuple(range(limbs.ndim - 1))))
+    if used.size == 0:
+        return limbs, signs, 0
+    top = int(used[-1])
+    return (
+        limbs,
+        signs,
+        bigint.LIMB_BITS * top + int(limbs[..., top].max()).bit_length(),
+    )
+
+
+def _view(values: ArrayLike) -> tuple[np.ndarray, np.ndarray, int]:
+    """[`_host_summary`](#_host_summary) of a value the device still holds."""
+    return _host_summary(*_magnitudes(values))
+
+
+def _summarize(step: tuple[Any, Any, Any]) -> tuple[np.ndarray, np.ndarray, int]:
+    """The same, off a step that already computed them — no second device call."""
+    return _host_summary(step[1], step[2])
+
+
+def _width(values: ArrayLike) -> int:
+    """The bit length of the widest magnitude in `values`, read back to the host."""
+    return _view(values)[2]
+
+
+def _floats(view: tuple[np.ndarray, np.ndarray, int], exponent: int) -> np.ndarray:
+    """`view`'s value divided by `2^exponent`, as host doubles.
+
+    The exponent is the caller's to choose and is what makes the quotient
+    computable: `F` and `f` are scaled apart by exactly the amount `k` is
+    expected to span, so `k` comes out near `2^_CHUNK` however wide the two
+    operands actually are.
+
+    Only the top `_WINDOW_LIMBS` limbs take part, which is not an optimization:
+    `2^(15j)` for a limb index into a 629-limb number overflows a double long
+    before the sum could reach it, and the zero limb it would be multiplying is
+    exactly the case that turns an infinity into a NaN. Windowing keeps every
+    place value inside the range where it means something, which is also the
+    only range a 53-bit mantissa can report.
+    """
+    limbs, signs, width = view
+    top = max(0, (width - 1) // bigint.LIMB_BITS)
+    start = max(0, top + 1 - _WINDOW_LIMBS)
+    window = limbs[..., start : top + 1].astype(np.float64)
+    places = bigint.LIMB_BITS * (start + np.arange(window.shape[-1])) - exponent
+    return np.where(signs, -1.0, 1.0) * (window @ (2.0**places))
+
+
+@frx.jit
+def _subtract_multiple(
+    big: ArrayLike,
+    wide: ArrayLike,
+    source: ArrayLike,
+    flip: ArrayLike,
+    digits: ArrayLike,
+    shift: ArrayLike,
+) -> tuple[Any, Any, Any]:
+    """`big − ((k · wide) << shift)`, with `k` handed over as `digits`.
+
+    The product that keeps this loop affordable. `k` is small and `wide` is
+    not, so the work is [`bigint.mul_small`](bigint.py) rather than a residue
+    round trip — and that matters more than it looks: a trip through `from_rns`
+    costs one sequential step per channel, which at the bottom level is 630 of
+    them, and this runs a few hundred times per key rather than once per level.
+
+    The sum over the convolution's terms is a tree rather than a walk, so it
+    costs `log2(m)` carry scans instead of `m` of them. Two's complement makes
+    the wrap free: a term that crossed `x^m` is negated rather than subtracted,
+    and a partial sum that leaves the limb budget still lands on the right
+    value, because every operation here is exact modulo `2^(L·15)` and the
+    answer fits.
+
+    Compiled, and that is the whole reason `shift` arrives as a value rather
+    than as a Python integer. A step is a few hundred carry scans; dispatched
+    one at a time they cost more than the arithmetic by an order of magnitude,
+    and a shift baked in as a constant would have meant one compilation per
+    step rather than one per level.
+    """
+    gathered = fnp.take(fnp.asarray(wide), source, axis=0)
+    total = fnp.zeros_like(fnp.asarray(wide))
+    for level in range(fnp.asarray(digits).shape[0]):
+        scaled = bigint.mul_small(gathered, digits[level][None, :, None])
+        terms = fnp.where(fnp.asarray(flip)[..., None], _negate(scaled), scaled)
+        while terms.shape[1] > 1:
+            half = terms.shape[1] // 2
+            terms = bigint.add(terms[:, :half], terms[:, half:])
+        total = bigint.add(
+            total, bigint.shift_left(terms[:, 0], bigint.LIMB_BITS * level)
+        )
+    result = bigint.sub(fnp.asarray(big), bigint.shift_left_dynamic(total, shift))
+    magnitude, negative = _magnitudes(result)
+    return result, magnitude, negative
+
+
+def reduce(
+    big_f: ArrayLike, big_g: ArrayLike, f: ArrayLike, g: ArrayLike
+) -> tuple[Any, Any, int]:
+    """Algorithm 7 — `(F, G)` shortened against `(f, g)`, and its width.
+
+    `k = ⌊(F·f̄ + G·ḡ) / (f·f̄ + g·ḡ)⌉` and then `F -= k·f`, `G -= k·g`. The
+    equation survives any `k` at all — `f(G − kg) − g(F − kf)` is `fG − gF`
+    whatever `k` is — so this cannot produce a wrong answer, only a wide one.
+    Width is the entire content of the step, and the next level's cost is what
+    pays for missing it.
+
+    ## `k` is thousands of bits and a double holds 53, so it arrives in chunks
+
+    [`lift`](#lift) roughly triples the width, so `|k| ≈ |F|/|f|` spans the
+    difference — 6,276 bits at the bottom level of `n = 1024`. No transform
+    over doubles produces that. What one *can* produce is its top
+    `_CHUNK` bits: scale `F` and `f` apart by a chosen exponent and the
+    quotient lands where a double is exact. Subtract that much, and the next
+    pass sees a narrower `F` and takes the next chunk down. The loop is the
+    specification's own `while k ≠ 0`, run against a `k` that is deliberately
+    truncated rather than one that is merely rounded.
+
+    ## The loop runs on the host, and that is what keeps the shift static
+
+    A step's shift is `width(F) − width(f) − _CHUNK`, which depends on the
+    values rather than on their budgets — and their budgets are no guide, since
+    [`norm_bits`](#norm_bits) runs 2.10x wide by the bottom, so a shift taken
+    from the bound would scale `f` clean out of existence rather than merely
+    imprecisely. Read the width back instead and the shift is an ordinary
+    Python integer, which is what [`bigint.shift_left`](bigint.py) already
+    takes. So the data-dependent shift
+    [`bigint.shift_right`](bigint.py) defers never has to exist: the
+    dependence is real, and it is resolved on the host, one level up from the
+    limbs. What crosses back is 120 bits of a 9,000-bit number.
+
+    The arithmetic all stays on device — `k·f`, the subtraction and the lift
+    are the wide operations and none of them moves. What the host does is
+    decide the exponent and run the transform, which is `m` doubles wide.
+
+    Returning the width rather than a bound is the other half of that choice.
+    A reduced width has no proof to lean on — it is a property of the basis,
+    which is why the reference implementation's own width table is measured —
+    so the level above sizes its lift from what this one actually produced.
+    Measured beats bounded here precisely because it cannot be short.
+    """
+    values_f, values_g = fnp.asarray(big_f), fnp.asarray(big_g)
+    degree, limbs = values_f.shape[0], values_f.shape[-1]
+    wide_f, wide_g = _widen(f, limbs), _widen(g, limbs)
+
+    view_f, view_g = _view(f), _view(g)
+    small_width = max(view_f[2], view_g[2])
+    view_big_f, view_big_g = _view(values_f), _view(values_g)
+    width = max(view_big_f[2], view_big_g[2])
+    if small_width == 0:
+        # `(f, g)` is the zero pair, which the base case already refused; there
+        # is no lattice to reduce against and no quotient to divide by.
+        return values_f, values_g, width
+
+    exponent = small_width - _SMALL_WINDOW
+    f_fft = fft.fft(_floats(view_f, exponent))
+    g_fft = fft.fft(_floats(view_g, exponent))
+    denominator = (f_fft * np.conj(f_fft) + g_fft * np.conj(g_fft)).real
+
+    source, wrapped = _convolution_indices(degree)
+    device_source = fnp.asarray(source)
+    levels = bigint.limb_count(_CHUNK + 1)
+
+    while width > small_width:
+        shift = max(0, width - small_width - _CHUNK)
+        scaled = exponent + shift
+        numerator = fft.fft(_floats(view_big_f, scaled)) * np.conj(f_fft) + fft.fft(
+            _floats(view_big_g, scaled)
+        ) * np.conj(g_fft)
+        quotient = numerator / denominator
+        if not np.isfinite(quotient).all():
+            break
+        # `k` is bounded by the quotient's largest *evaluation* — every
+        # coefficient is an average of them — so the scale that makes it fit is
+        # readable here rather than guessable from the widths. Dividing in the
+        # evaluation domain is free: it commutes with the transform below, so
+        # this costs a scan of `m` doubles and no second transform.
+        peak = float(np.max(np.abs(quotient)))
+        if peak == 0.0:
+            break
+        excess = max(0, int(np.ceil(np.log2(peak))) - _CHUNK)
+        k = np.round(fft.ifft(quotient / 2.0**excess).real).astype(np.int64)
+        if not k.any():
+            break
+        applied = shift + excess
+
+        # A term's sign is the wrap's, flipped again where `k` itself is
+        # negative, and its digits are `k` cut into limbs the multiply can take.
+        flip = fnp.asarray(wrapped ^ (k < 0)[None, :])
+        digits = fnp.asarray(
+            np.stack(
+                [
+                    (np.abs(k) >> (bigint.LIMB_BITS * level)) & int(bigint.MASK)
+                    for level in range(levels)
+                ]
+            ).astype(np.uint32)
+        )
+        amount = fnp.asarray(np.int32(applied))
+        candidate_f = _subtract_multiple(
+            values_f, wide_f, device_source, flip, digits, amount
+        )
+        candidate_g = _subtract_multiple(
+            values_g, wide_g, device_source, flip, digits, amount
+        )
+        next_f, next_g = _summarize(candidate_f), _summarize(candidate_g)
+        next_width = max(next_f[2], next_g[2])
+        # A step that does not shorten is where the truncated `k` has run out of
+        # meaning, and stopping on it is what makes the loop terminate: the
+        # width is a non-negative integer and every step it takes lowers it.
+        if next_width >= width:
+            break
+        values_f, values_g = candidate_f[0], candidate_g[0]
+        view_big_f, view_big_g = next_f, next_g
+        width = next_width
+
+    # Trimmed to what the answer needs rather than to what the lift needed.
+    # The level above multiplies this by its own `f`, so carrying the budget
+    # forward would put the *widest* level's limb count on every level over it
+    # — and the widest is the bottom, where a limb count in the hundreds meets
+    # a degree of two. Leaving that to the caller is a trap worth closing here:
+    # it costs nothing to get right and a great deal to get wrong.
+    trimmed = min(bigint.limb_count(width + 2), values_f.shape[-1])
+    return values_f[..., :trimmed], values_g[..., :trimmed], width
+
+
+def ntru_solve(
+    f: ArrayLike, g: ArrayLike, bits: int, q: int
+) -> tuple[Any, Any, int, Any]:
+    """Algorithm 6 in full: `(F, G, bits, ok)` with `f·G − g·F = q`.
+
+    The descent, the base case and the walk back up, in the order the recursion
+    runs them. `ok` is the base case's — a pair whose bottom is not coprime has
+    no solution, and Algorithm 5 answers that by drawing again.
+
+    Each level's lift is sized from the level below's *measured* width rather
+    than from a bound on it (see [`reduce`](#reduce)), so the upward pass is
+    tight where the descent is deliberately not.
+    """
+    values_f, values_g = fnp.asarray(f), fnp.asarray(g)
+    degree = values_f.shape[0]
+    levels = degree.bit_length() - 1
+
+    chain = [(values_f, values_g, bits)]
+    for _ in range(levels):
+        current_f, current_g, current_bits = chain[-1]
+        next_f, next_bits = field_norm(current_f, current_bits)
+        next_g, _ = field_norm(current_g, current_bits)
+        chain.append((next_f, next_g, next_bits))
+
+    bottom_f, bottom_g, bottom_bits = chain[-1]
+    big_f, big_g, ok = base_case(bottom_f[0], bottom_g[0], bottom_bits, q)
+    big_f, big_g = big_f[None, :], big_g[None, :]
+    big_bits = max(_width(big_f), _width(big_g))
+
+    for depth in range(levels - 1, -1, -1):
+        level_f, level_g, _ = chain[depth]
+        # Measured on both sides, not bounded. The descent's bound runs 2.10x
+        # wide by the bottom, and sizing the lift from it would put roughly four
+        # times the channels on the widest product in the whole recursion.
+        level_bits = max(_width(level_f), _width(level_g))
+        lifted_f, lifted_bits = lift(big_f, level_g, big_bits, level_bits)
+        lifted_g, _ = lift(big_g, level_f, big_bits, level_bits)
+        big_f, big_g, big_bits = reduce(lifted_f, lifted_g, level_f, level_g)
+
+    return big_f, big_g, big_bits, ok
