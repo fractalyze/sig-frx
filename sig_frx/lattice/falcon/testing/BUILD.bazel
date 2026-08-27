@@ -178,9 +178,17 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
-# Sized from the executor: 84.1 s on the CPU leg against 82.2 s on the GPU one.
-# The worse of those is 28% of `medium`'s 300 s, well inside the half-a-budget
-# threshold in ../../../../docs/reference/measurement.md.
+# Sized from the executor: 120.3 s on the CPU leg against 96.2 s on the GPU one.
+# The worse of those is 40% of `medium`'s 300 s, inside the half-a-budget
+# threshold in ../../../../docs/reference/measurement.md — but no longer
+# comfortably. **The next slice that lands in this file probably tips it to
+# `large`**: Algorithm 5's cases alone took the CPU leg from 84.1 s to 120.3 s,
+# and the lift, Babai's reduction and the key encoding are all still to come.
+#
+# The workstation said the GPU leg would decide, at 1.6x the CPU one. CI has it
+# the other way at 0.8x. That is the second time a local leg ratio has been
+# reversed here — the sibling `bigint_test` records the first — so the ratio is
+# worth measuring and not worth predicting.
 #
 # That threshold is *already* the executor's spread — the page sets it at half
 # precisely because a CPU-leg duration varies by a median of 2.2x across runs of
