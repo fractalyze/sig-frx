@@ -16,12 +16,12 @@ and this repo's are not. Anyone re-deriving a signature size or a chain count
 from the technical note will get different numbers: the note gives `v = 64`, and
 the widely-quoted 3112-byte signature is that figure. `PROD` is `v = 46`.
 
-**Only the columns something here reads.** The preset upstream carries also
-fixes `LOG_LIFETIME` and `MAX_TRIES`, and neither has a call site in this package
-yet — the tree's bound on a slot and the signer's rejection loop are what read
-them, and each arrives with the slice that does. `HASH_LENGTH_FIELD_ELEMENTS` and
-`CAPACITY` arrived exactly that way, with the tweakable hash family
-([`tweakable.py`](tweakable.py)) that reads them. That is
+**Only the columns something here reads.** `MAX_TRIES` is the last one upstream
+carries that nothing here does — the signer's rejection loop is what reads it,
+and it arrives with that slice. `HASH_LENGTH_FIELD_ELEMENTS` and `CAPACITY`
+arrived exactly that way, with the tweakable hash family
+([`tweakable.py`](tweakable.py)); `LOG_LIFETIME` arrived with the wire format
+([`ssz.py`](ssz.py)), which sizes an authentication path by it. That is
 [`conventions.md`](../../../docs/reference/conventions.md#generalize-a-component-when-its-second-consumer-arrives)
 read from the data side: a column nothing reads is a number nothing can
 disagree with, so a wrong one is found by the slice that finally uses it rather
@@ -57,6 +57,12 @@ TWEAK_PREFIX_MESSAGE: Final = 0x02
 @dataclass(frozen=True)
 class LeanSigParams:
     """One preset's parameters, as far as anything in this package reads them."""
+
+    log_lifetime: int
+    """`LOG_LIFETIME`: how many slots one key covers, as a power of two — and so
+    how many levels the Merkle tree has, which is what sizes an authentication
+    path. Even, because the tree splits into a top and a bottom half of
+    `log_lifetime / 2` levels each."""
 
     dimension: int
     """`DIMENSION`, the `v` of the papers: how many chains a signature commits to,
@@ -95,6 +101,12 @@ class LeanSigParams:
     security level is set here, and it is what the rate is `24 - capacity`."""
 
     def __post_init__(self) -> None:
+        # Upstream's other validator, and the tree layout is what rests on it: the
+        # lifetime splits into a top and a bottom half of equal height, so an odd
+        # exponent has no split.
+        if self.log_lifetime % 2 != 0:
+            raise ValueError(f"LOG_LIFETIME must be even, got {self.log_lifetime}")
+
         # Upstream's own validator. The decode's uniformity argument rests on it:
         # `0 .. PRIME - 2` is exactly `BASE^Z` groups of `Q` consecutive integers,
         # so every quotient is equally likely and `PRIME - 1` is the one value
@@ -132,6 +144,7 @@ class LeanSigParams:
 
 
 PROD: Final = LeanSigParams(
+    log_lifetime=32,
     dimension=46,
     base=8,
     digits_per_element=8,
@@ -147,6 +160,7 @@ PROD: Final = LeanSigParams(
 """Upstream's `PROD_CONFIG` — what the pq-devnet series pins."""
 
 TEST: Final = LeanSigParams(
+    log_lifetime=8,
     dimension=4,
     base=8,
     digits_per_element=8,

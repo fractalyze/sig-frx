@@ -193,11 +193,32 @@ def undo_lane_reversal(vector: Array) -> Array:
     boundary into a convention spread across the package, and the third one
     copies the line rather than the seam.
 
-    The reversal is over the **last** axis, so a stack of vectors reverses each
-    of them rather than their order. A single one reads the same either way,
-    which is all any caller passes today; the axis is named because the
-    alternative silently reorders a stack the first time one arrives.
+    The reversal is over the **last** axis, so a stack of digests reverses each
+    of them rather than their order. A single vector reads the same either way,
+    which is what the codeword caller passes; the wire format
+    ([`ssz.py`](ssz.py)) is what brought a stack.
     """
+    return _reverse_lanes(vector)
+
+
+def apply_lane_reversal(vector: Array) -> Array:
+    """leanSpec-ordered lanes -> the lane-reversed vector this package runs on.
+
+    The entrance the exit above has always implied, and the traced counterpart of
+    [`field.lane_reversed_limbs`](field.py) — that one places a host integer's
+    limbs, this one places values that arrive already in lanes, off the wire.
+
+    Same movement as `undo_lane_reversal`, and named apart from it on purpose: a
+    reversal is its own inverse, so the only thing a call site can say about
+    which direction it means is which name it spells. The two are the reason
+    neither is a `[::-1]` at a call site — a reader who meets one knows a
+    convention is being crossed, where a slice reads as an ordering detail.
+    """
+    return _reverse_lanes(vector)
+
+
+def _reverse_lanes(vector: Array) -> Array:
+    """The reversal both directions share, spelled once."""
     return vector[..., ::-1]
 
 
