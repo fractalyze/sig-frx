@@ -258,13 +258,19 @@ class ResidueTest(parameterized.TestCase):
         within four orders of magnitude of the bound; the check is here for the
         caller that one day does.
         """
+        # The bound is checked against the lane rather than against itself: a
+        # case built from `MAX_LIMBS + 1` follows the constant wherever it goes
+        # and passes for a bound that is wrong by orders of magnitude, which is
+        # what this assertion first did.
+        self.assertLess(bigint.MAX_LIMBS * int(bigint.MASK), 1 << 32)
+        self.assertGreater(bigint.MAX_LIMBS, 100 * bigint.limb_count(max(WIDTHS)))
+
         channels = bigint.channel_count(120)
         too_many = bigint.MAX_LIMBS + 1
         with self.assertRaisesRegex(ValueError, "exceeds"):
             bigint.to_rns(np.zeros(too_many, dtype=np.uint32), channels)
         with self.assertRaisesRegex(ValueError, "exceeds"):
             bigint.from_rns(np.zeros(channels, dtype=np.uint32), channels, too_many)
-        self.assertGreater(bigint.MAX_LIMBS, 100 * bigint.limb_count(max(WIDTHS)))
 
     def test_the_bridge_carries_a_product_no_lane_could_hold(self) -> None:
         """The operation the two forms exist for: multiply as residues, read as `int`.
