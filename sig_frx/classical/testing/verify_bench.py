@@ -93,6 +93,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import frx
 import numpy as np
 from absl import app, flags
 
@@ -120,32 +121,6 @@ _REPS = flags.DEFINE_integer(
 _MESSAGE = np.frombuffer(bytes(range(32)), dtype=np.uint8)
 
 
-def _settle(value: Any) -> None:
-    """Wait for `value`, so a seam is charged the work it started.
-
-    A placed seam returns a traced array that is still being computed: the call
-    enqueues and returns. Timing the call alone therefore measures the enqueue,
-    and the arithmetic is charged instead to whichever *later* seam first reads
-    the array — which on every secp lane is the readback.
-
-    That is not a small distortion. Measured at B=1024 on an RTX 5090,
-    `secp.double_multiple` returns in about a fifth of the time the
-    multiplication it queued then takes; without this wait the first reads
-    `mult` and the second reads `readback`. The ranking that comes out is not
-    the profile, it is the dispatch order.
-
-    Host paths are unaffected — a numpy array has no wait to do — so the two
-    sides of every placement threshold stay comparable.
-    """
-    if isinstance(value, (tuple, list)):
-        for item in value:
-            _settle(item)
-        return
-    ready = getattr(value, "block_until_ready", None)
-    if ready is not None:
-        ready()
-
-
 class _Meter:
     """Wall-clock accumulator, one bucket per substrate seam.
 
@@ -165,12 +140,26 @@ class _Meter:
     def reset(self) -> None:
         self.seconds.clear()
 
-    def wrap(self, bucket: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+    def wrap(
+        self, bucket: str, fn: Callable[..., Any], *, settles: bool = True
+    ) -> Callable[..., Any]:
+        """`fn`, with its time accumulated into `bucket`.
+
+        `settles=False` marks a seam that cannot have anything outstanding when
+        it returns, so the wait is skipped rather than paid — see `install`.
+        """
+
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             start = time.perf_counter()
             out = fn(*args, **kwargs)
-            if self.settle:
-                _settle(out)
+            if self.settle and settles:
+                # Inside the window on purpose: a placed seam returns as soon as
+                # it is enqueued, so timing the call alone measures the enqueue
+                # and bills the arithmetic to whichever later seam first reads
+                # the array — the `readback` distortion the `wall` / `work`
+                # split above exists to make visible. Host paths are unaffected;
+                # a numpy array has no wait to do.
+                frx.block_until_ready(out)
             elapsed = time.perf_counter() - start
             self.seconds[bucket] = self.seconds.get(bucket, 0.0) + elapsed
             return out
@@ -187,8 +176,25 @@ class _Meter:
         the cross-module rebind.
         """
         setattr(secp, "multiple", self.wrap("mult", secp.multiple))
-        setattr(secp, "affine_ints", self.wrap("readback", secp.affine_ints))
-        setattr(secp, "is_identity", self.wrap("readback", secp.is_identity))
+        # The readback seams are the synchronization point, not a queue: neither
+        # can return before the values have landed on the host, so there is
+        # nothing left outstanding to wait for. Skipping the wait is therefore
+        # free of meaning and not free of cost — `affine_ints` hands back a
+        # `list[tuple[int, int]]`, so settling it would walk 2B host leaves and
+        # charge this bucket the walk (0.18 ms at B=256, against a bucket that
+        # is 0.23 ms). That is the same self-inflicted `readback` inflation
+        # fractalyze/sig-frx#202 was about, arriving through the meter instead
+        # of through a missing wait.
+        setattr(
+            secp,
+            "affine_ints",
+            self.wrap("readback", secp.affine_ints, settles=False),
+        )
+        setattr(
+            secp,
+            "is_identity",
+            self.wrap("readback", secp.is_identity, settles=False),
+        )
         setattr(secp, "lift_x_to_parity", self.wrap("lift", secp.lift_x_to_parity))
         # Both aggregates fold through `group.sum_points`, so wrapping it
         # once meters the secp and Edwards lanes alike — wrapping each

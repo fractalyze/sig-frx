@@ -86,7 +86,9 @@ class _MeasuredHash:
 
     def digest(self, msg: ArrayLike) -> Array | np.ndarray:
         start = time.perf_counter()
-        out = _blocked(self._inner.digest(msg))
+        # Settled inside the window, so this bucket is charged the hashing it
+        # started rather than its enqueue.
+        out = frx.block_until_ready(self._inner.digest(msg))
         self.seconds += time.perf_counter() - start
         self.calls += 1
         self.rows += int(np.shape(msg)[0])
@@ -99,14 +101,6 @@ class _MeasuredHash:
 
     def __hash__(self) -> int:
         return hash((type(self), self._inner))
-
-
-def _blocked(value: Array | np.ndarray) -> Array | np.ndarray:
-    """Wait for a dispatch to land, so a timing measures work and not queueing."""
-    ready = getattr(value, "block_until_ready", None)
-    if ready is not None:
-        ready()
-    return value
 
 
 def _fixture(
@@ -147,7 +141,10 @@ def _fastest(call: Callable[[], object], reps: int) -> float:
 
 def _timed(call: Callable[[], object]) -> float:
     start = time.perf_counter()
-    _blocked(call())
+    # Wait for the dispatch to land before stopping the clock: a placed seam
+    # returns as soon as it is enqueued, so a timing without this measures the
+    # enqueue and bills the hashing to whoever reads the array next.
+    frx.block_until_ready(call())
     return time.perf_counter() - start
 
 
@@ -168,7 +165,7 @@ def _latency(
     eager: dict[int, float] = {}
     for batch in batches:
         arrays = _batch_of(public_key, message, signature, batch)
-        _blocked(scheme.verify(*arrays))  # warm the caches
+        frx.block_until_ready(scheme.verify(*arrays))  # warm the caches
         best = None
         for _ in range(reps):
             measured.reset()
@@ -255,7 +252,7 @@ def _stages(name: str, batch: int) -> None:
     md, tree_indices, leaf_indices = scheme._split_digest(
         randomizers, pk_seeds, pk_roots, messages
     )
-    _blocked(md)
+    frx.block_until_ready(md)
     record("H_msg and the split", start)
 
     measured.reset()
@@ -268,12 +265,12 @@ def _stages(name: str, batch: int) -> None:
         pk_seeds,
         fors.ForsPosition(tree=tree_indices, key_pair=leaf_indices),
     )
-    _blocked(fors_keys)
+    frx.block_until_ready(fors_keys)
     record("FORS reconstruction", start)
 
     measured.reset()
     start = time.perf_counter()
-    _blocked(
+    frx.block_until_ready(
         hypertree.verify(
             scheme.tweak,
             params.hypertree_params,

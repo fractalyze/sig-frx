@@ -41,6 +41,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any, NamedTuple
 
+import frx
 import frx.numpy as fnp
 import numpy as np
 from absl import app, flags
@@ -125,7 +126,7 @@ class _Timed:
 
             def digest(self, msg: Any) -> Any:
                 start = time.perf_counter()
-                out = _blocked(hash_.digest(msg))
+                out = frx.block_until_ready(hash_.digest(msg))
                 rows, message = np.shape(msg)
                 record(
                     _Call(int(rows), int(message), size, family),
@@ -140,14 +141,6 @@ class _Timed:
 # prediction, not a measurement: an individual signature runs its own count, and
 # `_operations` reports that one beside this.
 _EXPECTED_ITERATIONS = {"ML-DSA-44": 4.25, "ML-DSA-65": 5.1, "ML-DSA-87": 3.85}
-
-
-def _blocked(value: Any) -> Any:
-    """Wait for a dispatch to land, so a timing measures work and not queueing."""
-    ready = getattr(value, "block_until_ready", None)
-    if ready is not None:
-        ready()
-    return value
 
 
 @contextlib.contextmanager
@@ -175,12 +168,25 @@ def _wrapped(
     return lambda *values: _Timed(chooser(*values), record)
 
 
-def _fastest(call: Callable[[], object], reps: int) -> float:
-    """The fastest of `reps` timed calls, in seconds. Assumes a warm caller."""
+def _fastest(call: Callable[[], object], reps: int, *, settles: bool = True) -> float:
+    """The fastest of `reps` timed calls, in seconds. Assumes a warm caller.
+
+    `settles=False` marks a call that returns host data by construction, so the
+    wait would walk a pytree to find nothing outstanding — and at these
+    durations that walk is a fifth of what is being measured.
+    """
     best = None
     for _ in range(reps):
         start = time.perf_counter()
-        _blocked(call())
+        if settles:
+            # Wait for the dispatch to land before stopping the clock: a placed
+            # sponge returns as soon as it is enqueued, so a timing without this
+            # measures the enqueue and bills the hashing to whoever reads the
+            # array next — which would rank the host and device families by
+            # dispatch order rather than by cost.
+            frx.block_until_ready(call())
+        else:
+            call()
         elapsed = time.perf_counter() - start
         if best is None or elapsed < best:
             best = elapsed
@@ -352,7 +358,12 @@ def _sponge_table(params: ml_dsa.MlDsaParams, message_size: int, reps: int) -> N
         if not np.array_equal(np.asarray(device_hash.digest(msg)), host_digest()):
             raise AssertionError(f"{shape.label}: hashlib and device digests differ")
         device = _fastest(lambda: device_hash.digest(msg), reps)
-        host = _fastest(host_digest, reps)
+        # `host_digest` builds its result with `np.array`, so nothing is ever
+        # outstanding when it returns. The wait is skipped rather than paid
+        # because this column is the small one — a few microseconds — and the
+        # pytree walk would be a fifth of it, biasing the ratio beside it
+        # against the host sibling that this table exists to rank.
+        host = _fastest(host_digest, reps, settles=False)
         total_device += device * shape.calls
         total_host += host * shape.calls
         print(
@@ -390,11 +401,12 @@ def _operations(name: str, message_size: int, reps: int, signatures: int) -> Non
         for which in range(signatures)
     ]
     public_key, secret_key = (np.asarray(part) for part in scheme.keygen(seed))
-    _blocked(scheme.sign_internal(secret_key, messages[0]))  # warm the caches
+    # Warm the caches.
+    frx.block_until_ready(scheme.sign_internal(secret_key, messages[0]))
     keygen = _fastest(lambda: scheme.keygen(seed), reps)
     start = time.perf_counter()
     for message in messages:
-        _blocked(scheme.sign_internal(secret_key, message))
+        frx.block_until_ready(scheme.sign_internal(secret_key, message))
     sign = (time.perf_counter() - start) / signatures
     print(f"  keygen        {keygen * 1e3:>9.1f} ms  (fastest of {reps})")
     print(f"  sign_internal {sign * 1e3:>9.1f} ms  (mean of {signatures} messages)")
@@ -410,7 +422,7 @@ def _operations(name: str, message_size: int, reps: int, signatures: int) -> Non
 
     with _counting(record):
         for message in messages:
-            _blocked(scheme.sign_internal(secret_key, message))
+            frx.block_until_ready(scheme.sign_internal(secret_key, message))
     seconds = sum(spent for _, spent in profile.values())
     hashing = seconds / signatures
     # `c̃` is the one hash of the loop body, so its count is the trip count —
@@ -553,9 +565,10 @@ def _stages(name: str, message_size: int, reps: int) -> None:
 
     print(f"  {'stage':<14} {'host arg ms':>12} {'device arg ms':>14} {'result':>8}")
     for label, call in stages:
-        result = _blocked(call(host))  # warm the caches, and read the namespace
+        # Warm the caches, and read the namespace off what comes back.
+        result = frx.block_until_ready(call(host))
         on_host = _fastest(lambda: call(host), reps)
-        _blocked(call(lifted))
+        frx.block_until_ready(call(lifted))
         on_device = _fastest(lambda: call(lifted), reps)
         landed = "device" if isinstance(_first(result), Array) else "host"
         print(
