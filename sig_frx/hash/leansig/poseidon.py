@@ -34,11 +34,14 @@ on a constant, not a runtime operation.
 
 **So the permutation this module hands out runs on a lane-reversed state**, and
 its name says so. That is deliberate: reversing at every call would put a device
-`reverse` either side of ~180 permutations per verification, while a caller that
-*builds* its state — the compression and sponge layers, which place a public
-parameter, a tweak and a message into fixed positions and read a truncated
-prefix back — reverses for free by placing and slicing from the other end. The
-reversal is a layout decision made once at the boundary, never data movement.
+`reverse` either side of ~380 permutations per verification (this verifier's
+count, not the construction's quoted ~180 —
+[`leansig.md`](../../../docs/schemes/leansig.md) has the difference), while a
+caller that *builds* its state — the compression and sponge layers, which place
+a public parameter, a tweak and a message into fixed positions and read a
+truncated prefix back — reverses for free by placing and slicing from the other
+end. The reversal is a layout decision made once at the boundary, never data
+movement.
 
 "Once" is load-bearing on the callers too, and it is why the two modes below
 live here rather than in a module of their own. The convention is two facts —
@@ -89,7 +92,7 @@ And the permutation lowers to one kernel at both widths, but on hash-frx's
 **generic** fused-region marker rather than the dedicated classic-Poseidon
 emitter: that emitter applies the MDS as a small-integer add-chain, so it takes
 entries in `[0, 64)` and no matrix over a 31-bit field qualifies. Correct, and
-at ~180 permutations per verification the gap is worth closing —
+at ~380 permutations per verification the gap is worth closing —
 [xla#604](https://github.com/fractalyze/xla/issues/604). Nothing about it is the
 conjugation's doing.
 """
@@ -187,7 +190,7 @@ def undo_lane_reversal(vector: Array) -> Array:
     have no lanes at all — the codeword [`encoding.py`](encoding.py) decodes to,
     where digit `i` addresses chain `i`. Carrying a reversed codeword downstream
     instead would spread the convention over the chain and tree layers to save
-    one reverse per verification, against the ~180 permutations one runs.
+    one reverse per verification, against the ~380 permutations one runs.
 
     It lives here rather than at that call site for the reason the module
     docstring gives: a second module that open-codes `[::-1]` has turned a
@@ -386,7 +389,7 @@ def safe_domain_separator(lengths: Sequence[int], *, capacity_length: int) -> Ar
     than the cost: `sponge` takes the capacity as an argument and never calls
     this itself, so the layer above physically cannot land it in a per-block
     loop — the most it can waste is one permutation per leaf hash, against the
-    ~180 a verification runs. Caching a *concrete array* is also the thing
+    ~380 a verification runs. Caching a *concrete array* is also the thing
     `lane_reversed_permutation` avoids by caching a builder instead.
     """
     packed = 0
