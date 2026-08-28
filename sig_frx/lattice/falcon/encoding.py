@@ -1,10 +1,16 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""Falcon's encodings (§3.11): the public key, and the compressed signature.
+"""Falcon's encodings (§3.11): the two keys, and the compressed signature.
 
 Everything a Falcon key or signature is on the wire. No cryptography happens
 here — it is bit manipulation over byte strings — but unlike ML-DSA's
 counterpart, one half of it is a *variable-length* code, and that is what makes
 this module the interesting one.
+
+The fixed-length half still has one thing worth knowing: §3.11.5 stores `f`, `g`
+and `F` and **not** `G`, which is recovered by (3.35) when the key is loaded. So
+a private key here is three quarters of a trapdoor, and the missing quarter is
+arithmetic rather than bits — [`keygen.recover_g`](keygen.py) rather than
+anything in this file.
 
 ## The bit order is the opposite of ML-DSA's, and the names say so
 
@@ -214,7 +220,8 @@ PK_BITS = (Q - 1).bit_length()
 
 # §3.11.5's `f` and `g` widths by degree; `F` is eight bits at every degree and
 # `G` is not encoded at all. Here rather than in the scheme module because every
-# other §3.11 width is, and #26's `sk_decode` reads them from here.
+# other §3.11 width is: a scheme module reading a wire width would be the one
+# place the encoding is described twice.
 SK_FG_BITS = {512: 6, 1024: 5}
 SK_F_BITS = 8
 
@@ -295,7 +302,7 @@ def bytes_to_bits_high_first(values: ArrayLike) -> Any:
 
     The mirror image of [`mldsa.encoding.bytes_to_bits`](../mldsa/encoding.py),
     including its namespace rule: a host value stays on numpy, so the key
-    encoder #26 brings does not drag key generation onto a device
+    encoders above do not drag key generation onto a device
     ([`conventions.md`](../../../docs/reference/conventions.md)).
 
     `decompress` is the one function here that cannot follow the rule — its
@@ -308,8 +315,32 @@ def bytes_to_bits_high_first(values: ArrayLike) -> Any:
     return bits.reshape(*data.shape[:-1], -1)
 
 
-def unpack_fields_high_first(v: ArrayLike, width: int) -> Any:
-    """`v` read as big-endian `width`-bit fields, as uint32.
+def bits_from_fields_high_first(v: ArrayLike, width: int) -> Any:
+    """`v` as big-endian `width`-bit fields, still as bits.
+
+    Stops at bits rather than bytes because §3.11.5 has three runs at two
+    widths, so a caller concatenates them and converts once. Doing it per run
+    would need each run to land on a byte boundary, which is true at both
+    parameter sets and is not a property of the encoding.
+
+    Named against [`fields_from_bits_high_first`](#fields_from_bits_high_first)
+    rather than against `unpack_fields_high_first`: the pair that reads as
+    inverses has to *be* one, and the unpacking below starts from bytes.
+    """
+    xnp = namespace(v)
+    values = xnp.asarray(v, dtype=np.uint32)
+    weights = np.arange(width - 1, -1, -1, dtype=np.uint32)
+    bits = (values[..., None] >> weights) & np.uint32(1)
+    return xnp.reshape(bits, (*np.shape(values)[:-1], -1)).astype(np.uint8)
+
+
+def fields_from_bits_high_first(bits: ArrayLike, width: int) -> Any:
+    """A bit stream read as big-endian `width`-bit fields, as uint32.
+
+    Takes bits rather than bytes because §3.11.5 packs three runs at two widths
+    into one stream, so the second and third do not start on a byte boundary in
+    general. `unpack_fields_high_first` is this over a byte string, and is the
+    common case rather than a separate implementation.
 
     The sum's dtype is pinned rather than inferred, for the reason ML-DSA's
     `unpack_fields` pins its own: numpy promotes a reduction's accumulator to
@@ -317,10 +348,33 @@ def unpack_fields_high_first(v: ArrayLike, width: int) -> Any:
     paths differ in a width that no round trip can see
     ([`CLAUDE.md`](../../../CLAUDE.md)).
     """
-    bits = bytes_to_bits_high_first(v).astype(np.uint32)
-    fields = bits.reshape(*bits.shape[:-1], -1, width)
+    xnp = namespace(bits)
+    values = xnp.asarray(bits, dtype=np.uint32)
+    fields = xnp.reshape(values, (*np.shape(values)[:-1], -1, width))
     weights = np.arange(width - 1, -1, -1, dtype=np.uint32)
     return (fields << weights).sum(axis=-1, dtype=np.uint32)
+
+
+def bits_to_bytes_high_first(bits: ArrayLike) -> Any:
+    """§3.11.1 read backwards — eight bits to a byte, most significant first.
+
+    A byte *is* an eight-bit field, so this is the general reader above at that
+    width, narrowed back to the dtype a byte string has. The trailing axis must
+    be a whole number of bytes; the check is that reshape rather than a length
+    argument nobody could pass wrongly.
+
+    `bytes_to_bits_high_first` is deliberately **not** collapsed the same way.
+    It is the one of these four on a measured hot path — `decompress` is 69% of
+    a GPU verification — and routing it through the `uint32` form above would
+    widen every bit of every signature in the batch, which this module has
+    already measured at 3.0x for the same reason one function further up.
+    """
+    return fields_from_bits_high_first(bits, 8).astype(np.uint8)
+
+
+def unpack_fields_high_first(v: ArrayLike, width: int) -> Any:
+    """`v` read as big-endian `width`-bit fields, as uint32."""
+    return fields_from_bits_high_first(bytes_to_bits_high_first(v), width)
 
 
 def degree_header(n: int, kind: int) -> int:
@@ -351,6 +405,108 @@ def pk_decode(pk: ArrayLike, n: int) -> tuple[Any, Any]:
     header = data[..., 0] == np.uint8(degree_header(n, 0b0000))
     coefficients = unpack_fields_high_first(data[..., 1:], PK_BITS)
     return coefficients, header & (coefficients < np.uint32(Q)).all(axis=-1)
+
+
+def pk_encode(h: ArrayLike, n: int) -> Any:
+    """§3.11.4 — `1 + ⌈14n/8⌉` bytes from `[n]` residues under `q`.
+
+    The inverse of [`pk_decode`](#pk_decode), and the range check is not
+    mirrored here: a coefficient at or above `q` is a *verdict* about a key that
+    arrived from elsewhere, where the only producer on this side is
+    [`keygen.public_key`](keygen.py) and its output is a residue by
+    construction. Checking anyway would put a branch on the value in a function
+    whose whole job is bit manipulation, and it would not catch anything the
+    round trip does not.
+    """
+    xnp = namespace(h)
+    header = xnp.asarray([degree_header(n, 0b0000)], dtype=np.uint8)
+    bits = bits_from_fields_high_first(xnp.asarray(h, dtype=np.uint32), PK_BITS)
+    return xnp.concatenate([header, bits_to_bytes_high_first(bits)], axis=-1)
+
+
+def _to_two_complement(values: ArrayLike, width: int) -> Any:
+    """Signed coefficients as `width`-bit two's complement fields."""
+    xnp = namespace(values)
+    signed = xnp.asarray(values, dtype=np.int32)
+    return signed.astype(np.uint32) & np.uint32((1 << width) - 1)
+
+
+def _from_two_complement(fields: ArrayLike, width: int) -> tuple[Any, Any]:
+    """`width`-bit two's complement fields as signed, and whether any is `−2^(w−1)`.
+
+    §3.11.5 forbids the minimal value — "when using degree 512, the valid range
+    for a coefficient of `f` or `g` is −31 to +31; −32 is not allowed" — so it
+    is a rejection rather than a value, and it is here rather than at the call
+    site because the forbidden pattern is a property of the width.
+    """
+    xnp = namespace(fields)
+    values = xnp.asarray(fields, dtype=np.uint32)
+    high = (values >> np.uint32(width - 1)) & np.uint32(1)
+    signed = values.astype(np.int32) - (high << np.uint32(width)).astype(np.int32)
+    return signed, (values == np.uint32(1 << (width - 1))).any(axis=-1)
+
+
+def _sk_widths(n: int) -> tuple[int, int, int]:
+    """§3.11.5's three runs, in order: `f` and `g` at the degree's width, `F` at 8.
+
+    One statement of the run order and its widths, read by both directions —
+    two spellings of the same table is how an encoder and a decoder drift while
+    each looks right on its own.
+    """
+    return SK_FG_BITS[n], SK_FG_BITS[n], SK_F_BITS
+
+
+def sk_encode(f: ArrayLike, g: ArrayLike, big_f: ArrayLike, n: int) -> Any:
+    """§3.11.5 — `1 + n·(2w + 8)/8` bytes carrying `f`, `g` and `F` in that order.
+
+    `G` is absent because the standard leaves it out: it is recovered on load by
+    (3.35), which is [`keygen.recover_g`](keygen.py). That asymmetry is the
+    whole of why this takes three polynomials and Algorithm 6 returns four.
+
+    The two widths — `w` for `f` and `g`, eight for `F` — are why the three runs
+    are concatenated as *bits* and turned into bytes once. Each happens to land
+    on a byte boundary at both parameter sets, so a per-run conversion would
+    also work there and would break at the first degree where it did not.
+    """
+    xnp = namespace(f, g, big_f)
+    header = xnp.asarray([degree_header(n, 0b0101)], dtype=np.uint8)
+    runs = [
+        bits_from_fields_high_first(_to_two_complement(values, width), width)
+        for values, width in zip((f, g, big_f), _sk_widths(n))
+    ]
+    body = bits_to_bytes_high_first(xnp.concatenate(runs, axis=-1))
+    return xnp.concatenate([header, body], axis=-1)
+
+
+def sk_decode(sk: ArrayLike, n: int) -> tuple[Any, Any, Any, Any]:
+    """§3.11.5 — `(f, g, F, ok)` from `1 + n·(2w + 8)/8` bytes.
+
+    `ok` covers the header nibble and §3.11.5's forbidden minimum, which are the
+    two ways a well-sized private key can still be malformed. Length is the
+    caller's, exactly as it is for [`pk_decode`](#pk_decode): a wrong one is a
+    mistake about the parameter set rather than a property of the bytes, and it
+    surfaces as the reshape failing rather than as a verdict.
+
+    There is no range check beyond the forbidden minimum, and there is nothing
+    to add: every other `width`-bit pattern is a coefficient the encoding can
+    represent. What makes a decoded key *wrong* rather than malformed is the
+    NTRU equation, and that is arithmetic — `keygen.recover_g` is where it is
+    checked, not here.
+    """
+    xnp = namespace(sk)
+    data = xnp.asarray(sk, dtype=np.uint8)
+    header = data[..., 0] == np.uint8(degree_header(n, 0b0101))
+    bits = bytes_to_bits_high_first(data[..., 1:])
+
+    ok, cursor, decoded = header, 0, []
+    for width in _sk_widths(n):
+        run = fields_from_bits_high_first(bits[..., cursor : cursor + n * width], width)
+        values, forbidden = _from_two_complement(run, width)
+        decoded.append(values)
+        ok = ok & ~forbidden
+        cursor += n * width
+    f, g, big_f = decoded
+    return f, g, big_f, ok
 
 
 def decompress(data: ArrayLike, n: int) -> tuple[Any, Any]:

@@ -54,11 +54,19 @@ gate in the harness precisely "because the gap is a property of how the vectors
 are published, not of any one scheme — a per-scheme fix would be written once per
 scheme for one cause."
 
-`seed` and `secret_key` are absent, which is what makes a verification-only
-scheme drivable: `_check_keygen` skips a vector with no seed and `_check_sign`
-one with no secret key, so neither reaches the `NotImplementedError` that
-`keygen` and `sign` are until #26 and #27. `eddsa_test` is the precedent for
-inline records rather than a loaded file.
+`seed` and `secret_key` are absent **from the records**, which is what makes a
+verification-only scheme drivable: `_check_keygen` skips a vector with no seed
+and `_check_sign` one with no secret key, so neither reaches the
+`NotImplementedError` that `keygen` and `sign` are until #26 and #27.
+`eddsa_test` is the precedent for inline records rather than a loaded file.
+
+The published `sk` bytes are here all the same, as `SECRET_KEYS` beside the
+records rather than inside them — §3.11.5's decoder is #26's and can be gated on
+them today, where putting them on a `Vector` would drive the harness into
+signing that does not exist yet. Reproducing the published *keys from their
+seed* stays out of scope for a different reason, recorded on #26: it would mean
+transcribing NIST's AES-256-CTR-DRBG and the reference's own sampler, neither of
+which is Falcon's specification.
 
 What these two per degree buy over one is that a fluke cannot carry a degree on
 its own; the batch axis is not gated by them, since the generator varies `mlen`
@@ -395,6 +403,126 @@ VECTORS: dict[str, tuple[Vector, ...]] = {
                 "def4b5f7d1c53509efe4dd740000000000000000"
             ),
         ),
+    ),
+}
+
+
+# The `sk` field of the same two records, which `VECTORS` deliberately does not
+# carry. Adding `secret_key` to a `Vector` would make `kat.check`'s signing pass
+# reach `Falcon.sign`, and that is #27's `NotImplementedError` — so the bytes
+# live beside the records rather than in them, and drive §3.11.5's decoder
+# directly.
+#
+# What they gate is worth naming, because it is more than a round trip: the
+# reference implementation's own `f`, `g` and `F` are here, so a decode that
+# recovers `G` by (3.35) can be held to `f·G - g·F = q` in exact integers, and
+# the `h = g/f mod q` it implies can be held to the **published public key
+# above**. Two implementations, one key, three independent agreements.
+SECRET_KEYS: dict[str, str] = {
+    "Falcon-512": (
+        "59044102f3cfbe1be03c144102f7ef75fbef83043f7cfc20c20beec007de3f041fbf0bff"
+        "401041030c40040fae7e103f7e100085fc013d1410c80c2f000810461c2f480bee8017d1"
+        "7f07f1411ba24013c1bdf83dc407d17e07c13917f0f9044045fc40bd0ff07d07ef0003df"
+        "c1f3cffd1fc03fefc0b8fc6e7b0bbdbd0fe0be17d14307effe0fbfc6f81fbff43ec1f870"
+        "41d42083ec3dc2f4407bf84ec4140fc403f037f3fec013e0fee02180082f83fbe07bffe0"
+        "43f40ec6ffb1bf200007ffbffa0fff6ffbce83ebfebefc0ffdf3f103fc6f3ff0500a1871"
+        "8308007d03f200e4213bf04ffd17d000f0017a17f180e04fff07dec2244048148e870450"
+        "3ee06f86080243f81fff03bf4003f07ef3de02fbffc00420c1f40fbdf0707e043ff5ffd0"
+        "000430400c4f49f4207c142f80ec3e010bff7c13f07ff85f7f17e07c17ff33fc4ec303ff"
+        "bcffeec41830ff0831bdf45f05f06fc503b0c0f84e4013e100e7e1441450c2fbeebc0c0f"
+        "befc60bcffef3cfbdf4303ef800bf2be0bf001f01f43f41ffe08517b001141e00144f7ef"
+        "8007cebdffff4213a0b9f8a0fe04103c17e0820bb1c30c30c00ffffc00007d18017cff90"
+        "c3101e7e103040fc4fbe04213e07af80ffefc80fbfbd0810bcfb8fbc087fb8fff1010c2e"
+        "81002f3ef3bf01f07e41fbc07f2c0fb8f43f401c5d81ffcebe07c07e0bf17eebee830c51"
+        "4003ff7ef3e08403d1ffffe105f840c20bdf0607fffef46e7efff08000400de830000f3f"
+        "82ef9d82e84efff3cec4e81e01002103102efc080f3b0801041bae42f7f040f83ec31010"
+        "031bc0410faff9f0004010133a089ffef7be8317a0020fef010052ba04107e100f821c2f"
+        "41f44f4ef7b000f02e41f82f380830fe08a1f707ff82ec7f42e81004041103e8307b13d0"
+        "fdff8f830f9fc5ffcd7e040f410fffb9f423750860c11c5ffa144ec0080f02dc0f420820"
+        "450790020bcf80efffbcec4fbff4200afc00c02060c004303ef81ffa104107e4117af01f"
+        "81202fc1e44143ffe206eb3e881bb13f13920403ff7a000144102e7ffc2143e7ff4af3f1"
+        "3f07e181dc317e240f4500303f2dddcf1e1513e3ef15e8dc1309e50aee03efdc17081706"
+        "fd03e6ece4f30ebd1909051906e90ce806eb0b19e719effbf10d0df1dc0cf6f1f4f8fefb"
+        "e9f9550e2107fcdccbdfe9f4f7ee1af8142115f910002af2f5ff141ada220aecfe040cef"
+        "0b29eb201930f2d3e401e5deeff4ddea17f1fe141217f81c36050109f8f61f02dd19f903"
+        "10c7f40208e9052c3942f8fff2ccf9fdf83cfa12dc091c0d02f00411f5281e40d7f92dba"
+        "11d73d04c10bfd13e617110af3ed05f6cfe705e0f70e1ff80533fc120c002ce81ff52638"
+        "190fe3fed6f0fbbb23e6f408ef32220b13dd27f007e5fa00d72614f0e302210707ec111e"
+        "070e2a032df91de3fce800f1f9f2f7fe170101180412cbd1e90019f2011522daeaed13f8"
+        "e5f425dcef24e01ce614e7dcec01f2f4f914f4010107ed26e2e9df0bf5f007ea07fafbc6"
+        "d7e607fafcfd270dfd0d17fc4ef0ee00071aecde09f8f215e113f80209ccf308d7e6251e"
+        "ce0edfed0cc9f4050b2714f61bf703f0ebf104010debfbf21afc1bf01823fedefaf7f807"
+        "e3f3020aeb01fe19eee8e90d00e5faed1efdf628e5f0e6f0fc13f4fb05fb0b09ea0a0e08"
+        "ee13293212e90ce4fef223f4ff030bebed1b402ed2f6171102bc0cf9e9f335ed0c01faf0"
+        "fefae41df0050a162c11171cd90bee211218edfafa0f03f4171412f319d60b01faee1f28"
+        "23f0d6ef12d6dfeafbfc170decda06e7ced500031e"
+    ),
+    "Falcon-1024": (
+        "5af9060e0b80f0cdee037f0842208ba4173de07c3fe701918bfdff49df0003e7ca31185e"
+        "00402d7c7f07065e838427fdf173c5ea0a0f13c2e787f1ec401f7c3e8ffa00c2106c3ef7"
+        "80606be0067a1f0fdd078440843cf0b9f28045ef88108002e7fe2e7fc2ff3e0e001f1943"
+        "ce80a310402117e0f77e110bfff8c4217c44f0c4307c21183bb084a4103fe0747c0f8002"
+        "707bf8065f03fed7821dffa0f7822103a2c7fc51770217f80f0f5f174411709bf7822fff"
+        "60270203f81d19bff07c42f981e07c3b30c7f008200f79f1147f37c41e780300bbe1ff9e"
+        "10be00680029800ff7e026f83200031ff60fff5f18c3df0804d849ff0401f0021f7c6517"
+        "3bb1f7b920b9bf0402efb7d0efc208441fffe3f83e0003fef7ffd0033f1781e1081f1002"
+        "3f705c1fff93841d28f432806220fba0fc60f8c60e87051842200c621841c0081e277bfc"
+        "f3fc263e0ef87ee8405e745e2048620420f73c207820183bce883f07fdc0fc9fffc1a37c"
+        "87103e1ef81c08080f67e0ff0a1f0482f6c3e093dc18422f877de7881d0bfef8bdd28bfc"
+        "28400070440ec9e103c0d7c1f1ffdf08b78df48008bc120063ff8420fc1b08c61f0fa201"
+        "c040084008824effdff7c03f9000f845dd7be30ef82fe83f1001de8421303e0efc61e0ff"
+        "b004211fffcf7c40eec21ff858f83e0087a4ff41e08c3ae80001e43d2141e20404c803a1"
+        "07ff00bc4f0404efc05f84ffdf87f17406177c307060013c307c9ef7be5f0021f8bfd214"
+        "201f83f0f81c0fc9c2901bf0fdff807e27fe0d8ba117f82f849fefffef841efe80107c02"
+        "e08022003f1fbfd29c7b083a1117c0ffffe193a210cbb190002081cf801f187bdd7441e8"
+        "3a00781f200a00707fd00210807afffc3ff87ee8744380000e420d8c7e10bbc1783f0043"
+        "e0f81e21be0f8081e80df104dd188a00043ee80012034508441f0bbdf84000ffff07ca10"
+        "f3bdf0bbe284220843fe0042074dcf83e3f0ffb30bc216403f8403ff8621031f08444194"
+        "20e8c6118c00eff990f85b07400178600ffe00fc02eec7f0041d08fc516821f088527c81"
+        "0a3602903f17c7f46eff080e0ff89d204641740017805ff462f08200f000003fef87c200"
+        "3ddf7c3d0878417c220f41c060850788410bfc08b7a107c40887e0902117c4137be3ef00"
+        "0f93e3e7fe3083bd2087f08901ff8260fc43110df383c0000270ff42e943cf8443f8b61f"
+        "17e30f45e0fb20f005eef3bfe78a600bfe3141ef7c00df400cfbc10e87f288bfe10a130b"
+        "dee9043f80010800008806e78fd00bfff843fff3ff08082f879ff740617c6101c5b1043f"
+        "07bc108bc3f94a0ff7a53079e4843f178c1088250f428f789f3f863f8000183a00787df9"
+        "3bd08380280403902217f430845d1740110b25f8361e83c1193e3f0c7ee10010707ef806"
+        "0f8fc111000efc3e0845df8fe0183c1ff79d0981dff83e083fff6c81e8fdb0000210386f"
+        "9be3004800901bd7c4100fa300c4200cbe27b5e2efe3f94010003ff885f0f7a2e8c3f088"
+        "20d8bdd08061f6843280a107fc316b5feff830f3e20ffbff83c228b41e77a1fec5ff7ce1"
+        "efc00f843c070651e7fef8f8307c030004328fa4000bf083e0e70442679d20c5a0f841f8"
+        "3c41847fd7c631f88120020f8021f74420fc3cee840f10da10fbd27461f8000d03c2f08d"
+        "ef081ef83e810440084240fbc017842e80e2217dff987ff0fe001bfdf0323f04c10839c0"
+        "807e108041f840f7fa0117bb07f87f905ff085e1fffe200a1008410841e2103b277fee90"
+        "3bfeb9d16743d0fffe84fe2881f1f85a078df1fffd070befe402ff1c03fc0513ecfde419"
+        "0ffed5150906dd06d4eeded8ec0ac8f6e4180de308d813fe2401fc1427ea0605ea2c08e8"
+        "05c8cf1319fc07c8e909fbf609f006ff0b190e0cfb0cf3051707e7fdfe2b1200fe1c0cf7"
+        "0ad42412defdf6024627ec04f61d1be81cfa32ffe1ea0f24ef06f9f422f2fc06f213f7ec"
+        "2aea03ff140d0d17ee023e072808c7130cf5cf05370b30d2ee02dc1c41eec0e0fbfe111f"
+        "f4c21cf4d1fb0bdc2bfd1e1315d301c014e5120608240e0f06e132cbe533d200001b032d"
+        "c322fc11d1f4d81909110404f9100ef30eeb23ec20e90ff9dad81425f0d6ffee16f12818"
+        "3aed0daa10e7ed0e2514f0ddfac81c16e505fdf6df231a190309e925f504f1eb02d7e9e7"
+        "1f22fc03ec1627fabd030d24fb21fde7f41ad007f743f2f61b21092300e1fe13fbcb06e3"
+        "e30e0210f10aeb1ef010e62332eafc11f5c804f4fc151aed1fe9fdea1c080a042df1b9de"
+        "0af116ff01ed19d0ddfcfd021b251e0924efe30814c8e8f6f7ddd0e7ed2e1006e5f00404"
+        "f9150119ffe817f1c0e9de101308d4ffffdcf50ee3f1fbeef4f9111c27e20a1ddfde09e3"
+        "3fe7dc1d33f700eafcf4f606110c19fc360801f62f16ef11e41e162022071df0120afbfe"
+        "0f46fcf11d25e3201ef30be8ebef10d4eb19181feee4d400e3280a1fcfdbfcef18f3f709"
+        "ea04d4f9fe041a0afa0bf8d5e1cc0b13141af5f3f016f2fb2000f6f0f2070fc5ecfacdf7"
+        "ebedf1e9e81d17fb2bfc0eecdbee0e060ff710fbe4e6da28261cf3f1031a180a160d0123"
+        "f5febe15ef33f918eb07ffe115231eccec1f0a083913f8f413f60df0e1f1fcf713ff1ee2"
+        "18fb081b1a0707ea09fb08141fc5fa1223fbe7f6d61cfc2d24f0f0dd27eede141c10fff7"
+        "fd48e3ee1611e4f7dc252ff7fd11ccfbeffee9ffca03f0f108f3f10d04d01fdc12051ddf"
+        "d61ccbdfffefe3f43123ebd3ff024300e2cf0c06e1123a1906db20040f2fe830f5ed0e41"
+        "f4022efbe222f1fbcc211414e502e411c7eb193804e7d811ce1e0ef70116f1f2eb5f03ed"
+        "fc030d28061e1605e4f0f9f61ef5ecf4f414e70c0a22f6bdf62e190307fc0ffb14101ff3"
+        "050c45ebc40408f6f517110210c51700f9dde3190cf8ee1eca1ce3dc3ee816fb01250c01"
+        "eb12fe01f3e917ff0907cbd00c031227db1fd3de0419fd291305c0f20f0f0ff5f4eef72c"
+        "ef15e7d4d71c3bcd0dee05ff0bd02ed2e3e125f7f3ff1de4ede92beeea1304e3fdfe05ce"
+        "d9f6fd1cf816ee2ae314f30f0420e51421ebdcf6f1e7072bf739e30c19db003426f5e7e1"
+        "e10417f6ddf70df5f10d09fb2d2be821191f0cf8f831fe0b2004eef82e4720fc04fced0c"
+        "eb1829d0f014f808ead72df5e942131719c1f1e5e5eafd1be7d41bd2dae8ecfe12d82f08"
+        "d4140f1510fec900ecc80017e921ba07e9ef0a15f40ccad2ed171926c3f912ed0a0c05f1"
+        "11"
     ),
 }
 

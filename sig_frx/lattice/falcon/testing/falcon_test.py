@@ -17,12 +17,14 @@ also reject the genuine signature proves nothing.
 
 The rest is the seam rather than the standard: the derived sizes against Table
 3.3, a wrong rank raising where a wrong length is a verdict, the refusal of an
-application context Falcon does not define, and the two operations #26 and #27
-fill in.
+application context Falcon does not define, and Algorithm 4 producing a key pair
+that Algorithm 6's equation and Algorithm 5's bounds both hold for.
 
-Falcon has no `sign` here, so there is no round trip to lean on — which is the
-right way round: a scheme verifying its own signatures is the self-consistency
-`testing.md` says is not evidence.
+Falcon still has no `sign` here, so there is no round trip to lean on — which is
+the right way round: a scheme verifying its own signatures is the
+self-consistency `testing.md` says is not evidence. `keygen` is checked against
+the standard's own conditions on its output instead, and against nothing it
+produced itself.
 """
 
 from __future__ import annotations
@@ -30,10 +32,11 @@ from __future__ import annotations
 from typing import Any
 
 import frx
+import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest, parameterized
 
-from sig_frx.lattice.falcon import falcon
+from sig_frx.lattice.falcon import encoding, falcon, keygen
 from sig_frx.lattice.falcon.testing import falcon_reference as ref
 from sig_frx.lattice.falcon.testing.falcon_vectors import VECTORS
 from sig_frx.signature import Signature
@@ -307,17 +310,91 @@ class Malformed(parameterized.TestCase):
             )
 
 
-class NotYetImplemented(parameterized.TestCase):
-    """The two seam methods #26 and #27 fill in, refusing loudly until then."""
+class Keygen(parameterized.TestCase):
+    """Algorithm 4 end to end — the first Falcon key this repo produces itself.
 
-    @parameterized.parameters("keygen", "sign")
-    def test_the_producing_operations_raise(self, operation: str) -> None:
+    One `keygen` call and every assertion taken off it, because the call is 46
+    seconds at `n = 512` and nearly all of that is one NTRU solve. Asking four
+    questions of one key is the shape `DescentTest` uses for the same reason.
+    """
+
+    def test_a_generated_key_satisfies_the_equation_and_the_bounds(self) -> None:
+        """#26's acceptance criteria, on a key pair nothing published.
+
+        The published-key case in [`keygen_test`](keygen_test.py) runs the
+        reference implementation's key through this repo's decoders; this runs
+        the repo's own key through its own, which is a weaker claim on its own
+        and a necessary one — the encoders agreeing with the decoders says
+        nothing about whether the *trapdoor* is a trapdoor, and the equation
+        below is what does.
+
+        Both of Algorithm 5's checks are re-asserted on the output rather than
+        trusted from inside the loop. That is not redundant: the loop tests them
+        on the pair it drew, and this tests them on the pair that came back
+        through two encodings.
+        """
+        scheme = falcon.named("Falcon-512")
+        n = scheme.params.n
+        public, secret = scheme.keygen(np.arange(scheme.seed_size, dtype=np.uint8))
+        self.assertLen(np.asarray(public), scheme.public_key_size)
+        self.assertLen(np.asarray(secret), scheme.secret_key_size)
+
+        f, g, big_f, ok = encoding.sk_decode(np.asarray(secret), n)
+        self.assertTrue(bool(np.asarray(ok)))
+        f, g, big_f = (np.asarray(value) for value in (f, g, big_f))
+
+        big_g = np.asarray(keygen.recover_g(f, g, big_f))
+        self.assertEqual(
+            ref.ntru_equation(f.tolist(), g.tolist(), big_f.tolist(), big_g.tolist()),
+            [ref.Q] + [0] * (n - 1),
+        )
+        self.assertTrue(bool(np.asarray(keygen.invertible(f))), "Algorithm 5 line 7")
+        self.assertLessEqual(
+            float(np.asarray(keygen.gram_schmidt_squared_norm(f, g))),
+            keygen.GRAM_SCHMIDT_BOUND,
+            "Algorithm 5 line 10",
+        )
+
+        h, key_ok = encoding.pk_decode(np.asarray(public), n)
+        self.assertTrue(bool(np.asarray(key_ok)))
+        np.testing.assert_array_equal(
+            np.asarray(keygen.public_key(f, g)), np.asarray(h)
+        )
+
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_a_seed_of_the_wrong_size_is_refused(
+        self, name: str, **params: Any
+    ) -> None:
+        del params
+        scheme = falcon.named(name)
+        for size in (0, scheme.seed_size - 1, scheme.seed_size + 1):
+            with self.subTest(size=size):
+                with self.assertRaisesRegex(ValueError, "seed"):
+                    scheme.keygen(np.zeros(size, dtype=np.uint8))
+
+    def test_a_traced_seed_is_refused(self) -> None:
+        """There is nothing to trace: the restart loop's trip count is data.
+
+        The refusal is `np.asarray` on a tracer rather than a check written
+        here, which is the namespace rule's own note that the conversion *onto*
+        the host announces itself
+        ([`conventions.md`](../../../../docs/reference/conventions.md)). Pinned
+        so that a later change putting the seed on the device would fail here
+        rather than by looping over a tracer.
+        """
+        scheme = falcon.named("Falcon-512")
+        with self.assertRaises(Exception) as raised:
+            frx.jit(scheme.keygen)(fnp.zeros(scheme.seed_size, dtype=np.uint8))
+        self.assertNotIsInstance(raised.exception, NotImplementedError)
+
+
+class NotYetImplemented(absltest.TestCase):
+    """The seam method #27 fills in, refusing loudly until then."""
+
+    def test_signing_raises(self) -> None:
         scheme = falcon.named("Falcon-512")
         with self.assertRaises(NotImplementedError) as raised:
-            if operation == "keygen":
-                scheme.keygen(np.zeros(48, dtype=np.uint8))
-            else:
-                scheme.sign(np.zeros(1281, dtype=np.uint8), np.zeros(4, np.uint8))
+            scheme.sign(np.zeros(1281, dtype=np.uint8), np.zeros(4, np.uint8))
         self.assertIn("sig-frx#", str(raised.exception))
 
 
