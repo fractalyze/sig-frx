@@ -64,3 +64,24 @@ filegroup(
     ],
     visibility = ["//visibility:public"],
 )
+
+# The submission's own known-answer files: 100 records per degree, each a key
+# pair, a message and the signature the reference produced for it. Falcon
+# publishes no ACVP set — FIPS 206 was still draft when this landed, and
+# `usnistgov/ACVP-Server` carries directories for FIPS 204 and 205 and none for
+# 206 — so these are the authority
+# ([../../../../docs/reference/testing.md](testing.md) names the reference
+# implementation next when a standard publishes no vectors).
+#
+# The `.req` half is the generator's input and is not taken: it carries the
+# seeds and message lengths that produced these records, and reproducing a
+# record *from* its seed would mean transcribing NIST's AES-256-CTR-DRBG, which
+# is the harness's and not Falcon's.
+filegroup(
+    name = "kat_vectors",
+    srcs = [
+        "KAT/falcon1024-KAT.rsp",
+        "KAT/falcon512-KAT.rsp",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -1321,12 +1321,8 @@ class PublishedKeyTest(parameterized.TestCase):
         assertions, applied to a key rather than to a recursion.
         """
         n = params["n"]
-        sk = np.frombuffer(
-            bytes.fromhex(falcon_vectors.SECRET_KEYS[name]), dtype=np.uint8
-        )
-        pk = np.frombuffer(
-            bytes.fromhex(falcon_vectors.VECTORS[name][0].public_key), dtype=np.uint8
-        )
+        sk = np.frombuffer(falcon_vectors.secret_key(name), dtype=np.uint8)
+        pk = np.frombuffer(falcon_vectors.records(name)[0].public_key, dtype=np.uint8)
         self.assertLen(sk, params["secret_key_size"])
 
         f, g, big_f, ok = encoding.sk_decode(sk, n)

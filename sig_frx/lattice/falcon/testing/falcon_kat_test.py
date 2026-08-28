@@ -14,8 +14,27 @@ and a Falcon-shaped copy would be the third.
 secret key, and Falcon's records carry neither — so `keygen` and `sign` raising
 until [#26](https://github.com/fractalyze/sig-frx/issues/26) and
 [#27](https://github.com/fractalyze/sig-frx/issues/27) is not a reason to opt
-out. That also means this file gains those two operations' coverage for free the
-day their bodies land and the vectors grow a seed.
+out.
+
+**Key generation and signing stay uncovered by this set, and will.** The reason
+is not that the vectors are missing them — every record carries `sk`, and a
+`seed` besides — but that neither is reproducible here: the seed expands through
+NIST's AES-256-CTR-DRBG rather than this repo's `SHAKE256(seed ‖ attempt)`, and
+a `secret_key` on a record drives the harness into a `sign` that #27 has not
+finished. [`falcon_vectors`](falcon_vectors.py) withholds both fields for those
+two reasons and says so; this is where the consequence is recorded, because "the
+harness skipped it" and "the harness cannot check it" read identically from a
+green run.
+
+## The bound, and why it is stated at the call rather than defaulted
+
+The generator gives record `i` a message of `33·(i+1)` bytes, so the published
+set is 100 distinct message lengths per degree and a traced `hash_to_point`
+compiles once per length. That is ML-DSA's cost driver applied to Falcon, and
+the answer `testing.md` gives is the same: bound the per-PR gate by the number
+of vectors, keep the exhaustive run behind `slow_kat`
+([`falcon_sweep_test`](falcon_sweep_test.py)), and assert the bound cannot
+silently eat coverage.
 
 The rejections a generic bit flip cannot reach — the uncompressed header byte,
 the padding byte, a public key coefficient at or above `q` — are Falcon's own
@@ -35,6 +54,18 @@ from sig_frx.lattice.falcon.testing import falcon_reference as ref
 from sig_frx.lattice.falcon.testing import falcon_vectors
 from sig_frx.testing import kat
 
+# The vectors per degree this gate takes, out of the 100 published. A budget
+# rather than a property of Falcon, so the measurement that chose it lives in
+# //sig_frx/lattice/falcon/testing/BUILD.bazel beside the bucket it has to fit.
+_GATE_VECTORS = 4
+
+# The published records §3.11.3 cannot express, pinned here rather than in the
+# loader: a boundary is a claim about the source, and `ml_dsa_kat_test`'s
+# `_EXCLUDED` states the same kind of claim in the same place. The loader
+# reports it and this asserts it, so a regenerated source fails one test rather
+# than every consumer of the fixture.
+_UNENCODABLE = {"Falcon-512": (), "Falcon-1024": (82,)}
+
 
 class FalconKatTest(parameterized.TestCase):
     @parameterized.parameters(*ref.parameter_cases())
@@ -42,30 +73,67 @@ class FalconKatTest(parameterized.TestCase):
         self, name: str, **params: Any
     ) -> None:
         del params
-        kat.check(falcon.named(name), falcon_vectors.vectors(name))
+        kat.check(falcon.named(name), falcon_vectors.vectors(name, limit=_GATE_VECTORS))
 
     @parameterized.parameters(*ref.parameter_cases())
-    def test_the_reference_accepts_every_transcribed_case(
+    def test_the_bound_does_not_empty_the_gate(self, name: str, **params: Any) -> None:
+        """A cap that ate the set would look exactly like a cheaper gate.
+
+        So the count is asserted rather than assumed, and against the published
+        total rather than against itself: `_GATE_VECTORS` records reach the
+        harness, they are the shortest ones, and there are more where they came
+        from — which is what says the sweep next door has something left to do.
+        """
+        del params
+        published = falcon_vectors.records(name)
+        gated = falcon_vectors.vectors(name, limit=_GATE_VECTORS)
+
+        self.assertLen(gated, _GATE_VECTORS)
+        self.assertLess(_GATE_VECTORS, len(published), "the bound is not a bound")
+        self.assertEqual(
+            [vector.case_id for vector in gated],
+            [
+                vector.case_id
+                for vector in falcon_vectors.vectors(name, limit=None)[:_GATE_VECTORS]
+            ],
+        )
+
+    @parameterized.parameters(*ref.parameter_cases())
+    def test_the_reference_accepts_every_published_case(
         self, name: str, **params: Any
     ) -> None:
-        """The transcription is evidence only if it reproduces upstream's verdict.
+        """The loaded set is evidence only if it reproduces upstream's verdict.
 
         These bytes were regrouped out of §3.11.6's aggregate into §3.11.3's
         padded signature, so this is what says the regrouping put every field
         where the standard says it goes — independently of the implementation
         the case is meant to gate.
+
+        Unbounded, where the harness pass above is not. `_GATE_VECTORS` bounds
+        *traced shapes* and this compiles nothing, so slicing it would apply a
+        budget to work the budget does not cover — and the sweep would then have
+        to carry a copy of this method to reach the rest.
         """
         del params
-        for vector in falcon_vectors.VECTORS[name]:
+        for record in falcon_vectors.records(name):
             self.assertTrue(
-                ref.verify(
-                    bytes.fromhex(vector.public_key),
-                    bytes.fromhex(vector.message),
-                    bytes.fromhex(vector.signature),
-                    name,
-                ),
-                f"count={vector.case} is not accepted by the reference",
+                ref.verify(record.public_key, record.message, record.signature, name),
+                f"count={record.case} is not accepted by the reference",
             )
+
+    @parameterized.parameters(*ref.parameter_cases())
+    def test_the_records_without_an_encoding_are_the_ones_stated(
+        self, name: str, **params: Any
+    ) -> None:
+        """§3.11.3 is fixed-width and the NIST API's signature is not.
+
+        The generator drives the raw signing call, which carries no equivalent
+        of Algorithm 10's restart when `enc_s` compresses past `sbytelen - 41`,
+        so a published record can have no §3.11.3 form at all. Pinning which
+        ones is what stops a regenerated source from quietly dropping more.
+        """
+        del params
+        self.assertEqual(falcon_vectors.unencodable(name), _UNENCODABLE[name])
 
 
 if __name__ == "__main__":

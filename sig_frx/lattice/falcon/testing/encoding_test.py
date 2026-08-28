@@ -34,7 +34,7 @@ from absl.testing import absltest, parameterized
 
 from sig_frx.lattice.falcon import encoding
 from sig_frx.lattice.falcon.testing import falcon_reference as ref
-from sig_frx.lattice.falcon.testing.falcon_vectors import VECTORS
+from sig_frx.lattice.falcon.testing import falcon_vectors
 
 _PARAMETER_SETS = ref.parameter_cases()
 
@@ -343,11 +343,17 @@ class Compress(parameterized.TestCase):
         those hold this encoder to another reading of the standard and to its own
         inverse, and both would still pass if the two agreed on something
         upstream does not do. These are upstream's bytes.
+
+        Every published record, unbounded, where
+        [`falcon_kat_test`](falcon_kat_test.py) takes a few. A §3.11.3 signature
+        is padded to `sbytelen`, so all 100 are one traced shape — the varying
+        message length that makes the harness pass expensive is not an input
+        here.
         """
         n, sbytelen = params["n"], params["signature_size"]
-        for vector in VECTORS[f"Falcon-{n}"]:
-            with self.subTest(case=vector.case):
-                published = np.frombuffer(bytes.fromhex(vector.signature), np.uint8)
+        for record in falcon_vectors.records(f"Falcon-{n}"):
+            with self.subTest(case=record.case):
+                published = np.frombuffer(record.signature, np.uint8)
                 salt, coefficients, ok = encoding.sig_decode(
                     fnp.asarray(published, np.uint8), n, sbytelen
                 )

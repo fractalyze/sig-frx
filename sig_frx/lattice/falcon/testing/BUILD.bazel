@@ -52,10 +52,11 @@ py_library(
     ],
 )
 
-# Transcribed constants rather than a fetched file: Falcon publishes no ACVP set,
-# so the authority is the reference implementation's own KAT and the provenance
-# lives in the module. #28 replaces this with the pinned whole set. Depends on
-# the harness because it hands its cases over as `kat.KatVector`.
+# The submission's whole KAT, fetched and sha256-pinned: Falcon publishes no ACVP
+# set, so the authority is the reference implementation's own and the provenance
+# lives in the module. Depends on the harness because it hands its cases over as
+# `kat.KatVector`, and on the reference for §3.11.6's regrouping — which the
+# oracle runs too, so it lives in the transcription rather than in either caller.
 #
 # Visible to the rest of the lattice tree, not just to this package: Falcon
 # cannot sign here yet, so these vectors are the only published signature a
@@ -69,23 +70,90 @@ py_library(
         "__init__.py",
         "falcon_vectors.py",
     ],
+    data = ["@falcon_round3//:kat_vectors"],
     visibility = ["//sig_frx/lattice:__subpackages__"],
-    deps = ["//sig_frx/testing:kat"],
+    deps = [
+        ":falcon_reference",
+        "//sig_frx/testing:kat",
+        "@rules_python//python/runfiles",
+    ],
 )
 
 # The published verdicts and everything the shared harness derives from them.
 # Separate from `falcon_test` the way `ml_dsa_kat_test` is from `ml_dsa_test`:
 # this one is the vectors, that one is the scheme's own structure.
 #
-# Sized from the executor, and the GPU leg decides here too: 172.1 s against the
-# CPU leg's 81.3 s. `medium` would be 57% of its 300 s — past the half-a-budget
-# rule in ../../../../docs/reference/measurement.md before any spread is counted
-# — so it takes the same bucket as `falcon_test`, at 19% of 900 s. The harness
-# derives a tampering and a batch pass per vector, each its own traced shape.
+# Sized from the executor. `falcon_kat_test.py` bounds the vectors per degree,
+# and at that bound the merge gate records **393.1 s on the CPU leg against
+# 192.0 s on the GPU one** — 44% of `large`'s 900 s, so the bucket stands and
+# the half-a-budget rule in ../../../../docs/reference/measurement.md is not
+# reached. The harness derives a tampering and a batch pass per vector, each its
+# own traced shape, which is what the bound is bounding.
+#
+# **The deciding leg flipped when the bound doubled, and that is worth knowing
+# before trusting an extrapolation here.** At the previous two vectors per degree
+# this target ran 172.1 s on GPU against 81.3 s on CPU, so GPU decided; at four
+# it is 192.0 s against 393.1 s, so CPU does. The GPU leg grew 1.12x for twice
+# the vectors where the CPU leg grew 4.8x — the two legs do not scale alike, and
+# a ratio measured on one of them does not carry to the other. A local run had
+# predicted 250-344 s on the GPU leg from a 1.46x workstation ratio; the GPU
+# number came in under that and the CPU number came in over it. Measure both.
 py_test(
     name = "falcon_kat_test",
     size = "large",
     srcs = ["falcon_kat_test.py"],
+    deps = [
+        ":falcon_reference",
+        ":falcon_vectors",
+        "//sig_frx/lattice/falcon",
+        "//sig_frx/testing:kat",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The exhaustive run: all 100 published records at both degrees, where the gate
+# above takes a bounded few.
+#
+# `slow_kat`, so .bazelrc.ci drops it from a pull request and the scheduled CI
+# run puts it back — the same trade `ml_dsa_sweep_test` and
+# `slh_dsa_sweep_test` make, and for the same reason. What makes the bound
+# necessary rather than merely tidy is that the generator varies `mlen` per
+# record, so 100 records are 100 traced shapes per degree and the cost is
+# ~50x the gate's rather than 50x its execution.
+#
+# **Bazel shards by test case, so the case split is the floor on the wall clock,
+# and chunking the records to lower that floor was measured and is worse.**
+# One `kat.check` per parameter set is two cases; `shard_count = 2` covers them
+# and a higher count only allocates empty shards. Splitting each degree's
+# records into four chunks — eight cases, `shard_count = 8` — was the obvious
+# way to divide the slowest method, and locally it went the other way:
+#
+#   2 cases, 2 shards:  max 1016.5 s, min 575.8 s, avg  796.2 s  (~1592 s total)
+#   8 cases, 8 shards:  max 1413.3 s, min 690.2 s, avg 1020.3 s  (~8162 s total)
+#
+# (A 4-shard run of the two-case form measured max 1001.5 s and the same ~1573 s
+# total, the two extra shards being empty — which is the same reading as the
+# first row and why `shard_count` is 2.)
+#
+# 1.41x the wall clock for 5.2x the compute. A shard is a process that re-pays
+# the frx import, the backend init and the warm-up, and at 25 records that
+# constant dominates the per-record work it was meant to divide. The floor is
+# real; the way under it is fewer records per run, which is what the gate next
+# door already does.
+#
+# These are workstation numbers and `slow_kat` keeps the target off every pull
+# request, so `eternal` is sized against an unmeasured leg. The levers if it
+# ever breaches: fewer records, or one target per degree so each is a single
+# process over a single set. More shards is not one of them.
+py_test(
+    name = "falcon_sweep_test",
+    size = "large",
+    timeout = "eternal",
+    srcs = ["falcon_sweep_test.py"],
+    shard_count = 2,
+    tags = ["slow_kat"],
     deps = [
         ":falcon_reference",
         ":falcon_vectors",
@@ -303,6 +371,7 @@ py_library(
         ":libfalcon512_oracle.so",
     ],
     deps = [
+        ":falcon_reference",
         "//sig_frx/lattice/falcon",
         "//sig_frx/lattice/falcon:encoding",
     ],

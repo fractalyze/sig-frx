@@ -88,6 +88,61 @@ def slen(signature_size: int) -> int:
     return 8 * signature_size - 328
 
 
+# §3.11.6's `sm` layout ahead of the message: the length prefix, then the salt.
+SIGLEN_SIZE = 2
+SALT_SIZE = 40
+
+
+def signature_from_aggregate(sm: bytes, message: bytes, name: str) -> bytes | None:
+    """§3.11.6's signed message as the §3.11.3 signature the seam takes.
+
+    The NIST API packs `siglen(2) ‖ r(40) ‖ M ‖ header(1) ‖ enc_s` with a
+    nonce-less header of `0010nnnn`, because the salt already appeared ahead of
+    the message. §3.11.3 defines `header(1) ‖ r(40) ‖ enc_s` with header
+    `0011nnnn`, zero-padded to `sbytelen`. This is that regrouping, and every
+    check is a claim about the two sections agreeing — a wrong offset yields a
+    plausible byte string that rejects everything, which is indistinguishable
+    from a broken verifier.
+
+    `None` when the record has no §3.11.3 form at all. That is possible because
+    the NIST API's signature is variable-length and carries no equivalent of
+    Algorithm 10's restart when `enc_s` comes out longer than `sbytelen − 41`;
+    a caller that produced the aggregate itself should treat it as an error,
+    while one reading a published file records it.
+
+    Here rather than in [`encoding`](../encoding.py) because `sm` is the
+    submission API's packaging rather than anything the standard's own wire
+    format defines — and because a fixture that regrouped bytes with the
+    module under test would be checking a formula against itself. The constants
+    are this file's own for the same reason.
+    """
+    n = PARAMETER_SETS[name]["n"]
+    logn = n.bit_length() - 1
+    salt_end = SIGLEN_SIZE + SALT_SIZE
+    salt = sm[SIGLEN_SIZE:salt_end]
+    body_start = salt_end + len(message)
+
+    if sm[salt_end:body_start] != message:
+        raise ValueError(f"{name}: `sm` does not carry `msg` where §3.11.6 puts it")
+    nonceless = sm[body_start:]
+    stated = int.from_bytes(sm[:SIGLEN_SIZE], "big")
+    if len(nonceless) != stated:
+        raise ValueError(
+            f"{name}: `sm` tail is {len(nonceless)} bytes against a stated {stated}"
+        )
+    if nonceless[0] != 0x20 | logn:
+        raise ValueError(
+            f"{name}: nonce-less header is {nonceless[0]:#04x}, "
+            f"not §3.11.6's {0x20 | logn:#04x}"
+        )
+
+    compressed = nonceless[1:]
+    padding = PARAMETER_SETS[name]["signature_size"] - 1 - SALT_SIZE - len(compressed)
+    if padding < 0:
+        return None
+    return bytes([0x30 | logn]) + salt + compressed + b"\x00" * padding
+
+
 def bits_of(data: bytes) -> list[int]:
     """§3.11.1 — a byte's leftmost bit has weight 128."""
     return [(byte >> shift) & 1 for byte in data for shift in range(7, -1, -1)]

@@ -33,8 +33,7 @@ import numpy as np
 from absl.testing import absltest
 
 from sig_frx.lattice.falcon import falcon
-from sig_frx.lattice.falcon.testing import falcon_oracle
-from sig_frx.lattice.falcon.testing.falcon_vectors import SECRET_KEYS
+from sig_frx.lattice.falcon.testing import falcon_oracle, falcon_vectors
 
 _DEGREE = 512
 _MESSAGE = b"a key generated here, signed by the reference implementation"
@@ -89,7 +88,7 @@ class ReferenceInteropTest(absltest.TestCase):
         difference between this case and the accepted one is the trapdoor and
         nothing else.
         """
-        published = bytes.fromhex(SECRET_KEYS[f"Falcon-{_DEGREE}"])
+        published = falcon_vectors.secret_key(f"Falcon-{_DEGREE}")
         signature = falcon_oracle.sign(published, _MESSAGE, _DEGREE)
         self.assertIsNotNone(signature, "the published key must load")
         assert signature is not None

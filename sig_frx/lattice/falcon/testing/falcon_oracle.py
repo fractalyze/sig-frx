@@ -55,6 +55,7 @@ import functools
 import pathlib
 
 from sig_frx.lattice.falcon import encoding, falcon
+from sig_frx.lattice.falcon.testing import falcon_reference
 
 # `nist.c`'s aggregate: a big-endian signature length, then the salt, then the
 # message, then the nonce-less signature. §3.11.6 rather than §3.11.3, which is
@@ -113,8 +114,11 @@ def sign(
 
     The return is §3.11.3's `header ‖ salt ‖ enc_s`, zero-padded to `sbytelen`,
     which is the seam's form. What the reference hands back is §3.11.6's
-    aggregate with the message in the middle and a nonce-less header, so the
-    regrouping below is the same one `falcon_vectors` documents, run forwards.
+    aggregate with the message in the middle and a nonce-less header, so it
+    goes through [`falcon_reference.signature_from_aggregate`](falcon_reference.py)
+    — the same call the `.rsp` loader makes on the published records, since a
+    live signature and a published one arrive in the same packaging.
+    [`verify`](#verify) below runs that regrouping backwards, by hand.
     """
     params = falcon.PARAMETER_SETS[f"Falcon-{degree}"]
     if len(secret_key) != params.secret_key_size:
@@ -138,28 +142,19 @@ def sign(
         return None
 
     aggregate = signed.raw[: signed_len.value]
-    body = _SIGLEN_SIZE + encoding.SALT_SIZE
-    salt = aggregate[_SIGLEN_SIZE:body]
-    nonceless = aggregate[body + len(message) :]
-    if len(nonceless) != int.from_bytes(aggregate[:_SIGLEN_SIZE], "big"):
-        raise AssertionError("the reference's own length field disagrees with `sm`")
-    if nonceless[0] != encoding.degree_header(degree, 0x2):
-        raise AssertionError(
-            f"expected §3.11.6's nonce-less header, got 0x{nonceless[0]:02x}"
-        )
-    compressed = nonceless[1:]
-    padding = params.signature_size - 1 - encoding.SALT_SIZE - len(compressed)
-    if padding < 0:  # pragma: no cover - upstream enforces `sbytelen` itself
-        raise AssertionError(
-            f"the reference produced {len(compressed)} compressed bytes, past "
-            f"what a Falcon-{degree} signature holds"
-        )
-    return (
-        bytes([encoding.degree_header(degree, 0x3)])
-        + salt
-        + compressed
-        + b"\x00" * padding
+    # The same regrouping the `.rsp` loader runs, held in one place: §3.11.6's
+    # aggregate is what both the reference's live output and its published
+    # records arrive as. `None` means the reference produced more compressed
+    # bytes than a signature holds, which upstream enforces for itself.
+    signature = falcon_reference.signature_from_aggregate(
+        aggregate, message, f"Falcon-{degree}"
     )
+    if signature is None:  # pragma: no cover - upstream enforces `sbytelen`
+        raise AssertionError(
+            f"the reference produced a signature past what a Falcon-{degree} "
+            "signature holds"
+        )
+    return signature
 
 
 def verify(public_key: bytes, message: bytes, signature: bytes, degree: int) -> bool:
