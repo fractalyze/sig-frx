@@ -8,13 +8,20 @@ leanSig is the signature Ethereum's lean consensus makes and checks per slot,
 and it replaces BLS entirely: a **generalized XMSS** with one one-time key per
 slot across a `2^32`-slot lifetime, its Winternitz chains and its Merkle tree
 hashed by Poseidon over KoalaBear, its wire form SSZ. At the shipped parameters a
-signature is **2536 bytes**, a public key **52**, and a verification runs about
-**180 Poseidon permutations** — 122 chain hashes (`v(w − 1) − T`, since the
-verifier walks the steps the codeword did not), 32 tree hashes, one message
-compression, and about 25 for the leaf's sponge.
+signature is **2536 bytes** and a public key **52**.
 
-That last number is why the scheme is here. A consensus client verifies hundreds
-to thousands of these per slot, unaggregated, which is a hostile budget and an
+**What a verification costs here is not the scheme's own figure, and the gap is a
+choice this implementation makes.** In the abstract the verifier finishes each
+chain from the digit the codeword names, which is `v(w − 1) − T` = 122 chain
+hashes; with 32 tree hashes, one message compression and 25 sponge permutations
+for the leaf, that is the ~180 the construction is usually quoted at. This
+verifier does not do that. [`wots.chain`](../../sig_frx/hash/wots.py) walks every
+chain its full `w − 1` steps and selects, so the chain term is 46 × 7 = **322**
+and a verification runs about **380** permutations — a little over twice the
+quoted figure, spent so that no walk branches on the codeword.
+
+Either number is why the scheme is here. A consensus client verifies hundreds to
+thousands of these per slot, unaggregated, which is a hostile budget and an
 embarrassingly parallel one.
 
 ## What the standard fixes, and what this implementation chooses
@@ -34,10 +41,11 @@ versioned document. Two consequences, and both are visible in the tree:
 
 - **Every transcribed value records the leanSpec commit it came from**, because a
   commit is the only version there is.
-- **The values are transcribed rather than fetched.** The fixtures archive is a
-  release asset republished in place under the moving tag `latest`, so there is no
-  commit-pinned URL for the `http_file` rule to point at, and that rule does not
-  apply.
+- **The values are transcribed rather than fetched**, which is the moving-tag
+  case [`testing.md`](../reference/testing.md#vectors-are-fetched-and-pinned-never-committed)
+  names: the fixtures archive is a release asset republished in place under the
+  tag `latest`, so there is no commit-pinned URL for an `http_file` to point at,
+  and the provenance it would have carried lives beside the values instead.
 
 **The technical note is the wrong source, in two ways that both produce bytes
 nobody else computes.** [ePrint 2025/1332](https://eprint.iacr.org/2025/1332)
@@ -53,17 +61,15 @@ describes the construction; it does not fix the instance.
   `w = 8`, `T = 200`, which is where 2536 comes from.
 
 **The partial-round lane is conjugated, not changed.** leanSpec applies the
-partial-round S-box to lane 0, as HorizenLabs, circomlib and Plonky3 do;
-hash-frx follows ark-sponge and uses the last lane. Writing `R` for the reversal
-of lane order, `R · (M · sbox₀(x + c)) = (R M R) · sbox_last(R · x + R · c)`, so
-running leanSig's constants through hash-frx's engine is a matter of conjugating
-the MDS and every round constant by `R` — and since `M` is circulant, `R M R` is
-just the other circulant. The conjugation is exact and costs one index flip on a
-constant. **So the permutation this package hands out runs on a lane-reversed
-state**, and reversing at every call would put a device `reverse` either side of
-180 permutations; the callers that build the state instead place and slice from
-the other end, which makes the convention a layout decision rather than data
-movement.
+partial-round S-box to lane 0, as HorizenLabs, circomlib and Plonky3 do; hash-frx
+follows ark-sponge and uses the last lane. Conjugating the MDS and the round
+constants by the lane reversal is an exact rewrite that costs one index flip on a
+constant — the algebra, and the condition under which this module would unwind to
+passing the constants through, are in
+[`poseidon.py`](../../sig_frx/hash/leansig/poseidon.py). **The consequence for
+everything above it is that the permutation runs on a lane-reversed state**: the
+callers that build the state place and slice from the other end, so the
+convention is a layout decision rather than data movement.
 
 **The tweakable hash family is field-typed, and that is why the shared protocols
 carry a `dtype`.** Upstream states three hashes as one `tweak_hash` that
@@ -86,21 +92,20 @@ value per call by design. [`signature.py`](../../sig_frx/signature.py) grew
 `position` for this. The message space is likewise the scheme's own — a 32-byte
 root rather than arbitrary bytes — and is checked rather than assumed.
 
-**`keygen` covers the whole lifetime and refuses a sub-range.** Upstream's
-`key_gen` snaps a requested window out to whole bottom trees, builds those, and
-fills the rest with `merkle.random_domain` — fresh OS randomness, one digest per
-unpaired node per level. That is sound, and it means a partial window's public key
-is not a function of its inputs: generating twice from one seed and one parameter
-gives two different keys, which was confirmed against upstream by substituting the
-pad source. A key nobody can regenerate cannot be gated, so a partial window is
-refused rather than silently seeded. Supporting one means taking the pads as an
-argument, the way `parameter` and `prf_key` are already taken.
+**`keygen` covers the whole lifetime and refuses a sub-range.** Upstream pads
+the unbuilt part of a partial window with fresh OS randomness, so such a key is
+not a function of its inputs — generating twice from one seed and one parameter
+gives two different roots. A key nobody can regenerate cannot be gated, so a
+partial window is refused rather than silently seeded.
+[`signing.py`](../../sig_frx/hash/leansig/signing.py) holds the experiment that
+established it and what supporting one would take.
 
 **`sign` returns the signature alone**, where `Xmss` returns an advanced key and
-`Shrincs` an advanced counter. In both of those the position lives inside what
-the caller passed; leanSig's caller *names* the slot, so a spent one is spent at
-the call site. What moves instead is the prepared window, and
-`advance_preparation` moves it explicitly and returns the key that moved.
+`Shrincs` an advanced counter. In both of those the position lives inside what the
+caller passed; leanSig's caller *names* the slot, so a spent one is spent at the
+call site, and what moves is the prepared window —
+`advance_preparation` moves it explicitly and returns the key that moved
+([`leansig.py`](../../sig_frx/hash/leansig/leansig.py)).
 
 **The signer's tree is split for storage, and it is not XMSS-MT.** One top tree
 whose leaves are the roots of `2^(h/2)` bottom trees, of which the signer keeps
@@ -112,9 +117,8 @@ path of `log_lifetime` siblings served from two objects, not `d` WOTS+ signature
 **The rejection loop is a host loop**, which is the choice
 [`../reference/conventions.md`](../reference/conventions.md#a-rejection-loop-is-not-a-while-on-secret-data)
 asks every scheme to record. A codeword is accepted only when its `v` digits sum
-to `T`; `T = 200` sits about 2.5 standard deviations above a mean digit sum of
-161, so roughly one attempt in 900 lands and the signer resamples the randomness
-until one does. It grinds a block of candidates per pass rather than stepping, and
+to `T`, which about one draw in nine hundred does — so the signer resamples the
+randomness until one lands. It grinds a block of candidates per pass rather than stepping, and
 returns the **lowest** landing attempt — upstream counts from zero and stops at
 the first, so taking the last of a block would produce a valid signature that
 upstream's own signer disagrees with byte for byte.
@@ -124,13 +128,14 @@ checksum chains for the same constant-sum trick. The one difference decides the
 cost — SHRINCS's constant is the *mode* of its distribution, so about one counter
 in 65 lands, against leanSig's one in 900.
 
-**Two encoders are host-only, and cannot be otherwise.** `encode_message`
-decomposes a 256-bit root base-`p` and `encode_epoch` does the same to
-`(slot << 8) | prefix`; a running remainder reaches `p ≈ 2^31`, so even a 16-bit
-digit step needs 47 bits. The tweaks are the same story from the other end —
-packing reaches `2^45` for a tree tweak and `2^56` for a chain one. All of it is
-the first of this repo's [four non-negotiables](../../CLAUDE.md): an array lane is
-32 bits, and a value wider than one stays a Python integer or becomes bytes.
+**Two encoders and both tweak builders are host-only, and cannot be otherwise.**
+Each packs or decomposes a value wider than a lane — a 256-bit root, an epoch
+tweak, and tweak packings that run past `2^45` — which is the first of this
+repo's [four non-negotiables](../../CLAUDE.md): an array lane is 32 bits, and a
+value wider than one stays a Python integer or becomes bytes. The widths live
+with the code that packs them, in
+[`field.py`](../../sig_frx/hash/leansig/field.py) and
+[`tweakable.py`](../../sig_frx/hash/leansig/tweakable.py).
 
 ## Where the batch axis is
 
@@ -155,64 +160,92 @@ a wrong *length* raises — it is a shape — while wrong *content* is a verdict
 one, which is why the production gate is verification against the key pairs
 leanSpec publishes rather than a round trip — its fixtures archive carries eight
 validators and two keys each, one per role, since a one-time signature exhausts a
-leaf and attestation and proposal cannot share a leaf. The `TEST` preset shortens
-the lifetime to `2^8` so key generation and signing are cheap enough to gate for
-real.
+leaf. The `TEST` preset shortens the lifetime to `2^8` **and the codeword** —
+`v = 4`, `T = 6` — so key generation and signing are cheap enough to gate for
+real. Both halves matter: an implementation that reproduced every `TEST` vector
+could still have sized a sponge or a target sum from that preset, which is what
+the `PROD` gate exists to catch.
 
 ## What leaks
 
-**Verification has no data-dependent control flow.** Every Winternitz chain runs
-its full length and masks, the Merkle climb runs the tree's fixed height, and the
-codec's refusals are a flag rather than a branch — so the timing of a
-verification is a function of the batch's shape and of nothing in the signatures
-or keys. It also holds no secret, which is the reason it needs no such claim
-([`../reference/security.md`](../reference/security.md)).
+Read [`../reference/security.md`](../reference/security.md) first: signing
+carries no side-channel claim in this repo, and verification needs none.
 
-**The signer's rejection loop has a trip count that depends on the message**, and
-it is worth saying exactly why that is a different situation from ML-DSA's
-signing loop or Falcon's sampler. Those trip counts depend on *secret* data.
-leanSig's acceptance test is a public function of public inputs — the verifier
-recomputes it from the randomness the signature carries — so a host loop over it
-leaks nothing a verifier does not already hold. The attempt it settles on is not
-on the wire, but it is recoverable by anyone, by replaying the derivation from
-counter zero.
+**Verification has no data-dependent control flow.** Every Winternitz chain runs
+its full length and masks — the 322-against-122 the top of this page prices —
+the Merkle climb runs the tree's fixed height, and the codec's refusals are a
+flag rather than a branch. So the timing of a verification is a function of the
+batch's shape and of nothing in the signatures or keys.
+
+**The signer's rejection loop has a data-dependent trip count**, and it is
+named here rather than defended. How many draws it takes is a function of the
+message and of PRF output keyed by the secret seed
+([`prf.py`](../../sig_frx/hash/leansig/prf.py)), so the count is not something
+an observer can recompute — only the holder of the seed can replay attempts
+below the one that landed. It is permitted for the reason every such loop here
+is: signing carries no timing claim.
+
+What *is* public is the acceptance predicate, and that is a claim about the
+verifier rather than about the loop. Given the `rho` a signature carries, anyone
+can recompute the codeword and check its digits sum to `T` — which is why the
+verifying side holds no secret at all, and why the loop's form was free to be a
+host loop rather than a masked fixed-size sample.
 
 **Signing is deterministic, and that is a security property rather than a
-convenience.** The randomness is keyed by `(slot, message, attempt)`, so signing
-one message at one slot twice yields the same signature. A fresh draw instead
-would let a repeated slot produce two signatures over two distinct codewords,
-which is precisely the multi-target opening a one-time key cannot survive.
+convenience.** A repeated slot yields the same signature rather than a second
+one, where a fresh draw would produce two signatures over two distinct codewords
+— the multi-target opening a one-time key cannot survive.
+[`prf.py`](../../sig_frx/hash/leansig/prf.py) has the derivation and its two
+subdomains.
 
 **The format discloses nothing the caller does not have.** The slot is off the
 wire, the signature is a fixed 2536 bytes at every slot and every codeword, and
 the authentication path is the tree's full height regardless of which bottom tree
 served it.
 
-Signing carries no side-channel claim in this repo, and key generation none
-either.
+## What this scheme rests on
 
-**The scheme's own assumption is stated on
-[`../reference/security.md`](../reference/security.md#an-assumption-a-scheme-rests-on-is-the-schemes-and-it-gets-stated).**
-leanSig's security proof is conditional on Poseidon meeting a multi-target
-collision-resistance bound, and that assumption is younger and less scrutinized
-than what this repo's other schemes rest on. It is a property of the scheme
-rather than of this implementation, and it is written down so that
-"post-quantum" is not read as "more conservative".
+Named here because
+[`../reference/security.md`](../reference/security.md#what-each-scheme-owes) asks
+a scheme to, and leanSig is the one on this shelf that owes it.
+
+Its security proof is conditional on **Poseidon meeting a multi-target
+collision-resistance bound** in the notion the construction's analysis uses — the
+authors put the figure at 170 bits, and they state the condition in the strong
+form: if the bound does not hold, the analysis says nothing. Poseidon is an
+algebraic hash published in 2019 and designed for cheap arithmetization rather
+than for a wide security margin, and the Ethereum Foundation runs a multi-year
+[Poseidon Cryptanalysis Initiative](https://www.poseidon-initiative.info/) whose
+purpose is to test exactly this assumption.
+
+That an assumption is under active, funded cryptanalysis is a reason to state it
+and not a reason to refuse the scheme — Ethereum's post-quantum consensus is
+going to verify these signatures, and a verifier that does not exist protects
+nobody. What is worth a reader's attention is that "post-quantum" is not the same
+as "more conservative": it buys resistance to a quantum adversary and spends some
+classical margin to do it. There is nothing in this implementation to fix; the
+assumption is the scheme's.
 
 ## What gates it
 
-Seven vector modules under
+Nine vector modules under
 [`testing/`](../../sig_frx/hash/leansig/testing/), each carrying the leanSpec
-commit its values came from and the calls that produced them. Of those, the
-Poseidon permutation and the SSZ containers come from the **published** fixtures
-archive; the rest come from running the reference implementation at the same pin,
-because the archive's signature-shaped families are leanMultisig aggregate proofs
-rather than XMSS signatures.
+commit its values came from and the calls that produced them. What comes from the
+**published** fixtures archive is the Poseidon permutation, the `PROD` SSZ
+containers, and the two `PROD` key pairs; everything else was produced by running
+the reference implementation at the same pin — including the `TEST` SSZ vector,
+since the archive publishes `PROD_CONFIG` only, and every signature, since the
+archive's signature-shaped families are leanMultisig aggregate proofs rather than
+XMSS signatures.
 
 The known-answer test is
 [`leansig_kat_test`](../../sig_frx/hash/leansig/testing/leansig_kat_test.py):
-verification at `PROD_CONFIG` against signatures upstream produced under two of
-those published keys, six accepted and four refused. It is not driven
-by [`kat.py`](../../sig_frx/testing/kat.py), for both reasons that harness names —
-there is no published format to normalize, and a stateful scheme has no
+verification at `PROD_CONFIG` under two published keys, six cases accepted and
+four refused. Nine of the ten come from upstream, verdict included; the tenth is
+built here, because it is the one upstream's signer loops until it avoids — a
+codeword off the target-sum layer, whose Merkle opening still climbs to the key's
+own root, so every check but the target sum passes. It is not driven by
+[`kat.py`](../../sig_frx/testing/kat.py), for both reasons
+[that page](../reference/testing.md#not-every-scheme-is-driven-by-the-shared-harness)
+names — there is no published format to normalize, and a stateful scheme has no
 seam-shaped `sign` for it to drive.

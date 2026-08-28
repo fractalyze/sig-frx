@@ -63,42 +63,15 @@ Do not sign with a long-lived secret key on a machine an adversary can measure.
   passes every positive known-answer test, so the negative cases — a flipped bit
   in the signature, the message, and the public key — are part of a scheme's gate,
   not an optional extra.
-
-## An assumption a scheme rests on is the scheme's, and it gets stated
-
-Everything above is about what this *implementation* does and does not do. A
-scheme also rests on a hardness assumption, and that is not this repo's to fix —
-but where the assumption is materially younger or less scrutinized than the rest
-of what is implemented here, the page says so, because a reader comparing schemes
-on this shelf will otherwise assume they are alike in that respect.
-
-Most of them are. SHA-2 and SHAKE preimage and collision resistance, the
-lattice problems under NTRU and module-LWE, and the discrete log each have
-decades of public analysis behind their lineage, and the standards that fix them
-say so.
-
-**leanSig is the exception, and the gap is the point of naming it.** Its security
-proof is conditional on Poseidon meeting a **multi-target collision-resistance**
-bound in the notion the construction's analysis uses — the scheme's authors put
-the figure at 170 bits. Conditional in the strong sense: if the bound does not
-hold, the analysis says nothing, and they state it that way. Poseidon is an
-algebraic hash published in 2019 and designed for cheap arithmetization rather
-than for a wide security margin, and the Ethereum Foundation runs a multi-year
-[Poseidon Cryptanalysis Initiative](https://www.poseidon-initiative.info/) whose
-purpose is to test exactly this assumption — bounties on reduced-round variants,
-research grants against declared gaps in the theory, and workshops.
-
-That an assumption is under active, funded cryptanalysis is a reason to state it,
-not a reason to refuse the scheme: Ethereum's post-quantum consensus is going to
-verify these signatures, and a verifier that does not exist protects nobody. What
-this repo owes is that the reader knows which of its schemes carries the newest
-assumption, and that "post-quantum" is not silently read as "more conservative"
-— it buys resistance to a quantum adversary, and it spends some margin against a
-classical one to do it. The consequences for the scheme itself are on
-[the leanSig page](../schemes/leansig.md).
-
-Where a scheme's assumption is ordinary, its page says nothing about it. This
-section exists for the ones where silence would mislead.
+- **A scheme whose hardness assumption is materially younger or less scrutinized
+  than this shelf's others says so on its page, with the reason.** SHA-2 and
+  SHAKE, the lattice problems under NTRU and module-LWE, and the discrete log
+  each have decades of public analysis behind their lineage; a reader comparing
+  schemes here will assume the rest are alike in that respect unless told
+  otherwise. Where the assumption is ordinary, the page says nothing — this is
+  not a field to fill in. leanSig is the one that owes it today, and
+  [its page](../schemes/leansig.md#what-this-scheme-rests-on) carries the
+  assumption and the cryptanalysis it is under.
 
 ## Changing the posture
 

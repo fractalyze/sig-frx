@@ -62,8 +62,12 @@ division, not a shift schedule.
 `conventions.md` asks every scheme to say which form its rejection loop takes.
 leanSig's is over `rho` with `MAX_TRIES`, and it is **a host loop**: signing is
 host-side here, and the acceptance test is a public function of public inputs —
-the verifier recomputes it from the `rho` the signature carries — so a
-data-dependent trip count leaks nothing a verifier does not already hold.
+the verifier recomputes it from the `rho` the signature carries — so the loop is
+free to take whichever form is cheapest. What that costs is named rather than
+defended: the trip count depends on the message and on PRF output keyed by the
+secret seed, so it is not something an observer recomputes, and it is permitted
+because signing carries no timing claim
+([`security.md`](../../../docs/reference/security.md)).
 
 The loop itself is not in this module, which is upstream's split too:
 `target_sum_encode` reports on one attempt and the caller retries. It lives in

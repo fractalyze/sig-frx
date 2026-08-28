@@ -24,6 +24,9 @@ scheme is held to, **[`schemes/`](schemes)** is one design-notes page per scheme
 | Module-lattice signatures — the two rejection loops, batch axis, what leaks | [`ml-dsa.md`](schemes/ml-dsa.md) |
 | Hash-based signatures over a hypertree — parameter sets, batch axis, what leaks | [`slh-dsa.md`](schemes/slh-dsa.md) |
 | Stateful hash-based signatures, single- and multi-tree — the index discipline, and who owns persistence | [`xmss.md`](schemes/xmss.md) |
+| Two hash-based schemes under one key — the indicator byte, and both paths run per entry | [`shrincs.md`](schemes/shrincs.md) |
+| Threshold Schnorr — the two rounds, and who the dealer is | [`frost.md`](schemes/frost.md) |
+| Key and nonce aggregation over secp256k1 — the tweaks, and the two-round session | [`musig2.md`](schemes/musig2.md) |
 
 Detailed design, findings, and open decisions live on the issues, not in the
 tree — the epic is
