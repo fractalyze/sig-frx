@@ -105,6 +105,11 @@ class Sizes(parameterized.TestCase):
         # reach — and a bound mistyped upward widens what Falcon accepts without
         # failing a single published vector.
         self.assertEqual(scheme.params.squared_norm_bound, params["squared_norm_bound"])
+        # `sigma` is the same kind of value and fails more quietly: a mistyped
+        # digit moves the distribution `ffSampling` draws from, while every
+        # signature still verifies and still interoperates. That is the failure
+        # `sampler_test` measures for σmin, one level down.
+        self.assertEqual(scheme.params.sigma, params["sigma"])
 
     def test_an_unknown_parameter_set_is_refused(self) -> None:
         with self.assertRaises(ValueError):
