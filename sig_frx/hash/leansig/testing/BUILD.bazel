@@ -60,9 +60,9 @@ py_library(
 
 # Two SHAKE128 derivations and their refusals. Host-only — there is no traced
 # leg to compile, since hashing bytes is not array work — so this is the
-# cheapest suite here: 6.2 s on the CPU leg of the run that first carried it
-# (3.8 s on the GPU leg), a tenth of the 60 s budget and well inside the
-# half-a-budget rule in ../../../../docs/reference/measurement.md.
+# cheapest suite here: 2.9 s on the CPU leg and 3.6 s on the GPU leg, a
+# nineteenth of the 60 s budget and well inside the half-a-budget rule in
+# ../../../../docs/reference/measurement.md.
 py_test(
     name = "prf_test",
     size = "small",
@@ -81,13 +81,16 @@ py_test(
 # — 256 slots of 4 chains, then 8 Merkle levels — and each sign case grinds a
 # block of randomness on top of that.
 #
-# `medium` is required rather than cautious, and the CPU leg is what decides it:
-# 74.3 s there on the run that first carried this file, against 59.4 s on the
-# GPU leg, so `small`'s 60 s budget is already exceeded by the slower leg. At
-# `medium` that is a quarter of the 300 s budget, inside the half-a-budget rule
-# in ../../../../docs/reference/measurement.md. A workstation run reads 27 s and
-# argues for `small`; per that page it is right about the local number and the
-# local number is not the one that decides.
+# `medium`, and the GPU leg is what decides it: 53.4 s there against 48.6 s on
+# the CPU leg. That is under `small`'s 60 s budget but at 89% of it, which the
+# half-a-budget rule in ../../../../docs/reference/measurement.md is exactly
+# about — a target sized that tightly flakes on a loaded executor. At `medium`
+# it is a sixth of the 300 s budget. A workstation run reads 20 s and argues for
+# `small`; per that page it is right about the local number and the local number
+# is not the one that decides.
+#
+# Both figures are post-cleanup and moved a lot: the suite was generating a
+# whole-lifetime key pair per case, which put the CPU leg at 74.3 s.
 py_test(
     name = "signing_test",
     size = "medium",
