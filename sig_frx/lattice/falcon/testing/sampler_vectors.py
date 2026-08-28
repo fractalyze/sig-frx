@@ -65,6 +65,11 @@ _CCS = re.compile(rf"^   ccs\s+= {_HEX_FLOAT}", re.M)
 # `ApproxExp`'s output, after `BerExp` has doubled and shifted it.
 _BER_EXP_Z = re.compile(r"^       z   = 0x([0-9A-Fa-f]{16})", re.M)
 _ACCEPTED = re.compile(r"Accepted, ret = (-?\d+)")
+# The signature the trace was taken from: the key it used, the point it signed,
+# and the lattice point it produced. One header per file.
+_POLYNOMIAL = r"^{} = (-?\d[\d -]*)$"
+_SIGNATURE_VECTOR = re.compile(_POLYNOMIAL.format("signature vector"), re.M)
+_HASHED_MESSAGE = re.compile(_POLYNOMIAL.format("hashed message"), re.M)
 
 
 class Iteration(NamedTuple):
@@ -145,8 +150,32 @@ def _parse(text: str) -> tuple[Call, ...]:
     return tuple(calls)
 
 
-def calls(degree: int) -> tuple[Call, ...]:
-    """Every `SamplerZ` call of the archive's signature at `degree`."""
+class Signature(NamedTuple):
+    """The key and the point the traced signature was made with.
+
+    `ffSampling` cannot be driven by the per-call records alone: its input is a
+    target in the transform domain, and the centres the trace prints are what
+    that target *becomes* on the way down the tree. So the header is parsed too
+    — the private key the tree is built from, and the hashed message the target
+    is computed from by Algorithm 10 line 3.
+    """
+
+    f: tuple[int, ...]
+    g: tuple[int, ...]
+    big_f: tuple[int, ...]
+    big_g: tuple[int, ...]
+    hashed_message: tuple[int, ...]  # `c`, as `n` coefficients mod `q`
+    signature_vector: tuple[int, ...]  # `s2`, which Algorithm 10 line 9 keeps
+
+
+def _polynomial(text: str, name: str) -> tuple[int, ...]:
+    match = re.search(_POLYNOMIAL.format(name), text, re.M)
+    if match is None:  # pragma: no cover - upstream format drift
+        raise AssertionError(f"the trace records no {name!r} polynomial")
+    return tuple(int(value) for value in match.group(1).split())
+
+
+def _read(degree: int) -> str:
     path = _RUNFILES.Rlocation(_PATH.format(degree))
     if path is None:  # pragma: no cover - a packaging error, not a case
         raise FileNotFoundError(
@@ -154,7 +183,25 @@ def calls(degree: int) -> tuple[Call, ...]:
             "the test target needs `@falcon_round3//:sampler_vectors` in `data`"
         )
     with open(path, encoding="utf-8") as handle:
-        return _parse(handle.read())
+        return handle.read()
+
+
+def signature(degree: int) -> Signature:
+    """The header of the archive's traced signature at `degree`."""
+    text = _read(degree)
+    return Signature(
+        f=_polynomial(text, "f"),
+        g=_polynomial(text, "g"),
+        big_f=_polynomial(text, "F"),
+        big_g=_polynomial(text, "G"),
+        hashed_message=_polynomial(text, "hashed message"),
+        signature_vector=_polynomial(text, "signature vector"),
+    )
+
+
+def calls(degree: int) -> tuple[Call, ...]:
+    """Every `SamplerZ` call of the archive's signature at `degree`, in order."""
+    return _parse(_read(degree))
 
 
 def cursor(randomness: bytes) -> Callable[[int], bytes]:

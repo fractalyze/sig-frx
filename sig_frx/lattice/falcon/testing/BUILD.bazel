@@ -353,3 +353,26 @@ py_test(
         requirement("absl_py"),
     ],
 )
+
+# The walk is host `complex128` and the 3 072 sampler calls under it are host
+# integers, so like `:sampler_test` this compiles nothing on either leg. From
+# CI: 2.8 s on the CPU leg, 1.2 s on the GPU one, of which 0.17 s is the cases
+# themselves — the rest is interpreter start and imports, which is why the two
+# legs sit within a couple of seconds instead of the multiple every traced
+# target here shows. `small` covers the deciding leg at 5% of its 60 s.
+py_test(
+    name = "sign_test",
+    size = "small",
+    srcs = ["sign_test.py"],
+    deps = [
+        ":falcon_reference",
+        ":sampler_vectors",
+        "//sig_frx/lattice/falcon:arith",
+        "//sig_frx/lattice/falcon:fft",
+        "//sig_frx/lattice/falcon:keygen",
+        "//sig_frx/lattice/falcon:sampler",
+        "//sig_frx/lattice/falcon:sign",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
