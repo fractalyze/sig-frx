@@ -320,3 +320,49 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# The scheme's known-answer vectors: signatures upstream produced under two of
+# the eight validator key pairs its fixtures archive publishes, at `PROD`.
+# Transcribed constants rather than a fetched file for the reason
+# `poseidon_vectors` is — the archive is republished in place under a moving tag,
+# so there is no commit-pinned URL — and the provenance lives in the module.
+py_library(
+    name = "prod_verify_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "prod_verify_vectors.py",
+    ],
+)
+
+# The gate on the shipped scheme: 46 chains over a 32-level tree, against
+# signatures upstream produced under its own published keys.
+#
+# `medium`, sized by ratio rather than by local seconds, because no CI leg has
+# run this yet. `leansig_test` is the sibling that has: 28.8 s on this
+# workstation's GPU leg against 42.7 s on CI's, a 1.5x. This target reads 21.5 s
+# beside it under the same invocation, which puts its CI GPU leg near 32 s — 53%
+# of `small`'s 60 s, and the half-a-budget rule in
+# ../../../../docs/reference/measurement.md moves a target up at half. The CPU
+# leg is not what decides: 11.7 s local, against the GPU leg's 21.5 s.
+# **Re-read both from the CI legs once they report** — the ratio is one sibling's
+# and sizes a bucket, not a number.
+#
+# It being *cheaper* than the `TEST` suite it sits beside is worth knowing,
+# because that suite's own comment predicted the opposite. The shape is bigger by
+# every measure and the compile is not, since a preset is one fused region either
+# way; what costs is the number of distinct batch widths a suite traces, and this
+# one traces two where `leansig_test` traces several plus its refusal paths.
+py_test(
+    name = "leansig_kat_test",
+    size = "medium",
+    srcs = ["leansig_kat_test.py"],
+    deps = [
+        ":harness",
+        ":prod_verify_vectors",
+        "//sig_frx/hash/leansig",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
