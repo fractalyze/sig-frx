@@ -49,8 +49,9 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from frx.typing import ArrayLike
 
-from sig_frx.lattice.falcon import fft, keygen, sampler
+from sig_frx.lattice.falcon import arith, fft, keygen, sampler
 from sig_frx.lattice.falcon.sampler import RandomBytes
 
 
@@ -144,3 +145,51 @@ def ff_sampling(
         degree,
         randomness,
     )
+
+
+def target(point: ArrayLike, f_hat: Any, big_f_hat: Any) -> tuple[Any, Any]:
+    """Algorithm 10 line 3 — `t = (FFT(c), FFT(0)) · B̂⁻¹`.
+
+    Written out rather than as a matrix solve, because `B̂⁻¹` has a closed form
+    for `B = [[g, −f], [G, −F]]` whose determinant is `q`: the second row of the
+    product is what `(c, 0)` picks out, so both halves are `FFT(c)` times one
+    basis polynomial over `q`, and the `−` is the one the inverse carries.
+    """
+    c = fft.fft(np.asarray(point, dtype=np.float64))
+    return -(c * big_f_hat) / arith.Q, (c * f_hat) / arith.Q
+
+
+def attempt(
+    t0: Any,
+    t1: Any,
+    tree: keygen.FalconTree,
+    basis_hat: tuple[Any, Any, Any, Any],
+    bound: int,
+    randomness: RandomBytes,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Algorithm 10 lines 6-9 — `(s1, s2)`, or `None` where line 8 rejects.
+
+    One trip, not the loop: the trip count is data and a caller that restarts
+    needs fresh bytes, which is the same split `keygen.ntru_gen` makes for
+    Algorithm 5. It also makes this deterministic in `randomness` and so
+    testable without a hash.
+
+    The bound is on the **pair**. `‖(s1, s2)‖² > ⌊β²⌋` is a property of the
+    whole lattice point, and checking `s2` alone — the half that gets encoded —
+    would accept points a verifier rejects, since `verify` reconstructs `s1`
+    from `s2` and holds the pair to the same number.
+    """
+    z0, z1 = ff_sampling(t0, t1, tree, randomness)
+    f_hat, g_hat, big_f_hat, big_g_hat = basis_hat
+    d0, d1 = t0 - z0, t1 - z1
+    # Line 7's `(t − z)B̂`, with `B = [[g, −f], [G, −F]]`.
+    s1 = fft.ifft(d0 * g_hat + d1 * big_g_hat)
+    s2 = fft.ifft(-(d0 * f_hat + d1 * big_f_hat))
+    # Line 9. The coefficients are integers up to the transform's error, which
+    # is what `rint` removes — they are a lattice point by construction, so a
+    # rounding here is reading the answer rather than choosing one.
+    first = np.rint(np.real(s1)).astype(np.int64)
+    second = np.rint(np.real(s2)).astype(np.int64)
+    if int((first * first).sum() + (second * second).sum()) > bound:
+        return None
+    return first, second

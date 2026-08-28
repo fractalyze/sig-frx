@@ -33,9 +33,10 @@ it is reached anyway).
 
 Which loop shape a rejection gets is the scheme's decision to record. ML-DSA's
 is on [`ml-dsa.md`](../../docs/schemes/ml-dsa.md) alongside the signing loop that
-went the other way; Falcon's `HashToPoint` is recorded in its own module until
-that scheme has a page, which it gets when signing lands and there is a whole
-scheme to describe.
+went the other way; Falcon's is on
+[`falcon.md`](../../docs/schemes/falcon.md), which names `HashToPoint` as the one
+rejection in that scheme whose candidates are public and so the only one that
+takes this shape.
 
 ## Collection is a gather, and a running count is the schedule
 

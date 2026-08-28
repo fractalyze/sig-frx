@@ -29,6 +29,7 @@ produced itself.
 
 from __future__ import annotations
 
+import functools
 from typing import Any
 
 import frx
@@ -40,6 +41,24 @@ from sig_frx.lattice.falcon import encoding, falcon, keygen
 from sig_frx.lattice.falcon.testing import falcon_reference as ref
 from sig_frx.lattice.falcon.testing import falcon_vectors
 from sig_frx.signature import Signature
+
+
+@functools.lru_cache(maxsize=None)
+def _key_pair() -> tuple[bytes, bytes]:
+    """The `Falcon-512` pair every case here that needs a real key runs on.
+
+    Cached because it is the target's single largest cost — about 45 s, nearly
+    all of it Algorithm 6's solve — and two cases want the same pair. A key is a
+    pure function of its seed, so a second call would buy nothing and would put
+    this target past half its budget on the leg that decides it.
+    """
+    scheme = falcon.named("Falcon-512")
+    public, secret = scheme.keygen(np.arange(scheme.seed_size, dtype=np.uint8))
+    return (
+        bytes(np.asarray(public, dtype=np.uint8)),
+        bytes(np.asarray(secret, dtype=np.uint8)),
+    )
+
 
 _PARAMETER_SETS = ref.parameter_cases()
 
@@ -335,9 +354,11 @@ class Keygen(parameterized.TestCase):
         """
         scheme = falcon.named("Falcon-512")
         n = scheme.params.n
-        public, secret = scheme.keygen(np.arange(scheme.seed_size, dtype=np.uint8))
-        self.assertLen(np.asarray(public), scheme.public_key_size)
-        self.assertLen(np.asarray(secret), scheme.secret_key_size)
+        public_bytes, secret_bytes = _key_pair()
+        public = np.frombuffer(public_bytes, dtype=np.uint8)
+        secret = np.frombuffer(secret_bytes, dtype=np.uint8)
+        self.assertLen(public, scheme.public_key_size)
+        self.assertLen(secret, scheme.secret_key_size)
 
         f, g, big_f, ok = encoding.sk_decode(np.asarray(secret), n)
         self.assertTrue(bool(np.asarray(ok)))
@@ -388,14 +409,113 @@ class Keygen(parameterized.TestCase):
         self.assertNotIsInstance(raised.exception, NotImplementedError)
 
 
-class NotYetImplemented(absltest.TestCase):
-    """The seam method #27 fills in, refusing loudly until then."""
+class Signing(absltest.TestCase):
+    """Algorithm 10, held to the verifier the published vectors already gate.
 
-    def test_signing_raises(self) -> None:
-        scheme = falcon.named("Falcon-512")
-        with self.assertRaises(NotImplementedError) as raised:
-            scheme.sign(np.zeros(1281, dtype=np.uint8), np.zeros(4, np.uint8))
-        self.assertIn("sig-frx#", str(raised.exception))
+    `Falcon-512` only, and for the budget reason the rest of this file records:
+    a key is what costs, and the degree changes nothing any case here asserts.
+    """
+
+    _SALT = bytes(range(encoding.SALT_SIZE))
+    _MESSAGE = b"a message signed by this implementation"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.scheme = falcon.named("Falcon-512")
+        public, secret = _key_pair()
+        cls.public_key = np.frombuffer(public, dtype=np.uint8)
+        cls.secret_key = np.frombuffer(secret, dtype=np.uint8)
+
+    def _sign(self, message: bytes, salt: bytes | None = None) -> np.ndarray:
+        return np.asarray(
+            self.scheme.sign(
+                self.secret_key,
+                np.frombuffer(message, dtype=np.uint8),
+                randomness=np.frombuffer(salt or self._SALT, dtype=np.uint8),
+            ),
+            dtype=np.uint8,
+        )
+
+    def _verify(self, signature: np.ndarray, message: bytes) -> bool:
+        return bool(
+            np.asarray(
+                self.scheme.verify(
+                    self.public_key[None],
+                    np.frombuffer(message, dtype=np.uint8)[None],
+                    signature[None],
+                )
+            )[0]
+        )
+
+    def test_a_signature_verifies_and_has_the_standard_shape(self) -> None:
+        signature = self._sign(self._MESSAGE)
+        self.assertLen(signature, self.scheme.params.signature_size)
+        # §3.11.3's header, which `sig_decode` checks and a wrong nibble fails.
+        self.assertEqual(signature[0], encoding.degree_header(512, 0b0011))
+        np.testing.assert_array_equal(
+            signature[1 : 1 + encoding.SALT_SIZE],
+            np.frombuffer(self._SALT, dtype=np.uint8),
+        )
+        self.assertTrue(self._verify(signature, self._MESSAGE))
+
+    def test_the_salt_is_what_makes_two_signatures_differ(self) -> None:
+        """§3.9's whole reason for drawing one, and both still verify."""
+        other = bytes(range(1, encoding.SALT_SIZE + 1))
+        first, second = self._sign(self._MESSAGE), self._sign(self._MESSAGE, other)
+        self.assertFalse(np.array_equal(first, second))
+        self.assertTrue(self._verify(first, self._MESSAGE))
+        self.assertTrue(self._verify(second, self._MESSAGE))
+
+    def test_the_same_inputs_give_the_same_signature(self) -> None:
+        """Not a property Falcon has — a property of this expansion.
+
+        The sampler's stream is derived from the salt and the key, so a caller
+        that repeats both gets the same bytes. That is what makes a failing case
+        reproducible; it is not determinism in the scheme, which draws a fresh
+        salt per signature.
+        """
+        np.testing.assert_array_equal(
+            self._sign(self._MESSAGE), self._sign(self._MESSAGE)
+        )
+
+    def test_a_signature_does_not_verify_for_another_message(self) -> None:
+        signature = self._sign(self._MESSAGE)
+        self.assertFalse(self._verify(signature, self._MESSAGE + b"!"))
+
+    def test_a_corrupted_signature_is_refused(self) -> None:
+        """Byte 41 is the first compressed coefficient — past header and salt.
+
+        So the salt still matches and `hash_to_point` still produces the same
+        target: this is a wrong point for the right challenge rather than a
+        signature over a different message.
+        """
+        signature = self._sign(self._MESSAGE)
+        self.assertTrue(self._verify(signature, self._MESSAGE))
+        corrupted = signature.copy()
+        corrupted[41] ^= 0x01
+        self.assertFalse(self._verify(corrupted, self._MESSAGE))
+
+    def test_the_salt_is_required_and_checked(self) -> None:
+        """The seam does not draw randomness, so a caller that omits it fails."""
+        message = np.frombuffer(self._MESSAGE, dtype=np.uint8)
+        with self.assertRaisesRegex(ValueError, "does not draw it"):
+            self.scheme.sign(self.secret_key, message)
+        with self.assertRaisesRegex(ValueError, "40 bytes"):
+            self.scheme.sign(
+                self.secret_key, message, randomness=np.zeros(8, dtype=np.uint8)
+            )
+
+    def test_a_malformed_secret_key_is_refused(self) -> None:
+        """A wrong header byte is not a §3.11.5 encoding, and does not sign."""
+        broken = self.secret_key.copy()
+        broken[0] ^= 0xFF
+        with self.assertRaisesRegex(ValueError, "§3.11.5"):
+            self.scheme.sign(
+                broken,
+                np.frombuffer(self._MESSAGE, dtype=np.uint8),
+                randomness=np.frombuffer(self._SALT, dtype=np.uint8),
+            )
 
 
 if __name__ == "__main__":

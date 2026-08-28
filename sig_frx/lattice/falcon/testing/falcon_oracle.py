@@ -10,15 +10,14 @@ published records and `falcon_kat_test` drives them. What it cannot cover is
 the reverse: a key generated *here* being accepted *there*. Only the C can say
 that, so this module compiles it and drives it.
 
-## What "accepted" is, given there is no signer yet
+## What "accepted" means here
 
-`Falcon.sign` is [#27](https://github.com/fractalyze/sig-frx/issues/27), so
-"generate here, sign here, verify there" is not available. The reverse is, and
-it makes the same claim: the reference **signs** with a key generated here, and
-this repo's `verify` accepts the result under the matching public key. A
-signature that verifies could not have come from a key the reference refused to
-load — so one round trip carries the acceptance, and it lands on the verifier
-the published vectors already gate.
+Two things, and this module serves both. The reference **signs** with a key
+generated here and this repo's `verify` accepts the result — a signature that
+verifies could not have come from a key the reference refused to load. And this
+repo signs, and the reference **accepts** — the direction that needed
+`Falcon.sign`, which is why [`sign`](#sign) below was built before
+[`verify`](#verify).
 
 ## What refuses a corrupted key, and why it is not the header byte
 
@@ -40,12 +39,13 @@ was accepted. So the corruption goes where the criterion means it to go, into
 the key material, rather than into the header byte where a rejection would
 prove only that a constant was compared.
 
-## Only `crypto_sign` is bound
+## Both halves are bound, and the second arrived with its producer
 
-`crypto_sign_open` is the other half of the API and is deliberately absent:
-nothing here produces a signature for it to judge yet, and a binding no test
-exercises is a binding nobody knows works. It arrives with #27, which is the
-issue that gains a producer.
+`crypto_sign` is what #26's criterion needed — the reference signing with a key
+generated here. `verify` below is #27's: `Falcon.sign` now produces signatures,
+so there is something for the reference to judge, which is the condition this
+module previously recorded for adding it. A binding no test exercises is a
+binding nobody knows works.
 """
 
 from __future__ import annotations
@@ -90,6 +90,14 @@ def _library(degree: int) -> ctypes.CDLL:
         ctypes.c_char_p,
     ]
     library.crypto_sign.restype = ctypes.c_int
+    library.crypto_sign_open.argtypes = [
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_ulonglong),
+        ctypes.c_char_p,
+        ctypes.c_ulonglong,
+        ctypes.c_char_p,
+    ]
+    library.crypto_sign_open.restype = ctypes.c_int
     return library
 
 
@@ -106,8 +114,11 @@ def sign(
 
     The return is §3.11.3's `header ‖ salt ‖ enc_s`, zero-padded to `sbytelen`,
     which is the seam's form. What the reference hands back is §3.11.6's
-    aggregate with the message in the middle and a nonce-less header, so the
-    regrouping below is the same one `falcon_vectors` documents, run forwards.
+    aggregate with the message in the middle and a nonce-less header, so it
+    goes through [`falcon_reference.signature_from_aggregate`](falcon_reference.py)
+    — the same call the `.rsp` loader makes on the published records, since a
+    live signature and a published one arrive in the same packaging.
+    [`verify`](#verify) below runs that regrouping backwards, by hand.
     """
     params = falcon.PARAMETER_SETS[f"Falcon-{degree}"]
     if len(secret_key) != params.secret_key_size:
@@ -144,3 +155,48 @@ def sign(
             "signature holds"
         )
     return signature
+
+
+def verify(public_key: bytes, message: bytes, signature: bytes, degree: int) -> bool:
+    """The reference's verdict on a signature produced here.
+
+    Takes the seam's §3.11.3 form and regroups it into §3.11.6's aggregate,
+    which is [`sign`](#sign)'s regrouping run backwards — `crypto_sign_open`
+    reads `siglen ‖ r ‖ M ‖ header ‖ enc_s` and nothing else. Feeding it the
+    seam's form directly rejects **every** case, which looks exactly like a
+    broken signer, so the regrouping is the first thing to doubt if this starts
+    refusing everything at once.
+
+    The trailing zeros §3.11.3 pads to `sbytelen` are dropped rather than
+    passed on: the aggregate carries an explicit length and the reference
+    checks the compressed run against it, so padding it never saw would be
+    read as a malformed signature.
+    """
+    from sig_frx.lattice.falcon import falcon
+
+    params = falcon.PARAMETER_SETS[f"Falcon-{degree}"]
+    if len(signature) != params.signature_size:
+        raise ValueError(
+            f"a Falcon-{degree} signature is {params.signature_size} bytes, "
+            f"got {len(signature)}"
+        )
+    if signature[0] != encoding.degree_header(degree, 0x3):
+        return False
+    salt = signature[1 : 1 + encoding.SALT_SIZE]
+    compressed = signature[1 + encoding.SALT_SIZE :].rstrip(b"\x00")
+    nonceless = bytes([encoding.degree_header(degree, 0x2)]) + compressed
+    aggregate = (
+        len(nonceless).to_bytes(_SIGLEN_SIZE, "big") + salt + message + nonceless
+    )
+
+    library = _library(degree)
+    recovered = ctypes.create_string_buffer(max(len(aggregate), 1))
+    length = ctypes.c_ulonglong(0)
+    status = library.crypto_sign_open(
+        recovered, ctypes.byref(length), aggregate, len(aggregate), public_key
+    )
+    if status != 0:
+        return False
+    # A reference that accepted but recovered a different message would be
+    # answering about something else; the seam's claim is about this one.
+    return recovered.raw[: length.value] == message
