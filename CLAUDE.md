@@ -36,6 +36,15 @@ this file is the map plus the rules every change must respect.
   another PR's branch shows only Commit Lint and reads as passing. Either land
   the bottom of the stack first, or verify both legs locally and say so on the
   PR — a green check list that is one entry long is the tell.
+- **`pre-commit run --files …` cannot catch a symbol you removed.** The hooks
+  are scoped to the files listed, so mypy only type-checks those — and a
+  deletion or rename breaks the files you did *not* touch. CI runs
+  `--all-files`, and the `pull_request` event builds the **merge ref**, so a
+  consumer that landed on `main` after you branched fails there while `git
+  merge` stays clean and both sides pass on their own. Run
+  `pre-commit run --all-files` before pushing any removal from a module other
+  files import, and grep the bare symbol name — `from x import NAME` matches
+  neither `x\.NAME` nor `NAME\[`.
 - **A device XOF squeeze is sized into the program, so a long one does not
   work.** hash-frx's `Shake256(size).digest(...)` compiles in time and memory
   super-linear in `size`: 4.6 s at 1 KB, 28 s at 4 KB, nothing inside 400 s at
