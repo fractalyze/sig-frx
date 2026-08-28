@@ -7,9 +7,10 @@ which is what makes it the suite that localizes a failure. What it cannot reach
 is the scheme as deployed — 46 chains, 32 levels, a target sum of 200 — nor a key
 that anyone but this repo produced.
 
-This suite is both. The cases are signed by upstream under two of the key pairs
-its fixtures archive publishes, at `PROD_CONFIG`, and they carry upstream's
-verdict for every one — the four refusals included, because a
+This suite is both. Nine of the ten cases are signed by upstream under two of the
+key pairs its fixtures archive publishes, at `PROD_CONFIG`, and carry upstream's
+verdict; the tenth is `off_target_layer`, built here because it is what upstream's
+signer loops until it avoids. The refusals are half the gate, because a
 verifier that returns `True` unconditionally reproduces every accepted signature
 ever published ([`testing.md`](../../../../docs/reference/testing.md)).
 
