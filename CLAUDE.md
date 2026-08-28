@@ -36,6 +36,19 @@ this file is the map plus the rules every change must respect.
   another PR's branch shows only Commit Lint and reads as passing. Either land
   the bottom of the stack first, or verify both legs locally and say so on the
   PR — a green check list that is one entry long is the tell.
+- **A red CPU leg is usually the runner, and the re-run has a queue in front of
+  it.** Bazel exit 36 with `No space left on device` (or `Socket closed` at 37,
+  or a missing `externals/node24/bin/node`) means the runner, not the change —
+  the tell is a 15-second job reporting `Executed 0 out of N tests`. Re-run it
+  rather than debugging it. But `gh run rerun --failed` refuses while *any* job
+  in the run is still going, so a dead CPU leg cannot be re-run until the GPU leg
+  clears its queue, which has taken 40 minutes.
+- **`gh pr edit` does not work against this repo.** It queries
+  `repository.pullRequest.projectCards`, which GitHub has deprecated with the
+  Projects-classic sunset, and fails without editing anything — quietly enough
+  to look like it worked. Edit a PR body with
+  `gh api -X PATCH repos/fractalyze/sig-frx/pulls/<N> -F body=@<file>` instead,
+  and re-read the body to confirm.
 - **A device XOF squeeze is sized into the program, so a long one does not
   work.** hash-frx's `Shake256(size).digest(...)` compiles in time and memory
   super-linear in `size`: 4.6 s at 1 KB, 28 s at 4 KB, nothing inside 400 s at
