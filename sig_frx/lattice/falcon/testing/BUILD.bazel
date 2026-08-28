@@ -355,11 +355,11 @@ py_test(
 )
 
 # The walk is host `complex128` and the 3 072 sampler calls under it are host
-# integers, so like `:sampler_test` this compiles nothing on either leg: 1.2 s
-# on both, against 0.17 s of actual cases — the rest is interpreter start and
-# imports. A workstation figure does not size a budget, but the bucket survives
-# the executor's worst factor with room, at 7% of `small`. Re-read it once CI
-# has reported one of its own.
+# integers, so like `:sampler_test` this compiles nothing on either leg. From
+# CI: 2.8 s on the CPU leg, 1.2 s on the GPU one, of which 0.17 s is the cases
+# themselves — the rest is interpreter start and imports, which is why the two
+# legs sit within a couple of seconds instead of the multiple every traced
+# target here shows. `small` covers the deciding leg at 5% of its 60 s.
 py_test(
     name = "sign_test",
     size = "small",
