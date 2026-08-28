@@ -55,10 +55,20 @@ each for its own reason, and neither is an oversight:
 
 - **`sk` is exposed separately** as [`secret_key`](#secret_key) rather than on
   the record, because [`kat.check`](../../../testing/kat.py)'s `_check_sign`
-  drives any vector carrying one into `Falcon.sign` — still
-  `NotImplementedError` until [#27](https://github.com/fractalyze/sig-frx/issues/27)
-  lands its signing loop. §3.11.5's decoder is gated on those bytes today by
-  [`keygen_test`](keygen_test.py), which is what they are for.
+  compares the produced signature against the published one **byte for byte**,
+  and Falcon cannot reproduce those bytes. §3.9 draws a salt per signature, so
+  `Falcon.deterministic` is `False` and the output is a function of randomness
+  the set does not publish in any form this repo consumes — its own seed
+  expansion is a choice recorded on
+  [#27](https://github.com/fractalyze/sig-frx/issues/27), not a transcription.
+  A `secret_key` on the record would therefore fail a **correct**
+  implementation, which is worse than not gating it.
+
+  Signing is gated instead where a randomized scheme can be: by a round trip
+  under this published pair in [`falcon_test`](falcon_test.py), and by the
+  reference implementation's own verdict on signatures produced here in
+  [`falcon_interop_test`](falcon_interop_test.py). §3.11.5's decoder is gated on
+  these same bytes by [`keygen_test`](keygen_test.py).
 - **`seed` is not exposed at all.** `_check_keygen` would take it and require
   `keygen(seed)` to reproduce the published pair, and this repo's expansion is
   `SHAKE256(seed ‖ attempt)` rather than the NIST harness's AES-256-CTR-DRBG —

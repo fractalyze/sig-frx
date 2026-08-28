@@ -9,22 +9,29 @@ tests "because the gap is a property of how the vectors are published, not of an
 one scheme — a per-scheme fix would be written once per scheme for one cause",
 and a Falcon-shaped copy would be the third.
 
-**A verification-only scheme is drivable here, which is the part worth naming.**
-`_check_keygen` skips a vector carrying no seed and `_check_sign` one carrying no
-secret key, and Falcon's records carry neither — so `keygen` and `sign` raising
-until [#26](https://github.com/fractalyze/sig-frx/issues/26) and
-[#27](https://github.com/fractalyze/sig-frx/issues/27) is not a reason to opt
-out.
+**Key generation and signing stay uncovered by this set, and will** — now that
+both are implemented, which is when the reason has to stop being "they raise".
+It is not that the vectors are missing them: every record carries `sk`, and a
+`seed` besides. It is that **neither output is reproducible here, by decision**.
 
-**Key generation and signing stay uncovered by this set, and will.** The reason
-is not that the vectors are missing them — every record carries `sk`, and a
-`seed` besides — but that neither is reproducible here: the seed expands through
-NIST's AES-256-CTR-DRBG rather than this repo's `SHAKE256(seed ‖ attempt)`, and
-a `secret_key` on a record drives the harness into a `sign` that #27 has not
-finished. [`falcon_vectors`](falcon_vectors.py) withholds both fields for those
-two reasons and says so; this is where the consequence is recorded, because "the
-harness skipped it" and "the harness cannot check it" read identically from a
-green run.
+- `_check_keygen` would require `keygen(seed)` to return the published pair, and
+  the seed expands through NIST's AES-256-CTR-DRBG rather than this repo's
+  `SHAKE256(seed ‖ attempt)` ([#26](https://github.com/fractalyze/sig-frx/issues/26)).
+- `_check_sign` compares byte for byte, and §3.9 draws a salt per signature — so
+  a correct randomized signer disagrees with the published bytes by
+  construction ([#27](https://github.com/fractalyze/sig-frx/issues/27)).
+
+So a `seed` or a `secret_key` on a record would not extend this gate; it would
+fail a correct implementation. [`falcon_vectors`](falcon_vectors.py) withholds
+both and says why, and `test_the_two_secrets_stay_off_the_record` below is what
+keeps the withholding deliberate — "the harness skipped it" and "the harness
+cannot check it" read identically from a green run, so the skip is asserted
+rather than left to the absence of a field.
+
+Where signing *is* gated, since it is not gated here: a round trip under this
+published key pair in [`falcon_test`](falcon_test.py), and the reference
+implementation's verdict on signatures produced here in
+[`falcon_interop_test`](falcon_interop_test.py).
 
 ## The bound, and why it is stated at the call rather than defaulted
 
@@ -120,6 +127,59 @@ class FalconKatTest(parameterized.TestCase):
                 ref.verify(record.public_key, record.message, record.signature, name),
                 f"count={record.case} is not accepted by the reference",
             )
+
+    @parameterized.parameters(*ref.parameter_cases())
+    def test_the_two_secrets_stay_off_the_record(
+        self, name: str, **params: Any
+    ) -> None:
+        """The skip above, asserted rather than inherited from a missing field.
+
+        `_check_keygen` and `_check_sign` both continue past a vector that
+        carries no `seed` / no `secret_key`, so Falcon's key generation and
+        signing are skipped by *omission* — and an omission looks exactly like
+        coverage from a green run. The published set carries both secrets, so
+        putting either on the record is a one-word change that would silently
+        convert this gate into one that fails a correct implementation.
+
+        Asserted against the loader's own `Record`, which does carry `sk`, so
+        this cannot pass by the vectors having lost the data instead.
+        """
+        del params
+        published = falcon_vectors.records(name)
+        self.assertNotEmpty(published)
+        self.assertTrue(
+            all(record.secret_key for record in published),
+            "the loader stopped carrying `sk`, so the assertion below is vacuous",
+        )
+        for vector in falcon_vectors.vectors(name, _GATE_VECTORS):
+            with self.subTest(case=vector.case_id):
+                self.assertIsNone(
+                    vector.secret_key,
+                    "a `secret_key` here drives `_check_sign`, which compares "
+                    "byte for byte against a signature Falcon's randomized "
+                    "signing cannot reproduce",
+                )
+                self.assertIsNone(
+                    vector.seed,
+                    "a `seed` here drives `_check_keygen`, which requires the "
+                    "published pair back out of an expansion this repo does "
+                    "not implement",
+                )
+
+    @parameterized.parameters(*ref.parameter_cases())
+    def test_the_published_secret_key_is_reachable_and_gated_elsewhere(
+        self, name: str, **params: Any
+    ) -> None:
+        """Withheld from the record is not withheld from the suite.
+
+        The bytes the record does not carry are the ones `keygen_test` gates
+        §3.11.5's decoder on and `falcon_test` signs under, so this pins that
+        the accessor keeps working — a withholding that quietly became a
+        deletion would take those gates with it.
+        """
+        secret = falcon_vectors.secret_key(name)
+        self.assertLen(secret, falcon.named(name).secret_key_size)
+        self.assertEqual(secret, falcon_vectors.records(name)[0].secret_key)
 
     @parameterized.parameters(*ref.parameter_cases())
     def test_the_records_without_an_encoding_are_the_ones_stated(
