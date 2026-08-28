@@ -353,3 +353,26 @@ py_test(
         requirement("absl_py"),
     ],
 )
+
+# The walk is host `complex128` and the 3 072 sampler calls under it are host
+# integers, so like `:sampler_test` this compiles nothing on either leg: 1.2 s
+# on both, against 0.17 s of actual cases — the rest is interpreter start and
+# imports. A workstation figure does not size a budget, but the bucket survives
+# the executor's worst factor with room, at 7% of `small`. Re-read it once CI
+# has reported one of its own.
+py_test(
+    name = "sign_test",
+    size = "small",
+    srcs = ["sign_test.py"],
+    deps = [
+        ":falcon_reference",
+        ":sampler_vectors",
+        "//sig_frx/lattice/falcon:arith",
+        "//sig_frx/lattice/falcon:fft",
+        "//sig_frx/lattice/falcon:keygen",
+        "//sig_frx/lattice/falcon:sampler",
+        "//sig_frx/lattice/falcon:sign",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)

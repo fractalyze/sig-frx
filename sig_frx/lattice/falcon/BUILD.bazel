@@ -143,3 +143,20 @@ py_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+# Algorithm 11's fast Fourier sampler — the tree walk signing draws its lattice
+# point with. Host code following `:sampler`, which it calls at every leaf.
+py_library(
+    name = "sign",
+    srcs = [
+        "__init__.py",
+        "sign.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":fft",
+        ":keygen",
+        ":sampler",
+        requirement("numpy"),
+    ],
+)
