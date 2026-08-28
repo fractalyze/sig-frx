@@ -90,23 +90,19 @@ so nothing here loops over instances: a Python loop over a batch axis is the
 shape this repo calls a bug. Each operation is one call over the whole batch —
 two in `choose`, two in `transfer`, one in `receive`.
 
-What that buys is **not** a device scalar multiplication, and it is worth
-saying so because the obvious reading is wrong. `secp.multiple` places on a
-batch-size threshold, but three of the five calls here multiply
-`_CURVE.generator`, which is `[1]`-shaped and therefore below any threshold at
-every `B`; and whether the other two place depends on the point dtypes being
-admitted, which `secp` probes per wheel and which is false at the pinned one.
-So the curve arithmetic is host work, and no value in this module ever changes
-namespace.
+Two of those five reach the device and three cannot, and which is which is a
+property of the operand rather than of `B`. `secp.multiple` places on a batch
+size, and three of the calls multiply `_CURVE.generator`, which is `[1]`-shaped
+and below the threshold at every `B` — so `choose` is host work whatever it is
+handed, however large the batch. The two that multiply a real point batch do
+place at this size: `transfer`'s at `2B = 256` and `receive`'s at `B = 128`.
 
-The one thing that does reach the device is the square root inside `_decode`:
-`secp.lift_x_to_parity` places its *base-field* batch, which is admitted where
-the point types are not, and the fused ladder compiles **once per distinct
-batch shape**. That is what the batch is really for here, and it is why both
-`transfer` and `receive` decode the wire as one flat `2B` rather than a `[B]`
-per slot — two shapes would compile the ladder twice and pay for it twice.
-Measured on the CPU leg, the suite runs 13.8 s against 23.4 s when `transfer`
-split its decode by slot.
+The dominant cost is neither of those. It is the square root inside the wire
+decode: `secp.lift_x_to_parity` places its base-field batch, and the fused
+ladder compiles **once per distinct batch shape**, so a run that decodes two
+shapes pays for it twice. That is why `transfer` and `receive` both decode the
+wire as one flat `2B` rather than a `[B]` per slot — measured on the CPU leg,
+the suite runs 13.8 s that way against 23.4 s when `transfer` split its decode.
 
 The Python loop that remains is inside `hash_to_curve_batch`, over
 `map_to_curve`'s host integer arithmetic — the namespace that arithmetic is
