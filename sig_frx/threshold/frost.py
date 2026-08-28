@@ -136,29 +136,52 @@ def _require_nonzero_scalar(group: PrimeOrderGroup, identifier: int) -> None:
         raise ValueError("a participant identifier is a NonZeroScalar")
 
 
+@dataclass(frozen=True)
+class _Decoded:
+    """A validated commitment list: two element batches and their order.
+
+    `identifiers` is what indexes the batches — the list is sorted and
+    duplicate-free by the time one of these exists, so a participant's
+    position is `identifiers.index(...)` and nothing else needs storing. The
+    batches stay batches rather than being split into per-participant entries,
+    because splitting them is what the seam's shape exists to avoid.
+    """
+
+    identifiers: list[int]
+    hidings: Any
+    bindings: Any
+
+    def entry(self, identifier: int) -> tuple[Any, Any]:
+        """One participant's `(hiding, binding)`, still batch-shaped at `B = 1`."""
+        index = self.identifiers.index(identifier)
+        return self.hidings[index : index + 1], self.bindings[index : index + 1]
+
+
 def _validated_commitment_list(
     group: PrimeOrderGroup, commitment_list: list[Commitment]
-) -> dict[int, tuple[Any, Any]]:
+) -> tuple[list[int], Any, Any]:
     """§5.2's MUST-checks on the list: sorted, distinct, deserializable.
 
-    Returns the decoded `(hiding, binding)` elements by identifier — the
-    validation already paid for the decompression, and the group commitment
-    consumes the same points, so decoding them a second time would be pure
-    waste.
+    Returns `(identifiers, hidings, bindings)` — the two element batches
+    positionally aligned with the identifiers, which the list being sorted
+    already makes a stable order. The validation paid for the decompression
+    and the group commitment consumes the same points, so decoding them a
+    second time would be pure waste.
+
+    Both batches decode in one call each rather than one per participant. The
+    list is the batch axis this protocol has, and it is the only one — which
+    is why `t` participants cost two seam calls here and not `2t`.
     """
     identifiers = [c.identifier for c in commitment_list]
     if identifiers != sorted(identifiers) or len(set(identifiers)) != len(identifiers):
         raise ValueError(
             "a commitment list is sorted by identifier, without duplicates"
         )
-    decoded = {}
-    for entry in commitment_list:
-        _require_nonzero_scalar(group, entry.identifier)
-        decoded[entry.identifier] = (
-            group.deserialize_element(entry.hiding),
-            group.deserialize_element(entry.binding),
-        )
-    return decoded
+    for identifier in identifiers:
+        _require_nonzero_scalar(group, identifier)
+    hidings = group.deserialize_elements([c.hiding for c in commitment_list])
+    bindings = group.deserialize_elements([c.binding for c in commitment_list])
+    return identifiers, hidings, bindings
 
 
 def encode_group_commitment_list(
@@ -191,19 +214,22 @@ def compute_binding_factors(
 
 def compute_group_commitment(
     group: PrimeOrderGroup,
-    decoded_commitments: dict[int, tuple[Any, Any]],
+    identifiers: list[int],
+    hidings: Any,
+    bindings: Any,
     binding_factors: dict[int, int],
 ) -> Any:
-    """RFC 9591 §4.5: `Σ (D_i + [ρ_i]E_i)`, over already-decoded elements."""
-    group_commitment = group.identity_element()
-    for identifier, (hiding, binding_commitment) in decoded_commitments.items():
-        binding = group.element_scalar_mult(
-            binding_commitment, binding_factors[identifier]
-        )
-        group_commitment = group.element_add(
-            group.element_add(group_commitment, hiding), binding
-        )
-    return group_commitment
+    """RFC 9591 §4.5: `Σ (D_i + [ρ_i]E_i)`, over already-decoded elements.
+
+    The sum is a reduction over the participant axis, not an accumulator
+    threaded through a loop. That is the whole difference between this and the
+    formula as written: `Σ` is what the standard says, and a fold was only
+    ever how a per-element seam could spell it.
+    """
+    rho = [binding_factors[identifier] for identifier in identifiers]
+    return group.sum_elements(
+        group.elements_add(hidings, group.elements_scalar_mult(bindings, rho))
+    )
 
 
 def compute_challenge(
@@ -241,21 +267,27 @@ def _signing_context(
     commitment_list: list[Commitment],
     group_public_key: bytes,
     message: bytes,
-) -> tuple[dict[int, tuple[Any, Any]], dict[int, int], Any, int]:
+) -> tuple[_Decoded, dict[int, int], Any, int]:
     """The round-two prologue all three §5 surfaces share.
 
     Validate the list, bind, commit, challenge — one home so the surfaces
     cannot drift on the MUST-checks; `aggregate` ignores the challenge.
     """
-    decoded = _validated_commitment_list(cs, commitment_list)
+    identifiers, hidings, bindings = _validated_commitment_list(cs, commitment_list)
     binding_factors = compute_binding_factors(
         cs, group_public_key, commitment_list, message
     )
-    group_commitment = compute_group_commitment(cs, decoded, binding_factors)
-    challenge = compute_challenge(
-        cs, cs.serialize_element(group_commitment), group_public_key, message
+    group_commitment = compute_group_commitment(
+        cs, identifiers, hidings, bindings, binding_factors
     )
-    return decoded, binding_factors, group_commitment, challenge
+    (encoded,) = cs.serialize_elements(group_commitment)
+    challenge = compute_challenge(cs, encoded, group_public_key, message)
+    return (
+        _Decoded(identifiers, hidings, bindings),
+        binding_factors,
+        group_commitment,
+        challenge,
+    )
 
 
 def sign_share(
@@ -311,7 +343,8 @@ def aggregate(
     scalars = [cs.deserialize_scalar(share) for share in signature_shares]
     field = cs.scalar_field
     z = int(sum(field(scalar) for scalar in scalars))
-    return cs.serialize_element(group_commitment) + cs.serialize_scalar(z)
+    (encoded,) = cs.serialize_elements(group_commitment)
+    return encoded + cs.serialize_scalar(z)
 
 
 def verify_share(
@@ -336,19 +369,20 @@ def verify_share(
     share = cs.deserialize_scalar(signature_share)
     participants = [c.identifier for c in commitment_list]
     lambda_i = derive_interpolating_value(cs, participants, identifier)
-    hiding, binding_commitment = decoded[identifier]
-    commitment_share = cs.element_add(
+    hiding, binding_commitment = decoded.entry(identifier)
+    commitment_share = cs.elements_add(
         hiding,
-        cs.element_scalar_mult(binding_commitment, binding_factors[identifier]),
+        cs.elements_scalar_mult(binding_commitment, [binding_factors[identifier]]),
     )
-    expected = cs.element_add(
+    expected = cs.elements_add(
         commitment_share,
-        cs.element_scalar_mult(
-            cs.deserialize_element(participant_public_key),
-            int(cs.scalar_field(challenge) * lambda_i),
+        cs.elements_scalar_mult(
+            cs.deserialize_elements([participant_public_key]),
+            [int(cs.scalar_field(challenge) * lambda_i)],
         ),
     )
-    return cs.scalar_base_mult(share) == cs.serialize_element(expected)
+    (encoded,) = cs.serialize_elements(expected)
+    return cs.scalar_base_mult(share) == encoded
 
 
 def polynomial_evaluate(group: PrimeOrderGroup, x: int, coefficients: list[int]) -> int:
@@ -398,14 +432,12 @@ def vss_verify(
     """RFC 9591 Appendix C.2: `[f(i)]B = Σ i^j·φ_j` — a participant's check."""
     _require_nonzero_scalar(group, identifier)
     field = group.scalar_field
-    power = field(1)
-    expected = group.identity_element()
-    for coefficient_commitment in commitment:
-        expected = group.element_add(
-            expected,
-            group.element_scalar_mult(
-                group.deserialize_element(coefficient_commitment), int(power)
-            ),
-        )
+    powers, power = [], field(1)
+    for _ in commitment:
+        powers.append(int(power))
         power = power * identifier
-    return group.scalar_base_mult(share) == group.serialize_element(expected)
+    expected = group.sum_elements(
+        group.elements_scalar_mult(group.deserialize_elements(commitment), powers)
+    )
+    (encoded,) = group.serialize_elements(expected)
+    return group.scalar_base_mult(share) == encoded

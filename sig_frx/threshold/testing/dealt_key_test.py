@@ -143,13 +143,13 @@ class DealtKeyTest(absltest.TestCase):
     def _uncompressed(self, element: bytes) -> bytes:
         """A serialized group element in the ECDSA seam's own key encoding.
 
-        In through `deserialize_element`, so the commitment's encoding is
+        In through `deserialize_elements`, so the commitment's encoding is
         validated rather than re-parsed here, and out through
         `secp.uncompressed_rows` — the same writer `Ecdsa.keygen` uses, so the
         comparison lands on that encoder instead of on a second transcription
         of SEC 1 §2.3.3.
         """
-        point = self.group.deserialize_element(element)
+        point = self.group.deserialize_elements([element])
         row = secp.uncompressed_rows(secp.SECP256K1, point, np.array([True]))
         return row[0].tobytes()
 

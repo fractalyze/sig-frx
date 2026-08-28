@@ -15,6 +15,14 @@ What travels, and how:
 - **Elements travel serialized** (`bytes`), in whatever encoding the group's
   standard fixes; the decoded form is the implementation's own and crosses
   this seam only between an operation and its own arithmetic.
+- **Elements travel in batches.** Every element-typed member carries a leading
+  axis, and a single element is `B = 1` — the same rule
+  [`signature.py`](../signature.py) states for verification, for the same
+  reason. It is not a performance hint: `secp`'s placement threshold is a batch
+  size, so a seam that handed one element at a time could never reach the
+  device no matter how much work its caller had. A protocol whose round really
+  is one element pays nothing for the axis, because the threshold keeps it on
+  the host; one with hundreds gets the device without asking.
 - **Scalars travel as Python integers** in `[0, order)`. `scalar_field` is
   the matching zk_dtypes field, which is what a formula core runs on;
   integers are what the wire and the identifiers are written in.
@@ -26,10 +34,15 @@ What travels, and how:
   deriving the integer from the dtype (`classical/secp.py`,
   `classical/edwards.py`), and a hand-written group here has to hold it
   itself.
-- **`deserialize_element` validates and raises.** On-curve, canonical, not
+- **`deserialize_elements` validates and raises.** On-curve, canonical, not
   the identity — whatever the group's encoding rules require. A MUST-abort
   condition in the protocol above surfaces as a `ValueError` here rather than
-  as a silently wrong point.
+  as a silently wrong point. One bad entry rejects the call: a batch is one
+  protocol message, and half of one is not a thing a caller can act on.
+- **There is no identity member.** It existed to seed a Python loop that
+  accumulated elements one at a time, and `sum_elements` is that loop as a
+  reduction, so the seed has no remaining caller. A group that needs the
+  identity for its own arithmetic still has it — internally, where it belongs.
 
 The scalar-field dtype's constructor and its int operands **abort at `order`
 and above instead of reducing** (fractalyze/zk_dtypes#179), while negative
@@ -43,6 +56,7 @@ Implementations are ordinary objects: no base class, no registration.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -63,12 +77,12 @@ class PrimeOrderGroup(Protocol):
 
     def scalar_base_mult(self, scalar: int) -> bytes: ...
 
-    def deserialize_element(self, data: bytes) -> Any: ...
+    def deserialize_elements(self, data: Sequence[bytes]) -> Any: ...
 
-    def element_add(self, left: Any, right: Any) -> Any: ...
+    def elements_add(self, left: Any, right: Any) -> Any: ...
 
-    def element_scalar_mult(self, element: Any, scalar: int) -> Any: ...
+    def elements_scalar_mult(self, elements: Any, scalars: Sequence[int]) -> Any: ...
 
-    def identity_element(self) -> Any: ...
+    def sum_elements(self, elements: Any) -> Any: ...
 
-    def serialize_element(self, element: Any) -> bytes: ...
+    def serialize_elements(self, elements: Any) -> list[bytes]: ...
