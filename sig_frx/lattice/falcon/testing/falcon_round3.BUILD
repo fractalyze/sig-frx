@@ -49,3 +49,18 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
         1024,
     ]
 ]
+
+# §4.4's per-call sampler traces, which the archive ships beside the
+# implementation. Every `SamplerZ` call of one signature at each degree, with
+# the randomness it consumed and its intermediates — the centre, `ccs`, each
+# `BaseSampler` draw and its result, and `ApproxExp`'s output before the
+# comparison. That is what lets a sampler failure land on the algorithm that
+# caused it rather than on a wrong signature ten steps later.
+filegroup(
+    name = "sampler_vectors",
+    srcs = [
+        "Supporting_Documentation/additional/test-vector-sampler-falcon1024.txt",
+        "Supporting_Documentation/additional/test-vector-sampler-falcon512.txt",
+    ],
+    visibility = ["//visibility:public"],
+)

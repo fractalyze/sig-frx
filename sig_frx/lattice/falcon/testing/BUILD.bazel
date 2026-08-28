@@ -323,3 +323,33 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# The archive's per-call sampler traces, parsed. `data` reaches the same
+# `falcon_round3` archive the interop oracle compiles, so the sampler and the
+# oracle are pinned by one sha256.
+py_library(
+    name = "sampler_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "sampler_vectors.py",
+    ],
+    data = ["@falcon_round3//:sampler_vectors"],
+    deps = ["@rules_python//python/runfiles"],
+)
+
+# Pure host arithmetic over the published traces: parsing two files and running
+# 3 072 sampler calls. Not a traced target, so neither leg compiles anything,
+# which is why the two are within a second of each other rather than the usual
+# multiple — 2.0 s on the CPU leg against 0.9 s on the GPU one, both from CI.
+# `small` covers the deciding leg at 3% of its 60 s.
+py_test(
+    name = "sampler_test",
+    size = "small",
+    srcs = ["sampler_test.py"],
+    deps = [
+        ":sampler_vectors",
+        "//sig_frx/lattice/falcon:sampler",
+        requirement("absl_py"),
+    ],
+)

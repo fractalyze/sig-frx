@@ -125,3 +125,21 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# §4.4's discrete Gaussian sampler — Algorithms 12 to 15, which signing rounds
+# each coordinate of the lattice point with.
+#
+# Depends on nothing, not even `//sig_frx:arrays`, and that is the design rather
+# than an omission: the rejection loop's trip count is secret-dependent, so it
+# has no traced form here (see the module docstring and
+# ../../../docs/reference/security.md). Host `float` and `int` are the whole of
+# it, which also means it is gated against the published traces before any of
+# the tree walk above it exists.
+py_library(
+    name = "sampler",
+    srcs = [
+        "__init__.py",
+        "sampler.py",
+    ],
+    visibility = ["//visibility:public"],
+)
