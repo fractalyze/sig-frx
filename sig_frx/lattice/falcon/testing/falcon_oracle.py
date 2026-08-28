@@ -40,12 +40,21 @@ was accepted. So the corruption goes where the criterion means it to go, into
 the key material, rather than into the header byte where a rejection would
 prove only that a constant was compared.
 
-## Only `crypto_sign` is bound
+## Both halves are bound, and they answer different questions
 
-`crypto_sign_open` is the other half of the API and is deliberately absent:
-nothing here produces a signature for it to judge yet, and a binding no test
-exercises is a binding nobody knows works. It arrives with #27, which is the
-issue that gains a producer.
+`crypto_sign` is the reference producing something this repo checks; `accepts`
+is the reference checking something this repo produced. The second is the
+direction §3.9 cannot be gated on a published value at all — signing is
+randomized, so there is no signature to reproduce — and it is what
+`testing.md` means by naming an implementation as the authority.
+
+`crypto_sign_open` reads §3.11.6's aggregate, so [`accepts`](#accepts) runs the
+regrouping [`sign`](#sign) runs forwards in reverse. **The padding has to come
+off.** `crypto_sign_open` requires `comp_decode` to consume exactly `siglen − 1`
+bytes, so a `sbytelen`-padded `enc_s` is refused whatever it contains — and
+stripping trailing zeros recovers the unpadded form exactly rather than
+approximately, because the last coefficient's unary terminator is a set bit and
+everything after it is Algorithm 18's padding.
 """
 
 from __future__ import annotations
@@ -89,7 +98,65 @@ def _library(degree: int) -> ctypes.CDLL:
         ctypes.c_char_p,
     ]
     library.crypto_sign.restype = ctypes.c_int
+    library.crypto_sign_open.argtypes = [
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_ulonglong),
+        ctypes.c_char_p,
+        ctypes.c_ulonglong,
+        ctypes.c_char_p,
+    ]
+    library.crypto_sign_open.restype = ctypes.c_int
     return library
+
+
+def accepts(public_key: bytes, message: bytes, signature: bytes, degree: int) -> bool:
+    """Whether the reference implementation verifies `signature` — its verdict.
+
+    `signature` is the seam's §3.11.3 form; `public_key` is §3.11.4's. A
+    non-zero return covers every way `crypto_sign_open` declines and is not
+    decomposed, because the question a caller asks here is whether another
+    implementation accepts these bytes, not why it did not.
+
+    A header byte the seam would not have produced raises instead of answering
+    false: that is a caller handing over something other than a Falcon
+    signature, and spending the oracle's rejection on it would read as the
+    signer being wrong.
+    """
+    params = falcon.PARAMETER_SETS[f"Falcon-{degree}"]
+    if len(public_key) != params.public_key_size:
+        raise ValueError(
+            f"a Falcon-{degree} public key is {params.public_key_size} bytes, "
+            f"got {len(public_key)}"
+        )
+    if len(signature) < 1 + encoding.SALT_SIZE:
+        raise ValueError(
+            f"a signature is at least {1 + encoding.SALT_SIZE} bytes, got "
+            f"{len(signature)}"
+        )
+    if signature[0] != encoding.degree_header(degree, 0x3):
+        raise ValueError(
+            f"header byte 0x{signature[0]:02x} is not degree-{degree} §3.11.3's "
+            f"0x{encoding.degree_header(degree, 0x3):02x}"
+        )
+    salt = signature[1 : 1 + encoding.SALT_SIZE]
+    compressed = signature[1 + encoding.SALT_SIZE :].rstrip(b"\x00")
+    nonceless = bytes([encoding.degree_header(degree, 0x2)]) + compressed
+    aggregate = (
+        len(nonceless).to_bytes(_SIGLEN_SIZE, "big") + salt + message + nonceless
+    )
+
+    recovered = ctypes.create_string_buffer(max(len(aggregate), 1))
+    recovered_len = ctypes.c_ulonglong(len(aggregate))
+    return (
+        _library(degree).crypto_sign_open(
+            recovered,
+            ctypes.byref(recovered_len),
+            aggregate,
+            len(aggregate),
+            public_key,
+        )
+        == 0
+    )
 
 
 def sign(

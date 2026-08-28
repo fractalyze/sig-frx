@@ -1,25 +1,31 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""A key generated here, put to the reference implementation.
+"""This repo and the reference implementation, each judging the other's output.
 
 The published vectors gate one direction — upstream's key and signature checked
-by this repo's `verify`, in `falcon_kat_test`. This is the other one, and it is
-the half a transcription cannot supply: `falcon_reference.py` is a reading of
-the specification by the same author as the code it checks, so agreement with
-it cannot catch a misreading they share. The C here was written by the people
-who designed the scheme.
+by this repo's `verify`, in `falcon_kat_test`. Both directions here are the
+other one, and they are the half a transcription cannot supply:
+`falcon_reference.py` is a reading of the specification by the same author as
+the code it checks, so agreement with it cannot catch a misreading they share.
+The C here was written by the people who designed the scheme.
 
-The claim is one round trip. The reference signs a message with a key this repo
-generated; this repo's `verify` accepts that signature under the matching public
-key. Nothing but a key the reference loaded and used could produce a signature
-that verifies, so the acceptance is carried by a check that the published
-vectors already gate — and the rejections are asserted on both sides, which is
-what stops the pass from being what an oracle stuck at "yes" would also produce.
+**A key generated here, signed by the reference.** The reference signs a message
+with a key this repo generated; this repo's `verify` accepts that signature
+under the matching public key. Nothing but a key the reference loaded and used
+could produce a signature that verifies, so the acceptance is carried by a check
+the published vectors already gate. `Falcon-512` only, which is a budget
+decision rather than a coverage one — the same one `falcon_test` records: a key
+costs about 45 s at `Falcon-512` against 140 s at `Falcon-1024`, and the degree
+does not change what any of those cases assert.
 
-**`Falcon-512` only, and that is a budget decision rather than a coverage one**
-— the same one `falcon_test` records: a key costs about 45 s at `Falcon-512`
-against 140 s at `Falcon-1024`, and the degree does not change what any case
-here asserts. The oracle is built at both degrees, since a shared object that
-is never loaded is one nobody knows links.
+**A signature produced here, judged by the reference.** The direction with no
+published value to compare against at all: §3.9 draws a salt per signature, so
+two correct implementations disagree by construction and there is nothing to
+reproduce. It runs at both degrees, because it needs no key generation — the
+published secret key is the input, which also keeps the signer the only thing
+under test.
+
+The rejections are asserted on both sides throughout. Without them a pass is
+what an oracle stuck at "yes" would also produce.
 """
 
 from __future__ import annotations
@@ -27,15 +33,19 @@ from __future__ import annotations
 import numpy as np
 from absl.testing import absltest
 
-from sig_frx.lattice.falcon import falcon
+from sig_frx.lattice.falcon import encoding, falcon
 from sig_frx.lattice.falcon.testing import falcon_oracle
-from sig_frx.lattice.falcon.testing.falcon_vectors import SECRET_KEYS
+from sig_frx.lattice.falcon.testing.falcon_vectors import SECRET_KEYS, VECTORS
 
 _DEGREE = 512
 _MESSAGE = b"a key generated here, signed by the reference implementation"
 # Any fixed value: the scheme is `keygen(seed)`, so this names the key pair the
 # whole case runs on, and a failure reproduces from it.
 _SEED = bytes(range(32))
+
+# The public key of the same published record each `SECRET_KEYS` entry is the
+# secret half of, so an acceptance is evidence about that pair.
+PUBLIC_KEYS = {name: cases[0].public_key for name, cases in VECTORS.items()}
 
 
 class ReferenceAcceptsAGeneratedKeyTest(absltest.TestCase):
@@ -131,6 +141,78 @@ class ReferenceAcceptsAGeneratedKeyTest(absltest.TestCase):
         self.assertIsNone(
             falcon_oracle.sign(bytes(params.secret_key_size), _MESSAGE, 1024)
         )
+
+
+class ReferenceAcceptsASignatureProducedHereTest(absltest.TestCase):
+    """sig-frx#27's acceptance criterion, and the direction with no published value.
+
+    Everything above is the reference producing something this repo checks. This
+    is the reverse: a signature **produced here** put to the reference
+    implementation. Signing is randomized, so §3.9 publishes no signature to
+    reproduce — a second implementation's verdict is what stands in for one, and
+    it is a stronger claim than this repo's own `verify` could make about its own
+    output.
+
+    Run under the *published* secret key rather than a generated one, so a
+    failure separates cleanly: the key is upstream's and correctly loaded — the
+    class above proves the reference itself signs with it — leaving the signer as
+    the only thing under test.
+    """
+
+    def _signature(self, degree: int, seed: int) -> bytes:
+        scheme = falcon.named(f"Falcon-{degree}")
+        secret = np.frombuffer(
+            bytes.fromhex(SECRET_KEYS[f"Falcon-{degree}"]), dtype=np.uint8
+        )
+        return bytes(
+            np.asarray(
+                scheme.sign(
+                    secret,
+                    np.frombuffer(_MESSAGE, dtype=np.uint8),
+                    randomness=np.full(scheme.seed_size, seed, dtype=np.uint8),
+                ),
+                dtype=np.uint8,
+            )
+        )
+
+    def test_the_reference_accepts_it(self) -> None:
+        """At both degrees, and over several salts: the loop is what varies.
+
+        Three seeds rather than one because signing draws a salt per signature
+        and rejects on a norm bound — so consecutive seeds take different trip
+        counts through Algorithm 10, and a signer that only worked when the
+        first draw was accepted would pass a single case.
+        """
+        for degree in (512, 1024):
+            published = bytes.fromhex(PUBLIC_KEYS[f"Falcon-{degree}"])
+            for seed in (0, 1, 2):
+                with self.subTest(degree=degree, seed=seed):
+                    signature = self._signature(degree, seed)
+                    self.assertLen(
+                        signature,
+                        falcon.PARAMETER_SETS[f"Falcon-{degree}"].signature_size,
+                    )
+                    self.assertTrue(
+                        falcon_oracle.accepts(published, _MESSAGE, signature, degree),
+                        "the reference rejects a signature produced here",
+                    )
+
+    def test_the_reference_refuses_it_once_a_byte_moves(self) -> None:
+        """The negative half, without which the case above gates nothing.
+
+        An oracle stuck at accept would pass it while the signer emitted
+        anything at all. Byte 41 is the first compressed coefficient, so the
+        salt still matches and the challenge is unchanged — a wrong signature
+        for the right target rather than a malformed one.
+        """
+        for degree in (512, 1024):
+            with self.subTest(degree=degree):
+                published = bytes.fromhex(PUBLIC_KEYS[f"Falcon-{degree}"])
+                moved = bytearray(self._signature(degree, 0))
+                moved[1 + encoding.SALT_SIZE] ^= 0x01
+                self.assertFalse(
+                    falcon_oracle.accepts(published, _MESSAGE, bytes(moved), degree)
+                )
 
 
 if __name__ == "__main__":

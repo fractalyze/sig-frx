@@ -20,11 +20,18 @@ The rest is the seam rather than the standard: the derived sizes against Table
 application context Falcon does not define, and Algorithm 4 producing a key pair
 that Algorithm 6's equation and Algorithm 5's bounds both hold for.
 
-Falcon still has no `sign` here, so there is no round trip to lean on — which is
-the right way round: a scheme verifying its own signatures is the
-self-consistency `testing.md` says is not evidence. `keygen` is checked against
-the standard's own conditions on its output instead, and against nothing it
-produced itself.
+Signing lands here as a round trip, and the round trip is deliberately **not**
+what gates it. A scheme verifying its own signatures is the self-consistency
+`testing.md` says is not evidence, so what the cases below lean on instead is
+that the key is *upstream's*: the signature is produced under the published
+secret key and checked under the public key of the same published record, which
+makes an acceptance evidence about that pair rather than about this
+implementation agreeing with itself. The reference implementation's own verdict
+on those signatures is [`falcon_interop_test`](falcon_interop_test.py)'s, since
+it needs the compiled oracle.
+
+`keygen` is checked the same way round — against the standard's own conditions
+on its output, and against nothing it produced itself.
 """
 
 from __future__ import annotations
@@ -38,7 +45,7 @@ from absl.testing import absltest, parameterized
 
 from sig_frx.lattice.falcon import encoding, falcon, keygen
 from sig_frx.lattice.falcon.testing import falcon_reference as ref
-from sig_frx.lattice.falcon.testing.falcon_vectors import VECTORS
+from sig_frx.lattice.falcon.testing.falcon_vectors import SECRET_KEYS, VECTORS
 from sig_frx.signature import Signature
 
 _PARAMETER_SETS = ref.parameter_cases()
@@ -388,14 +395,117 @@ class Keygen(parameterized.TestCase):
         self.assertNotIsInstance(raised.exception, NotImplementedError)
 
 
-class NotYetImplemented(absltest.TestCase):
-    """The seam method #27 fills in, refusing loudly until then."""
+class Signing(parameterized.TestCase):
+    """Algorithm 10, over the reference implementation's own published key.
 
-    def test_signing_raises(self) -> None:
+    Signing under a key upstream generated rather than one this repo produced
+    is the deliberate part: it separates "the signer works" from "the signer
+    and the key generator agree with each other", which a round trip over a
+    locally generated key cannot. The public key is the same record's, so an
+    accepted signature is evidence about both halves of the published pair.
+
+    That the reference *also* accepts these signatures is
+    [`falcon_interop_test`](falcon_interop_test.py)'s — it needs the compiled
+    oracle, and this file needs no C.
+    """
+
+    @parameterized.parameters("Falcon-512", "Falcon-1024")
+    def test_a_signature_verifies_under_the_published_public_key(
+        self, name: str
+    ) -> None:
+        scheme = falcon.named(name)
+        secret = bytes.fromhex(SECRET_KEYS[name])
+        public = bytes.fromhex(VECTORS[name][0].public_key)
+        message = b"sig-frx falcon signing"
+        signature = scheme.sign(
+            np.frombuffer(secret, dtype=np.uint8),
+            np.frombuffer(message, dtype=np.uint8),
+            randomness=np.arange(scheme.seed_size, dtype=np.uint8),
+        )
+        self.assertLen(np.asarray(signature), scheme.signature_max_size)
+        verdict = scheme.verify(
+            fnp.asarray(np.frombuffer(public, dtype=np.uint8))[None, :],
+            fnp.asarray(np.frombuffer(message, dtype=np.uint8))[None, :],
+            fnp.asarray(signature)[None, :],
+        )
+        self.assertTrue(bool(np.asarray(verdict)[0]))
+
+    @parameterized.parameters("Falcon-512", "Falcon-1024")
+    def test_a_moved_bit_is_rejected(self, name: str) -> None:
+        """The half that says the acceptance above is about these bytes."""
+        scheme = falcon.named(name)
+        secret = bytes.fromhex(SECRET_KEYS[name])
+        public = bytes.fromhex(VECTORS[name][0].public_key)
+        message = b"sig-frx falcon signing"
+        signature = np.asarray(
+            scheme.sign(
+                np.frombuffer(secret, dtype=np.uint8),
+                np.frombuffer(message, dtype=np.uint8),
+                randomness=np.arange(scheme.seed_size, dtype=np.uint8),
+            )
+        ).copy()
+        # Past the header and the salt, so this lands in the compressed body
+        # rather than in a field the decoder rejects for its own reasons.
+        signature[1 + encoding.SALT_SIZE] ^= 0x01
+        verdict = scheme.verify(
+            fnp.asarray(np.frombuffer(public, dtype=np.uint8))[None, :],
+            fnp.asarray(np.frombuffer(message, dtype=np.uint8))[None, :],
+            fnp.asarray(signature)[None, :],
+        )
+        self.assertFalse(bool(np.asarray(verdict)[0]))
+
+    def test_two_seeds_give_two_signatures(self) -> None:
+        """§3.9 draws a salt per signature, so signing is not a function of the key.
+
+        Pinned because a signer that ignored its seed would pass every other
+        case in this file — the signature would still verify, and it would still
+        interoperate.
+        """
         scheme = falcon.named("Falcon-512")
-        with self.assertRaises(NotImplementedError) as raised:
-            scheme.sign(np.zeros(1281, dtype=np.uint8), np.zeros(4, np.uint8))
-        self.assertIn("sig-frx#", str(raised.exception))
+        secret = np.frombuffer(bytes.fromhex(SECRET_KEYS["Falcon-512"]), dtype=np.uint8)
+        message = np.frombuffer(b"sig-frx falcon signing", dtype=np.uint8)
+        first = scheme.sign(
+            secret, message, randomness=np.zeros(scheme.seed_size, dtype=np.uint8)
+        )
+        second = scheme.sign(
+            secret, message, randomness=np.ones(scheme.seed_size, dtype=np.uint8)
+        )
+        self.assertFalse(np.array_equal(np.asarray(first), np.asarray(second)))
+
+    def test_one_seed_gives_one_signature(self) -> None:
+        """And the same seed reproduces it, which is what makes a bug findable."""
+        scheme = falcon.named("Falcon-512")
+        secret = np.frombuffer(bytes.fromhex(SECRET_KEYS["Falcon-512"]), dtype=np.uint8)
+        message = np.frombuffer(b"sig-frx falcon signing", dtype=np.uint8)
+        seed = np.arange(scheme.seed_size, dtype=np.uint8)
+        np.testing.assert_array_equal(
+            np.asarray(scheme.sign(secret, message, randomness=seed)),
+            np.asarray(scheme.sign(secret, message, randomness=seed)),
+        )
+
+    def test_signing_refuses_what_it_cannot_treat_as_a_verdict(self) -> None:
+        """A caller mistake raises where a malformed *signature* returns false.
+
+        `verify` answers `False` for a wrong-length input because that is a
+        verdict the standard defines. Nothing downstream of `sign` has a `False`
+        to return, so the same class of mistake has to raise here.
+        """
+        scheme = falcon.named("Falcon-512")
+        secret = np.frombuffer(bytes.fromhex(SECRET_KEYS["Falcon-512"]), dtype=np.uint8)
+        message = np.frombuffer(b"m", dtype=np.uint8)
+        seed = np.zeros(scheme.seed_size, dtype=np.uint8)
+        with self.assertRaisesRegex(ValueError, "randomized"):
+            scheme.sign(secret, message)
+        with self.assertRaisesRegex(ValueError, "seed"):
+            scheme.sign(secret, message, randomness=np.zeros(8, dtype=np.uint8))
+        with self.assertRaisesRegex(ValueError, "secret key is"):
+            scheme.sign(
+                np.zeros(scheme.secret_key_size, dtype=np.uint8),
+                message,
+                randomness=seed,
+            )
+        with self.assertRaisesRegex(ValueError, "bytes, got shape"):
+            scheme.sign(secret[:-1], message, randomness=seed)
 
 
 if __name__ == "__main__":

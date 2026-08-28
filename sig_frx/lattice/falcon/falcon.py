@@ -14,8 +14,8 @@ which is why it lands ahead of the operations that produce what it checks.
 **Key generation is here and signing is not.** Both work over `Q[x]/(x^n + 1)`
 in the complex domain rather than in `Z_q`, and the machinery for that lives in
 [`keygen.py`](keygen.py); what this file adds is Algorithm 4 — the restart loop
-around Algorithm 5, and the two encodings a key pair leaves as. `sign` raises
-until [#27](https://github.com/fractalyze/sig-frx/issues/27) lands.
+around Algorithm 5 — and Algorithm 10, the signing loop over the sampler in
+[`sign.py`](sign.py).
 
 The two operations sit on opposite sides of this repo's namespace rule and it is
 worth saying why once: `verify` is traced and batch-first because that is the
@@ -112,6 +112,7 @@ different call here.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from math import isqrt
 from typing import TYPE_CHECKING, Any
@@ -127,8 +128,9 @@ from sig_frx import context as context_rules
 from sig_frx.batch import require_batch
 from sig_frx.hashes import shake256
 from sig_frx.lattice import rejection
-from sig_frx.lattice.falcon import arith, encoding, keygen
+from sig_frx.lattice.falcon import arith, encoding, fft, keygen
 from sig_frx.lattice.falcon.arith import Q
+from sig_frx.lattice.falcon.sign import signature_polynomial
 from sig_frx.signature import Signature
 
 # Algorithm 3 line 1: `k = ⌊2^16/q⌋`, and a 16-bit draw is kept when it lands
@@ -172,6 +174,11 @@ class FalconParams:
     n: int  # ring degree, `deg(ϕ)`
     squared_norm_bound: int  # `⌊β²⌋`, the largest accepted `‖(s1, s2)‖²`
     signature_size: int  # `sbytelen`, the padded signature length
+    # `σ`, the width Algorithm 4 line 7 divides into each tree leaf. It is on
+    # the record rather than in `keygen` because it is the one quantity there
+    # that depends on which set is being generated — `GRAM_SCHMIDT_BOUND` does
+    # not — and signing needs it to rebuild the tree a loaded key does not carry.
+    sigma: float
 
     def __post_init__(self) -> None:
         if self.n not in arith.DEGREES:
@@ -221,11 +228,13 @@ PARAMETER_SETS: dict[str, FalconParams] = {
         n=512,
         squared_norm_bound=34034726,
         signature_size=666,
+        sigma=165.736617183,
     ),
     "Falcon-1024": FalconParams(
         n=1024,
         squared_norm_bound=70265242,
         signature_size=1280,
+        sigma=168.388571447,
     ),
 }
 
@@ -278,6 +287,69 @@ def _draw_bytes(seed: bytes, attempt: int) -> np.ndarray:
     label = attempt.to_bytes(_ATTEMPT_LABEL_BYTES, "big")
     digest = hashlib.shake_256(seed + label).digest(keygen.ATTEMPT_BYTES)
     return np.frombuffer(digest, dtype=np.uint8)
+
+
+# Algorithm 10 line 11 draws again when `Compress` overflows the space a
+# signature leaves. §3.11.3 sizes `sbytelen` so that is rare, and Falcon states
+# no rate for it, so it takes the same conservative one-in-two reading the norm
+# rejection does in [`sign.py`](sign.py).
+_MAX_ENCODE_ATTEMPTS = rejection.budget(1, (1, 2), 1)
+
+# Domain separators for the two things one signing seed has to produce. They are
+# distinct labels rather than one long squeeze so the salt cannot be recovered
+# from the sampler's stream or the reverse, and so a retry can draw a fresh
+# stream without moving the salt — Algorithm 10 line 1 is outside its loop.
+_SALT_LABEL = b"\x00"
+_STREAM_LABEL = b"\x01"
+
+# How much of the sampler's stream is squeezed at a time. Signing consumes about
+# 11 bytes per `SamplerZ` call and makes `2n` of them, so one block covers a
+# Falcon-512 signature outright and the refill below is the tail.
+_STREAM_BLOCK = 16384
+
+
+def _salt(seed: bytes) -> np.ndarray:
+    """§3.9 line 1's `r`, expanded from the caller's seed rather than drawn.
+
+    The seam does not draw randomness ([`signature.py`](../../signature.py)),
+    and Falcon fixes no map from a seed to a salt — so this is a choice, made
+    the same way `keygen`'s is: a labelled SHAKE over the seed.
+    """
+    return np.frombuffer(
+        hashlib.shake_256(seed + _SALT_LABEL).digest(encoding.SALT_SIZE),
+        dtype=np.uint8,
+    )
+
+
+def _sampler_stream(seed: bytes, attempt: int) -> Callable[[int], bytes]:
+    """The byte source one signing attempt's `SamplerZ` calls read from.
+
+    Unbounded by construction: the sampler's consumption is a rejection rate,
+    so no fixed squeeze is long enough and a source that ran out would surface
+    as a wrong signature rather than as an error. Blocks are labelled by
+    `attempt` so a retry after `Compress` returns `⊥` reads a stream sharing no
+    prefix with the one that failed.
+
+    `hashlib` rather than [`hashes.shake256`](../../hashes.py) for the reason
+    [`_draw_bytes`](#_draw_bytes) records: this is host code with no tracer to
+    satisfy, and a device squeeze is sized into the program.
+    """
+    pending = bytearray()
+    block = 0
+
+    def draw(count: int) -> bytes:
+        nonlocal block
+        while len(pending) < count:
+            label = (
+                _STREAM_LABEL + attempt.to_bytes(4, "big") + block.to_bytes(4, "big")
+            )
+            pending.extend(hashlib.shake_256(seed + label).digest(_STREAM_BLOCK))
+            block += 1
+        drawn = bytes(pending[:count])
+        del pending[:count]
+        return drawn
+
+    return draw
 
 
 def _within_bound(values: ArrayLike, bound: int) -> Any:
@@ -406,15 +478,95 @@ class Falcon:
         randomness: ArrayLike | None = None,
         context: ArrayLike | None = None,
     ) -> Array:
-        """§3.9's `Sign` — not yet implemented.
+        """Algorithm 10 — `header ‖ r ‖ enc_s`, zero-padded to `sbytelen`.
 
-        ffSampling and the discrete Gaussian sampler are
-        [#27](https://github.com/fractalyze/sig-frx/issues/27), gated on the
-        same FFT.
+        **Concrete, like `keygen` and for one more reason.** Both loops here
+        have data-dependent trip counts, and the sampler underneath makes `2n`
+        scalar calls with a rejection loop of its own
+        ([`sampler.py`](sampler.py)). Signing is not the path the seam's
+        batch-first rule is about — `verify` is.
+
+        **`randomness` is a seed, not the salt.** Signing needs two things: the
+        40-byte `r` of line 1, and a stream of unbounded length for the sampler,
+        whose consumption is a rejection rate rather than a size. A caller
+        cannot supply the second as a fixed array, so both are expanded from one
+        seed under distinct labels. That the seam refuses to draw it here is the
+        point — an implicit draw is what stops a scheme being reproducible.
+
+        **It does not reproduce the published signatures**, for the reason
+        `keygen` does not reproduce the published keys: the expansion above is
+        this implementation's choice, and matching NIST's would mean
+        transcribing its AES-256-CTR-DRBG. What gates signing instead is that
+        the reference implementation accepts what comes out
+        ([`falcon_oracle`](testing/falcon_oracle.py)), which is the interop
+        `testing.md` asks for when a standard publishes no vectors of its own.
+
+        **The tree is rebuilt per call.** §3.11.5 encodes `f`, `g` and `F` and
+        nothing else, so `B̂` and the ffLDL tree are not in the key — Algorithm
+        4 lines 3-7 are deliberately not run at generation time. A deployment
+        signing repeatedly under one key would hoist this; the seam has nowhere
+        to put it, and that is a surface below the seam rather than a shape
+        change here.
         """
-        raise NotImplementedError(
-            "Falcon signing is sig-frx#27, gated on the FFT in #178; "
-            "verification is independent of it and is implemented"
+        context_rules.require_empty(context, "Falcon (FN-DSA)")
+        params, n = self.params, self.params.n
+        if randomness is None:
+            raise ValueError(
+                "Falcon signing is randomized (§3.9 draws a salt per signature), "
+                f"so it needs `randomness` — a {self.seed_size}-byte seed"
+            )
+        drawn = np.asarray(randomness, dtype=np.uint8).reshape(-1)
+        if drawn.shape != (self.seed_size,):
+            raise ValueError(
+                f"signing takes a {self.seed_size}-byte seed, got "
+                f"{drawn.shape[0]} bytes"
+            )
+        seed = drawn.tobytes()
+
+        material = np.asarray(secret_key, dtype=np.uint8)
+        if material.shape != (params.secret_key_size,):
+            raise ValueError(
+                f"a Falcon-{n} secret key is {params.secret_key_size} bytes, got "
+                f"shape {tuple(material.shape)}"
+            )
+        # A malformed key is the caller's mistake rather than a verdict: nothing
+        # downstream of here has a `False` to return, unlike `verify`.
+        f, g, big_f, well_formed = encoding.sk_decode(material, n)
+        if not bool(np.asarray(well_formed)):
+            raise ValueError("the secret key is not a well-formed §3.11.5 encoding")
+        f, g, big_f = (np.asarray(p) for p in (f, g, big_f))
+        big_g = np.asarray(keygen.recover_g(f, g, big_f))
+        # Transformed once and shared: `gram` takes these four, and `target`
+        # inside the loop takes two of them.
+        transformed = tuple(
+            fft.fft(np.asarray(p, dtype=np.float64)) for p in (f, g, big_f, big_g)
+        )
+        tree = keygen.normalize(keygen.ffldl(*keygen.gram(*transformed)), params.sigma)
+
+        # Lines 1-2, outside the loop: a retry redraws the lattice point, not
+        # the salt, so the challenge it is sampled against does not move.
+        salt = _salt(seed)
+        challenge = np.asarray(
+            hash_to_point(
+                np.concatenate([salt, np.asarray(message, dtype=np.uint8).reshape(-1)]),
+                n,
+            )
+        )
+        for attempt in range(_MAX_ENCODE_ATTEMPTS):
+            s2 = signature_polynomial(
+                challenge,
+                transformed,
+                tree,
+                params.squared_norm_bound,
+                _sampler_stream(seed, attempt),
+            )
+            signature, encoded = encoding.sig_encode(salt, s2, n, params.signature_size)
+            if encoded:
+                return fnp.asarray(signature)
+        raise RuntimeError(
+            f"Compress refused {_MAX_ENCODE_ATTEMPTS} lattice points at degree "
+            f"{n}; sbytelen leaves enough room that this is a wrong encoder or a "
+            "wrong basis rather than an unlucky draw"
         )
 
     # -- verification ------------------------------------------------------

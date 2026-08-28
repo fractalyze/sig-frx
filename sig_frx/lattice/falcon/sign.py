@@ -1,5 +1,5 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""§3.9.2's fast Fourier sampler — Algorithm 11's walk of the Falcon tree.
+"""§3.9's signing arithmetic — Algorithm 11's tree walk, and Algorithm 10 over it.
 
 Signing needs a lattice point near a target `t`, and "near" has to mean *drawn
 from the right distribution* rather than *closest*: rounding each coordinate
@@ -34,6 +34,16 @@ path this repo claims (see
 numpy `complex128`, so `fft.split` and `fft.merge` need no precision scope —
 that scope exists for the traced path, where `float64` would silently narrow.
 
+## The loop above the walk
+
+[`signature_polynomial`](#signature_polynomial) is Algorithm 10 lines 3-9: the
+target, the walk, and the rejection that keeps only a point short enough to be a
+signature. What is *not* here is the salt, the challenge and the encoding —
+lines 1-2 and 10-12 — which live on the seam in [`falcon.py`](falcon.py),
+because they are where a signature stops being a lattice point and becomes
+bytes. The split is the same one `keygen` draws: the arithmetic is here and the
+expansion of a caller's seed is there.
+
 ## `split` is this repo's, and it is not the reference's
 
 `fft.split` pairs index `i` with `i + n/2` — a root with its negative — where
@@ -50,8 +60,21 @@ from typing import Any
 
 import numpy as np
 
-from sig_frx.lattice.falcon import fft, keygen, sampler
+from sig_frx.lattice import rejection
+from sig_frx.lattice.falcon import arith, fft, keygen, sampler
 from sig_frx.lattice.falcon.sampler import RandomBytes
+
+# Algorithm 10 line 8 rejects a point longer than the bound and draws again.
+# Falcon fixes no acceptance rate for it — the parameter sets are chosen so that
+# a correctly sampled point is short with overwhelming probability — so one in
+# two is the conservative reading, and the bound below is what
+# [`rejection.budget`](../rejection.py) makes of it: the fewest attempts whose
+# chance of producing nothing falls under the margin every loop here is sized
+# against. Reaching it means the sampler or the basis is wrong rather than that
+# the draw was unlucky, which is the same argument `Falcon.keygen` makes for
+# Algorithm 5's restart.
+_WORST_ACCEPTANCE = (1, 2)
+_MAX_ATTEMPTS = rejection.budget(1, _WORST_ACCEPTANCE, 1)
 
 
 def _leaf(
@@ -143,4 +166,68 @@ def ff_sampling(
         0,
         degree,
         randomness,
+    )
+
+
+def target(challenge: Any, f_hat: Any, big_f_hat: Any) -> tuple[Any, Any]:
+    """Algorithm 10 line 3 — `t = (FFT(c), FFT(0)) · B̂⁻¹`, in the transform domain.
+
+    `B̂⁻¹` is not formed: `det B = q` by the NTRU equation, so the inverse of
+    `[[g, −f], [G, −F]]` is `[[−F, f], [−G, g]]/q` and the row `(c, 0)` times it
+    is the two products below. Writing it out is what keeps the division a
+    single scalar `q` rather than a polynomial inversion.
+
+    The second component carries `+f` and the first `−F`, which is the pairing
+    that makes `s2` come out as the polynomial §3.11.3 compresses.
+    """
+    c_hat = fft.fft(np.asarray(challenge, dtype=np.float64))
+    return -(c_hat * big_f_hat) / arith.Q, (c_hat * f_hat) / arith.Q
+
+
+def signature_polynomial(
+    challenge: Any,
+    transformed: tuple[Any, Any, Any, Any],
+    tree: keygen.FalconTree,
+    squared_norm_bound: int,
+    randomness: RandomBytes,
+) -> Any:
+    """Algorithm 10 lines 3-9 — `s2`, resampled until the pair is short enough.
+
+    `transformed` is `(f̂, ĝ, F̂, Ĝ)`, which the caller already holds: the tree
+    was built from those four and `target` needs two of them, so transforming
+    here would be the third time.
+
+    **The norm is measured on the rounded integers, not on the transform.**
+    (3.8) allows the check in the FFT domain and the reference does not use it
+    either — line 9's `invFFT` has to happen regardless, and a float norm can
+    sit on the far side of the bound from the integers that are actually
+    encoded. What is compared is what a verifier will compare
+    ([`falcon._within_bound`](falcon.py)).
+
+    Only `s2` is returned. `s1` is not part of the signature — §3.11.3 encodes
+    `s2` alone and a verifier recovers `s1` as `c − s2·h` — but it is computed
+    here all the same, because the bound is on the pair and dropping it would
+    measure half a signature.
+    """
+    f_hat, g_hat, big_f_hat, big_g_hat = transformed
+    t0, t1 = target(challenge, f_hat, big_f_hat)
+    for _ in range(_MAX_ATTEMPTS):
+        z0, z1 = ff_sampling(t0, t1, tree, randomness)
+        # Line 7. `B = [[g, −f], [G, −F]]`, so `(t − z)B̂` is these two rows.
+        offset0, offset1 = t0 - z0, t1 - z1
+        first = offset0 * g_hat + offset1 * big_g_hat
+        second = -(offset0 * f_hat + offset1 * big_f_hat)
+        # Line 9, brought above the bound for the reason in the docstring.
+        s1 = np.rint(np.real(fft.ifft(first))).astype(np.int64)
+        s2 = np.rint(np.real(fft.ifft(second))).astype(np.int64)
+        # Line 8. `2n·(q/2)²` is 2^37 at Falcon-1024, so this needs a lane wider
+        # than the repo's 32 bits — which host `int64` is, and which is the
+        # other reason this operation never became traced code.
+        squared = int((s1 * s1).sum()) + int((s2 * s2).sum())
+        if squared <= squared_norm_bound:
+            return s2
+    raise RuntimeError(
+        f"Algorithm 10 drew {_MAX_ATTEMPTS} lattice points without one inside "
+        f"the norm bound {squared_norm_bound}; at the published parameters that "
+        "is not an unlucky draw but a wrong basis or a wrong sampler"
     )

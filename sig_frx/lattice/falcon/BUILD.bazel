@@ -114,7 +114,9 @@ py_library(
     deps = [
         ":arith",
         ":encoding",
+        ":fft",
         ":keygen",
+        ":sign",
         "//sig_frx:batch",
         "//sig_frx:context",
         "//sig_frx:hashes",
@@ -154,9 +156,11 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":arith",
         ":fft",
         ":keygen",
         ":sampler",
+        "//sig_frx/lattice:rejection",
         requirement("numpy"),
     ],
 )
