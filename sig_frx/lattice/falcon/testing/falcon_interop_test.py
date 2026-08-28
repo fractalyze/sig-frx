@@ -15,6 +15,11 @@ that verifies, so the acceptance is carried by a check that the published
 vectors already gate — and the rejections are asserted on both sides, which is
 what stops the pass from being what an oracle stuck at "yes" would also produce.
 
+Since `Falcon.sign` landed, the claim no longer has to be made backwards. The
+original direction is kept all the same — the reference signing with *our* key —
+because it exercises the key encoding against a consumer that is not this repo,
+which signing our own message does not.
+
 **`Falcon-512` only, and that is a budget decision rather than a coverage one**
 — the same one `falcon_test` records: a key costs about 45 s at `Falcon-512`
 against 140 s at `Falcon-1024`, and the degree does not change what any case
@@ -36,10 +41,18 @@ _MESSAGE = b"a key generated here, signed by the reference implementation"
 # Any fixed value: the scheme is `keygen(seed)`, so this names the key pair the
 # whole case runs on, and a failure reproduces from it.
 _SEED = bytes(range(32))
+# §3.9 draws this per signature; the seam takes it rather than drawing, so a
+# fixed value here names the signature the cases below run on.
+_SALT = bytes(range(40))
 
 
-class ReferenceAcceptsAGeneratedKeyTest(absltest.TestCase):
-    """The last acceptance criterion of sig-frx#26."""
+class ReferenceInteropTest(absltest.TestCase):
+    """Both directions across the seam, against the implementation that defines it.
+
+    #26's criterion is that a key generated here is accepted there, and #27's is
+    that a signature produced here is. They were one tool asked twice, and now
+    that `Falcon.sign` exists both are made the way the standard means them.
+    """
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -117,6 +130,69 @@ class ReferenceAcceptsAGeneratedKeyTest(absltest.TestCase):
                 self.assertIsNone(
                     falcon_oracle.sign(bytes(corrupted), _MESSAGE, _DEGREE)
                 )
+
+    def test_the_reference_accepts_a_signature_produced_here(self) -> None:
+        """#27's criterion, and the direction #26 could not reach.
+
+        `Falcon.sign` exists now, so the claim can be made the way the standard
+        means it: this repo signs, and the implementation the standard points at
+        accepts. Nothing about the signature is the reference's — the key, the
+        salt, the sampler's stream and the encoding are all this repo's.
+        """
+        signature = bytes(
+            np.asarray(
+                self.scheme.sign(
+                    np.frombuffer(self.secret_key, dtype=np.uint8),
+                    np.frombuffer(_MESSAGE, dtype=np.uint8),
+                    randomness=np.frombuffer(_SALT, dtype=np.uint8),
+                ),
+                dtype=np.uint8,
+            )
+        )
+        self.assertTrue(self._verify(signature), "our own verifier must accept first")
+        self.assertTrue(
+            falcon_oracle.verify(self.public_key, _MESSAGE, signature, _DEGREE)
+        )
+
+    def test_the_reference_refuses_a_corrupted_signature(self) -> None:
+        """The half that stops the case above from being an oracle stuck at yes.
+
+        Byte 41 is the first compressed coefficient, so the salt survives and
+        the reference hashes the same challenge — a wrong point rather than a
+        signature over another message.
+        """
+        signature = bytearray(
+            np.asarray(
+                self.scheme.sign(
+                    np.frombuffer(self.secret_key, dtype=np.uint8),
+                    np.frombuffer(_MESSAGE, dtype=np.uint8),
+                    randomness=np.frombuffer(_SALT, dtype=np.uint8),
+                ),
+                dtype=np.uint8,
+            )
+        )
+        self.assertTrue(
+            falcon_oracle.verify(self.public_key, _MESSAGE, bytes(signature), _DEGREE)
+        )
+        signature[41] ^= 0x01
+        self.assertFalse(
+            falcon_oracle.verify(self.public_key, _MESSAGE, bytes(signature), _DEGREE)
+        )
+
+    def test_the_reference_refuses_a_signature_over_another_message(self) -> None:
+        signature = bytes(
+            np.asarray(
+                self.scheme.sign(
+                    np.frombuffer(self.secret_key, dtype=np.uint8),
+                    np.frombuffer(_MESSAGE, dtype=np.uint8),
+                    randomness=np.frombuffer(_SALT, dtype=np.uint8),
+                ),
+                dtype=np.uint8,
+            )
+        )
+        self.assertFalse(
+            falcon_oracle.verify(self.public_key, _MESSAGE + b"!", signature, _DEGREE)
+        )
 
     def test_the_oracle_links_at_both_degrees(self) -> None:
         """A shared object that is never loaded is one nobody knows links.

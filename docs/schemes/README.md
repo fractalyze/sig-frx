@@ -7,6 +7,7 @@ readable.
 
 | Scheme | Where |
 | ------ | ----- |
+| Falcon (FN-DSA draft) | [`falcon.md`](falcon.md) |
 | FROST (RFC 9591) | [`frost.md`](frost.md) |
 | leanSig (generalized XMSS, leanSpec) | [`leansig.md`](leansig.md) |
 | ML-DSA (FIPS 204) | [`ml-dsa.md`](ml-dsa.md) |
