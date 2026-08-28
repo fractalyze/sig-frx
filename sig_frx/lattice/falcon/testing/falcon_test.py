@@ -36,6 +36,7 @@ on its output, and against nothing it produced itself.
 
 from __future__ import annotations
 
+import functools
 from typing import Any
 
 import frx
@@ -59,6 +60,7 @@ def _verdict(
     name: str,
     *,
     public_key: np.ndarray | None = None,
+    message: np.ndarray | None = None,
     signature: np.ndarray | None = None,
 ) -> bool:
     """The first published case of `name`, with the named input replaced.
@@ -69,7 +71,7 @@ def _verdict(
     vector = VECTORS[name][0]
     verdict = falcon.named(name).verify(
         (_bytes(vector.public_key) if public_key is None else public_key)[None, :],
-        _bytes(vector.message)[None, :],
+        (_bytes(vector.message) if message is None else message)[None, :],
         (_bytes(vector.signature) if signature is None else signature)[None, :],
     )
     return bool(np.asarray(verdict)[0])
@@ -78,6 +80,28 @@ def _verdict(
 def _signature(name: str) -> np.ndarray:
     """A writable copy — `frombuffer` hands back a read-only view."""
     return _bytes(VECTORS[name][0].signature).copy()
+
+
+_SIGNED_MESSAGE = np.frombuffer(b"sig-frx falcon signing", dtype=np.uint8)
+
+
+@functools.cache
+def _signed(name: str, seed: int | None = None) -> np.ndarray:
+    """A signature over `_SIGNED_MESSAGE` under the published secret key.
+
+    Cached because signing is `2n` scalar `sampler_z` calls in Python and the
+    cases below share inputs; `seed` names the draw so a failure reproduces, and
+    `None` is the default one every case that does not care about the salt uses.
+    """
+    scheme = falcon.named(name)
+    randomness = (
+        np.arange(scheme.seed_size, dtype=np.uint8)
+        if seed is None
+        else np.full(scheme.seed_size, seed, dtype=np.uint8)
+    )
+    return np.asarray(
+        scheme.sign(_bytes(SECRET_KEYS[name]), _SIGNED_MESSAGE, randomness=randomness)
+    )
 
 
 class Sizes(parameterized.TestCase):
@@ -93,6 +117,10 @@ class Sizes(parameterized.TestCase):
         # reach — and a bound mistyped upward widens what Falcon accepts without
         # failing a single published vector.
         self.assertEqual(scheme.params.squared_norm_bound, params["squared_norm_bound"])
+        # And `sigma`, for the same reason and with a quieter failure: a typo
+        # here moves the sampled distribution without failing one published
+        # vector, since every signature still verifies and still interoperates.
+        self.assertEqual(scheme.params.sigma, params["sigma"])
 
     def test_an_unknown_parameter_set_is_refused(self) -> None:
         with self.assertRaises(ValueError):
@@ -413,46 +441,18 @@ class Signing(parameterized.TestCase):
     def test_a_signature_verifies_under_the_published_public_key(
         self, name: str
     ) -> None:
-        scheme = falcon.named(name)
-        secret = bytes.fromhex(SECRET_KEYS[name])
-        public = bytes.fromhex(VECTORS[name][0].public_key)
-        message = b"sig-frx falcon signing"
-        signature = scheme.sign(
-            np.frombuffer(secret, dtype=np.uint8),
-            np.frombuffer(message, dtype=np.uint8),
-            randomness=np.arange(scheme.seed_size, dtype=np.uint8),
-        )
-        self.assertLen(np.asarray(signature), scheme.signature_max_size)
-        verdict = scheme.verify(
-            fnp.asarray(np.frombuffer(public, dtype=np.uint8))[None, :],
-            fnp.asarray(np.frombuffer(message, dtype=np.uint8))[None, :],
-            fnp.asarray(signature)[None, :],
-        )
-        self.assertTrue(bool(np.asarray(verdict)[0]))
+        signature = _signed(name)
+        self.assertLen(signature, falcon.named(name).signature_max_size)
+        self.assertTrue(_verdict(name, message=_SIGNED_MESSAGE, signature=signature))
 
     @parameterized.parameters("Falcon-512", "Falcon-1024")
     def test_a_moved_bit_is_rejected(self, name: str) -> None:
         """The half that says the acceptance above is about these bytes."""
-        scheme = falcon.named(name)
-        secret = bytes.fromhex(SECRET_KEYS[name])
-        public = bytes.fromhex(VECTORS[name][0].public_key)
-        message = b"sig-frx falcon signing"
-        signature = np.asarray(
-            scheme.sign(
-                np.frombuffer(secret, dtype=np.uint8),
-                np.frombuffer(message, dtype=np.uint8),
-                randomness=np.arange(scheme.seed_size, dtype=np.uint8),
-            )
-        ).copy()
+        moved = _signed(name).copy()
         # Past the header and the salt, so this lands in the compressed body
         # rather than in a field the decoder rejects for its own reasons.
-        signature[1 + encoding.SALT_SIZE] ^= 0x01
-        verdict = scheme.verify(
-            fnp.asarray(np.frombuffer(public, dtype=np.uint8))[None, :],
-            fnp.asarray(np.frombuffer(message, dtype=np.uint8))[None, :],
-            fnp.asarray(signature)[None, :],
-        )
-        self.assertFalse(bool(np.asarray(verdict)[0]))
+        moved[1 + encoding.SALT_SIZE] ^= 0x01
+        self.assertFalse(_verdict(name, message=_SIGNED_MESSAGE, signature=moved))
 
     def test_two_seeds_give_two_signatures(self) -> None:
         """§3.9 draws a salt per signature, so signing is not a function of the key.
@@ -461,26 +461,18 @@ class Signing(parameterized.TestCase):
         case in this file — the signature would still verify, and it would still
         interoperate.
         """
-        scheme = falcon.named("Falcon-512")
-        secret = np.frombuffer(bytes.fromhex(SECRET_KEYS["Falcon-512"]), dtype=np.uint8)
-        message = np.frombuffer(b"sig-frx falcon signing", dtype=np.uint8)
-        first = scheme.sign(
-            secret, message, randomness=np.zeros(scheme.seed_size, dtype=np.uint8)
+        self.assertFalse(
+            np.array_equal(_signed("Falcon-512", 0), _signed("Falcon-512", 1))
         )
-        second = scheme.sign(
-            secret, message, randomness=np.ones(scheme.seed_size, dtype=np.uint8)
-        )
-        self.assertFalse(np.array_equal(np.asarray(first), np.asarray(second)))
 
     def test_one_seed_gives_one_signature(self) -> None:
         """And the same seed reproduces it, which is what makes a bug findable."""
         scheme = falcon.named("Falcon-512")
-        secret = np.frombuffer(bytes.fromhex(SECRET_KEYS["Falcon-512"]), dtype=np.uint8)
-        message = np.frombuffer(b"sig-frx falcon signing", dtype=np.uint8)
-        seed = np.arange(scheme.seed_size, dtype=np.uint8)
+        secret = _bytes(SECRET_KEYS["Falcon-512"])
+        seed = np.zeros(scheme.seed_size, dtype=np.uint8)
         np.testing.assert_array_equal(
-            np.asarray(scheme.sign(secret, message, randomness=seed)),
-            np.asarray(scheme.sign(secret, message, randomness=seed)),
+            np.asarray(scheme.sign(secret, _SIGNED_MESSAGE, randomness=seed)),
+            np.asarray(scheme.sign(secret, _SIGNED_MESSAGE, randomness=seed)),
         )
 
     def test_signing_refuses_what_it_cannot_treat_as_a_verdict(self) -> None:
@@ -491,7 +483,7 @@ class Signing(parameterized.TestCase):
         to return, so the same class of mistake has to raise here.
         """
         scheme = falcon.named("Falcon-512")
-        secret = np.frombuffer(bytes.fromhex(SECRET_KEYS["Falcon-512"]), dtype=np.uint8)
+        secret = _bytes(SECRET_KEYS["Falcon-512"])
         message = np.frombuffer(b"m", dtype=np.uint8)
         seed = np.zeros(scheme.seed_size, dtype=np.uint8)
         with self.assertRaisesRegex(ValueError, "randomized"):

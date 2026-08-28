@@ -11,11 +11,12 @@ ordering pins ML-DSA needs ([`arith.py`](arith.py)).
 It is also, for most consumers, the only Falcon operation they will ever call,
 which is why it lands ahead of the operations that produce what it checks.
 
-**Key generation is here and signing is not.** Both work over `Q[x]/(x^n + 1)`
-in the complex domain rather than in `Z_q`, and the machinery for that lives in
-[`keygen.py`](keygen.py); what this file adds is Algorithm 4 — the restart loop
-around Algorithm 5 — and Algorithm 10, the signing loop over the sampler in
-[`sign.py`](sign.py).
+**Key generation and signing are both here, as their loops.** Both work over
+`Q[x]/(x^n + 1)` in the complex domain rather than in `Z_q`, and the arithmetic
+for that lives in [`keygen.py`](keygen.py) and [`sign.py`](sign.py); what this
+file adds is the two restart loops over them — Algorithm 4 around Algorithm 5,
+and Algorithm 10 around the fast Fourier sampler — plus the encodings a key pair
+and a signature leave as.
 
 The two operations sit on opposite sides of this repo's namespace rule and it is
 worth saying why once: `verify` is traced and batch-first because that is the
@@ -112,7 +113,6 @@ different call here.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
 from dataclasses import dataclass
 from math import isqrt
 from typing import TYPE_CHECKING, Any
@@ -128,9 +128,9 @@ from sig_frx import context as context_rules
 from sig_frx.batch import require_batch
 from sig_frx.hashes import shake256
 from sig_frx.lattice import rejection
-from sig_frx.lattice.falcon import arith, encoding, fft, keygen
+from sig_frx.lattice.falcon import arith, encoding, keygen, sign
 from sig_frx.lattice.falcon.arith import Q
-from sig_frx.lattice.falcon.sign import signature_polynomial
+from sig_frx.lattice.falcon.sampler import RandomBytes
 from sig_frx.signature import Signature
 
 # Algorithm 3 line 1: `k = ⌊2^16/q⌋`, and a 16-bit draw is kept when it lands
@@ -162,7 +162,7 @@ _NORM_BLOCK = 32
 
 @dataclass(frozen=True)
 class FalconParams:
-    """One column of Falcon Table 3.3 — the four values a parameter set fixes.
+    """One column of Falcon Table 3.3 — the values a parameter set fixes.
 
     `q` is shared by both sets and lives in [`arith.py`](arith.py). The key and
     signature sizes are derived rather than transcribed, because §3.11 states
@@ -266,6 +266,17 @@ def hash_to_point(message: ArrayLike, n: int) -> Any:
     return rejection.first_accepted(draws, accepted, n, "HashToPoint")[0] % np.uint32(Q)
 
 
+def _expand(seed: bytes, label: bytes, size: int) -> bytes:
+    """`size` bytes of `SHAKE256(seed ‖ label)` — every expansion in this file.
+
+    The label rides in the SHAKE **input** rather than in a longer squeeze, so
+    no two roles share a stream prefix. That property is what the labels are
+    for, and it holds only while they stay mutually prefix-free — which is why
+    they are declared together above rather than at their three call sites.
+    """
+    return hashlib.shake_256(seed + label).digest(size)
+
+
 def _draw_bytes(seed: bytes, attempt: int) -> np.ndarray:
     """One Algorithm 5 attempt's draw, expanded from `seed`.
 
@@ -285,15 +296,22 @@ def _draw_bytes(seed: bytes, attempt: int) -> np.ndarray:
     is a couple of thousand bytes and the caller is traced.
     """
     label = attempt.to_bytes(_ATTEMPT_LABEL_BYTES, "big")
-    digest = hashlib.shake_256(seed + label).digest(keygen.ATTEMPT_BYTES)
-    return np.frombuffer(digest, dtype=np.uint8)
+    return np.frombuffer(_expand(seed, label, keygen.ATTEMPT_BYTES), dtype=np.uint8)
 
 
-# Algorithm 10 line 11 draws again when `Compress` overflows the space a
-# signature leaves. §3.11.3 sizes `sbytelen` so that is rare, and Falcon states
-# no rate for it, so it takes the same conservative one-in-two reading the norm
-# rejection does in [`sign.py`](sign.py).
-_MAX_ENCODE_ATTEMPTS = rejection.budget(1, (1, 2), 1)
+# Algorithm 10 restarts at line 4 for either of two reasons: line 8 rejects a
+# point longer than the bound, and line 11 rejects one `Compress` cannot fit.
+# Falcon states no rate for either — the parameter sets and `sbytelen` are
+# chosen so both are rare — so one in two is the conservative reading, and the
+# bound below is what [`rejection.budget`](../rejection.py) makes of it.
+#
+# **One budget for both**, counting draws rather than causes. A bound on each
+# loop would multiply, and the product rather than either number would be what a
+# wrong basis costs before it raised — which is the opposite of what a budget is
+# for. Reaching this means the sampler, the basis or the encoder is wrong rather
+# than that the draw was unlucky, the same argument Algorithm 5's restart makes.
+_WORST_ACCEPTANCE = (1, 2)
+_MAX_SIGN_ATTEMPTS = rejection.budget(1, _WORST_ACCEPTANCE, 1)
 
 # Domain separators for the two things one signing seed has to produce. They are
 # distinct labels rather than one long squeeze so the salt cannot be recovered
@@ -301,10 +319,17 @@ _MAX_ENCODE_ATTEMPTS = rejection.budget(1, (1, 2), 1)
 # stream without moving the salt — Algorithm 10 line 1 is outside its loop.
 _SALT_LABEL = b"\x00"
 _STREAM_LABEL = b"\x01"
+# Fixed width, so the stream's `attempt ‖ block` suffix cannot be read as a
+# shorter label followed by data — which is what keeps the three roles' inputs
+# mutually prefix-free.
+_STREAM_LABEL_BYTES = 4
 
-# How much of the sampler's stream is squeezed at a time. Signing consumes about
-# 11 bytes per `SamplerZ` call and makes `2n` of them, so one block covers a
-# Falcon-512 signature outright and the refill below is the tail.
+# How much of the sampler's stream is squeezed at a time. `sampler_z` is called
+# `2n` times and consumes about 19 bytes per call — 11 per rejection iteration,
+# of which it averages under two — so a signature draws 19 KB at Falcon-512 and
+# 39 KB at Falcon-1024, and the refill below is the common case rather than a
+# tail. The size trades squeezes against waste and neither is measurable beside
+# the sampler itself; 16 KiB is two refills at the smaller degree.
 _STREAM_BLOCK = 16384
 
 
@@ -315,13 +340,10 @@ def _salt(seed: bytes) -> np.ndarray:
     and Falcon fixes no map from a seed to a salt — so this is a choice, made
     the same way `keygen`'s is: a labelled SHAKE over the seed.
     """
-    return np.frombuffer(
-        hashlib.shake_256(seed + _SALT_LABEL).digest(encoding.SALT_SIZE),
-        dtype=np.uint8,
-    )
+    return np.frombuffer(_expand(seed, _SALT_LABEL, encoding.SALT_SIZE), dtype=np.uint8)
 
 
-def _sampler_stream(seed: bytes, attempt: int) -> Callable[[int], bytes]:
+def _sampler_stream(seed: bytes, attempt: int) -> RandomBytes:
     """The byte source one signing attempt's `SamplerZ` calls read from.
 
     Unbounded by construction: the sampler's consumption is a rejection rate,
@@ -515,11 +537,11 @@ class Falcon:
                 "Falcon signing is randomized (§3.9 draws a salt per signature), "
                 f"so it needs `randomness` — a {self.seed_size}-byte seed"
             )
-        drawn = np.asarray(randomness, dtype=np.uint8).reshape(-1)
+        drawn = np.asarray(randomness, dtype=np.uint8)
         if drawn.shape != (self.seed_size,):
             raise ValueError(
-                f"signing takes a {self.seed_size}-byte seed, got "
-                f"{drawn.shape[0]} bytes"
+                f"signing takes a {self.seed_size}-byte seed, got shape "
+                f"{tuple(drawn.shape)}"
             )
         seed = drawn.tobytes()
 
@@ -534,14 +556,9 @@ class Falcon:
         f, g, big_f, well_formed = encoding.sk_decode(material, n)
         if not bool(np.asarray(well_formed)):
             raise ValueError("the secret key is not a well-formed §3.11.5 encoding")
-        f, g, big_f = (np.asarray(p) for p in (f, g, big_f))
-        big_g = np.asarray(keygen.recover_g(f, g, big_f))
-        # Transformed once and shared: `gram` takes these four, and `target`
-        # inside the loop takes two of them.
-        transformed = tuple(
-            fft.fft(np.asarray(p, dtype=np.float64)) for p in (f, g, big_f, big_g)
-        )
-        tree = keygen.normalize(keygen.ffldl(*keygen.gram(*transformed)), params.sigma)
+        # Algorithm 4 lines 3-7, which §3.11.5 does not carry and a loaded key
+        # therefore rebuilds. Once per call, above the loop.
+        basis = sign.signing_basis(f, g, big_f, params.sigma)
 
         # Lines 1-2, outside the loop: a retry redraws the lattice point, not
         # the salt, so the challenge it is sampled against does not move.
@@ -552,21 +569,22 @@ class Falcon:
                 n,
             )
         )
-        for attempt in range(_MAX_ENCODE_ATTEMPTS):
-            s2 = signature_polynomial(
-                challenge,
-                transformed,
-                tree,
-                params.squared_norm_bound,
-                _sampler_stream(seed, attempt),
+        # Lines 4-12. One loop with both of Algorithm 10's rejection exits, so
+        # a draw is counted once however it was refused.
+        for attempt in range(_MAX_SIGN_ATTEMPTS):
+            s2, squared_norm = sign.lattice_point(
+                challenge, basis, _sampler_stream(seed, attempt)
             )
+            if squared_norm > params.squared_norm_bound:
+                continue  # Line 8.
             signature, encoded = encoding.sig_encode(salt, s2, n, params.signature_size)
-            if encoded:
+            if encoded:  # Line 11.
                 return fnp.asarray(signature)
         raise RuntimeError(
-            f"Compress refused {_MAX_ENCODE_ATTEMPTS} lattice points at degree "
-            f"{n}; sbytelen leaves enough room that this is a wrong encoder or a "
-            "wrong basis rather than an unlucky draw"
+            f"Algorithm 10 drew {_MAX_SIGN_ATTEMPTS} lattice points at degree "
+            f"{n} without one that was both inside the norm bound and small "
+            "enough to encode; at the published parameters that is a wrong "
+            "basis, sampler or encoder rather than an unlucky draw"
         )
 
     # -- verification ------------------------------------------------------

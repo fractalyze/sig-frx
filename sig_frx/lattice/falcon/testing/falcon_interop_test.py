@@ -30,12 +30,14 @@ what an oracle stuck at "yes" would also produce.
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 from absl.testing import absltest
 
 from sig_frx.lattice.falcon import encoding, falcon
 from sig_frx.lattice.falcon.testing import falcon_oracle
-from sig_frx.lattice.falcon.testing.falcon_vectors import SECRET_KEYS, VECTORS
+from sig_frx.lattice.falcon.testing.falcon_vectors import PUBLIC_KEYS, SECRET_KEYS
 
 _DEGREE = 512
 _MESSAGE = b"a key generated here, signed by the reference implementation"
@@ -43,9 +45,29 @@ _MESSAGE = b"a key generated here, signed by the reference implementation"
 # whole case runs on, and a failure reproduces from it.
 _SEED = bytes(range(32))
 
-# The public key of the same published record each `SECRET_KEYS` entry is the
-# secret half of, so an acceptance is evidence about that pair.
-PUBLIC_KEYS = {name: cases[0].public_key for name, cases in VECTORS.items()}
+
+def _public_key(degree: int) -> bytes:
+    return bytes.fromhex(PUBLIC_KEYS[f"Falcon-{degree}"])
+
+
+@functools.cache
+def _signed(degree: int, seed: int) -> bytes:
+    """One signature under the published secret key, cached across cases.
+
+    Signing is `2n` scalar `sampler_z` calls in Python, and the rejection case
+    below re-checks a signature the acceptance case already produced.
+    """
+    scheme = falcon.named(f"Falcon-{degree}")
+    return bytes(
+        np.asarray(
+            scheme.sign(
+                np.frombuffer(bytes.fromhex(SECRET_KEYS[f"Falcon-{degree}"]), np.uint8),
+                np.frombuffer(_MESSAGE, dtype=np.uint8),
+                randomness=np.full(scheme.seed_size, seed, dtype=np.uint8),
+            ),
+            dtype=np.uint8,
+        )
+    )
 
 
 class ReferenceAcceptsAGeneratedKeyTest(absltest.TestCase):
@@ -159,22 +181,6 @@ class ReferenceAcceptsASignatureProducedHereTest(absltest.TestCase):
     the only thing under test.
     """
 
-    def _signature(self, degree: int, seed: int) -> bytes:
-        scheme = falcon.named(f"Falcon-{degree}")
-        secret = np.frombuffer(
-            bytes.fromhex(SECRET_KEYS[f"Falcon-{degree}"]), dtype=np.uint8
-        )
-        return bytes(
-            np.asarray(
-                scheme.sign(
-                    secret,
-                    np.frombuffer(_MESSAGE, dtype=np.uint8),
-                    randomness=np.full(scheme.seed_size, seed, dtype=np.uint8),
-                ),
-                dtype=np.uint8,
-            )
-        )
-
     def test_the_reference_accepts_it(self) -> None:
         """At both degrees, and over several salts: the loop is what varies.
 
@@ -184,10 +190,10 @@ class ReferenceAcceptsASignatureProducedHereTest(absltest.TestCase):
         first draw was accepted would pass a single case.
         """
         for degree in (512, 1024):
-            published = bytes.fromhex(PUBLIC_KEYS[f"Falcon-{degree}"])
+            published = _public_key(degree)
             for seed in (0, 1, 2):
                 with self.subTest(degree=degree, seed=seed):
-                    signature = self._signature(degree, seed)
+                    signature = _signed(degree, seed)
                     self.assertLen(
                         signature,
                         falcon.PARAMETER_SETS[f"Falcon-{degree}"].signature_size,
@@ -207,8 +213,8 @@ class ReferenceAcceptsASignatureProducedHereTest(absltest.TestCase):
         """
         for degree in (512, 1024):
             with self.subTest(degree=degree):
-                published = bytes.fromhex(PUBLIC_KEYS[f"Falcon-{degree}"])
-                moved = bytearray(self._signature(degree, 0))
+                published = _public_key(degree)
+                moved = bytearray(_signed(degree, 0))
                 moved[1 + encoding.SALT_SIZE] ^= 0x01
                 self.assertFalse(
                     falcon_oracle.accepts(published, _MESSAGE, bytes(moved), degree)

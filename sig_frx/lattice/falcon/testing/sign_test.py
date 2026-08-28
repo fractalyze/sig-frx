@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest import mock
 
 import numpy as np
 from absl.testing import absltest, parameterized
 
-from sig_frx.lattice.falcon import arith, fft, keygen, sampler, sign
+from sig_frx.lattice.falcon import sampler, sign
 from sig_frx.lattice.falcon.testing import falcon_reference, sampler_vectors
 
 _DEGREES = (512, 1024)
@@ -29,22 +30,23 @@ _DEGREES = (512, 1024)
 _SIGMA_TOLERANCE = 1e-11
 
 
-def _target(signed: sampler_vectors.Signature) -> tuple[np.ndarray, np.ndarray]:
-    """Algorithm 10 line 3 — `t = (FFT(c), FFT(0)) · B̂⁻¹`, written out."""
-    c = fft.fft(np.asarray(signed.hashed_message, dtype=np.float64))
-    f = fft.fft(np.asarray(signed.f, dtype=np.float64))
-    big_f = fft.fft(np.asarray(signed.big_f, dtype=np.float64))
-    return -(c * big_f) / arith.Q, (c * f) / arith.Q
+def _basis(signed: sampler_vectors.Signature, degree: int) -> sign.SigningBasis:
+    """The traced signature's own key, as signing loads it.
 
-
-def _tree(signed: sampler_vectors.Signature, degree: int) -> keygen.FalconTree:
-    """The Falcon tree of the traced signature's own key."""
-    transformed = [
-        fft.fft(np.asarray(p, dtype=np.float64))
-        for p in (signed.f, signed.g, signed.big_f, signed.big_g)
-    ]
+    Through the production `signing_basis` rather than rebuilt here: the four
+    transforms and the `gram → ffldl → normalize` composition are what the walk
+    below depends on, so a second spelling of them would be the thing under test
+    vouching for itself.
+    """
     sigma = falcon_reference.PARAMETER_SETS[f"Falcon-{degree}"]["sigma"]
-    return keygen.normalize(keygen.ffldl(*keygen.gram(*transformed)), sigma)
+    return sign.signing_basis(signed.f, signed.g, signed.big_f, sigma)
+
+
+def _target(
+    signed: sampler_vectors.Signature, basis: sign.SigningBasis
+) -> tuple[Any, Any]:
+    """Algorithm 10 line 3, through the production function it gates."""
+    return sign.target(signed.hashed_message, basis.f_hat, basis.big_f_hat)
 
 
 class FfSamplingTest(parameterized.TestCase):
@@ -70,7 +72,8 @@ class FfSamplingTest(parameterized.TestCase):
             return z
 
         with mock.patch.object(sign.sampler, "sampler_z", recording):
-            sign.ff_sampling(*_target(signed), _tree(signed, degree), stream)
+            basis = _basis(signed, degree)
+            sign.ff_sampling(*_target(signed, basis), basis.tree, stream)
 
         self.assertLen(seen, len(published))
         for index, (got, want) in enumerate(zip(seen, published)):
@@ -99,17 +102,13 @@ class FfSamplingTest(parameterized.TestCase):
         signed = sampler_vectors.signature(degree)
         published = sampler_vectors.calls(degree)
         stream = sampler_vectors.cursor(b"".join(c.randomness for c in published))
-        t0, t1 = _target(signed)
+        basis = _basis(signed, degree)
 
-        z0, z1 = sign.ff_sampling(t0, t1, _tree(signed, degree), stream)
-
-        f = fft.fft(np.asarray(signed.f, dtype=np.float64))
-        big_f = fft.fft(np.asarray(signed.big_f, dtype=np.float64))
-        # `B = [[g, −f], [G, −F]]`, so the second component of `(t − z)B̂` is
-        # `−((t0 − z0)·f + (t1 − z1)·F)`.
-        s2 = -((t0 - z0) * f + (t1 - z1) * big_f)
-        rounded = np.rint(np.real(fft.ifft(s2))).astype(np.int64)
-        np.testing.assert_array_equal(rounded, np.asarray(signed.signature_vector))
+        # Algorithm 10 lines 3-9 through the production path, which is what
+        # publishes a value to compare: the archive's `signature_vector` is the
+        # `s2` one draw produces from this key and this recorded randomness.
+        s2, _ = sign.lattice_point(signed.hashed_message, basis, stream)
+        np.testing.assert_array_equal(s2, np.asarray(signed.signature_vector))
 
 
 class SigmaConstantTest(parameterized.TestCase):

@@ -527,6 +527,19 @@ SECRET_KEYS: dict[str, str] = {
 }
 
 
+PUBLIC_KEYS: dict[str, str] = {
+    name: cases[0].public_key for name, cases in VECTORS.items()
+}
+"""The public half of the record each `SECRET_KEYS` entry is the secret half of.
+
+Derived rather than transcribed — it is already on the `Vector` — but named
+here so the two halves of one published pair are reached the same way. A test
+signing with `SECRET_KEYS[name]` and checking against `PUBLIC_KEYS[name]` is
+making a claim about that pair; spelling the public half as `VECTORS[name][0]`
+at the call site makes the same claim look like a lookup.
+"""
+
+
 def vectors(name: str) -> list[kat.KatVector]:
     """One parameter set's cases as the shared harness's record.
 

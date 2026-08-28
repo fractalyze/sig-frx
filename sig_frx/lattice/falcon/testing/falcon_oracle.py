@@ -10,15 +10,17 @@ published records and `falcon_kat_test` drives them. What it cannot cover is
 the reverse: a key generated *here* being accepted *there*. Only the C can say
 that, so this module compiles it and drives it.
 
-## What "accepted" is, given there is no signer yet
+## The two directions, and what each one carries
 
-`Falcon.sign` is [#27](https://github.com/fractalyze/sig-frx/issues/27), so
-"generate here, sign here, verify there" is not available. The reverse is, and
-it makes the same claim: the reference **signs** with a key generated here, and
-this repo's `verify` accepts the result under the matching public key. A
-signature that verifies could not have come from a key the reference refused to
-load — so one round trip carries the acceptance, and it lands on the verifier
-the published vectors already gate.
+The reference **signs** with a key generated here and this repo's `verify`
+accepts the result: a signature that verifies could not have come from a key the
+reference refused to load, so one round trip carries the acceptance and lands on
+the verifier the published vectors already gate.
+
+[`accepts`](#accepts) is the other direction — this repo signs and the reference
+judges — which is the one §3.9 leaves with nothing published to compare against,
+since a salt per signature means two correct implementations disagree by
+construction.
 
 ## What refuses a corrupted key, and why it is not the header byte
 
@@ -123,29 +125,29 @@ def accepts(public_key: bytes, message: bytes, signature: bytes, degree: int) ->
     signer being wrong.
     """
     params = falcon.PARAMETER_SETS[f"Falcon-{degree}"]
+    header = encoding.degree_header(degree, 0x3)
+    body = 1 + encoding.SALT_SIZE
     if len(public_key) != params.public_key_size:
         raise ValueError(
             f"a Falcon-{degree} public key is {params.public_key_size} bytes, "
             f"got {len(public_key)}"
         )
-    if len(signature) < 1 + encoding.SALT_SIZE:
-        raise ValueError(
-            f"a signature is at least {1 + encoding.SALT_SIZE} bytes, got "
-            f"{len(signature)}"
-        )
-    if signature[0] != encoding.degree_header(degree, 0x3):
+    if len(signature) < body:
+        raise ValueError(f"a signature is at least {body} bytes, got {len(signature)}")
+    if signature[0] != header:
         raise ValueError(
             f"header byte 0x{signature[0]:02x} is not degree-{degree} §3.11.3's "
-            f"0x{encoding.degree_header(degree, 0x3):02x}"
+            f"0x{header:02x}"
         )
-    salt = signature[1 : 1 + encoding.SALT_SIZE]
-    compressed = signature[1 + encoding.SALT_SIZE :].rstrip(b"\x00")
+    salt = signature[1:body]
+    compressed = signature[body:].rstrip(b"\x00")
     nonceless = bytes([encoding.degree_header(degree, 0x2)]) + compressed
     aggregate = (
         len(nonceless).to_bytes(_SIGLEN_SIZE, "big") + salt + message + nonceless
     )
 
-    recovered = ctypes.create_string_buffer(max(len(aggregate), 1))
+    # At least `2 + 40 + 1` bytes by the guards above, so no empty-buffer case.
+    recovered = ctypes.create_string_buffer(len(aggregate))
     recovered_len = ctypes.c_ulonglong(len(aggregate))
     return (
         _library(degree).crypto_sign_open(
