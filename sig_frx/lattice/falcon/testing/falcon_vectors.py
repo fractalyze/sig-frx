@@ -29,8 +29,10 @@ The NIST API packs a signed message as `siglen(2) ‖ r(40) ‖ M ‖ header(1) 
 enc_s`, with a **nonce-less** header of `0010nnnn` — the salt already appeared
 ahead of the message. The seam takes what §3.11.3 defines instead: `header(1) ‖
 r(40) ‖ enc_s`, header `0011nnnn`, zero-padded to `sbytelen`. So each record's
-signature is that regrouping of `sm`, which [`_signature`](#_signature)
-performs and asserts its way through.
+signature is that regrouping of `sm`, which
+[`falcon_reference.signature_from_aggregate`](falcon_reference.py) performs and
+asserts its way through — the same transform `falcon_oracle` runs to hand the
+reference's own output to the seam, held in one place so the two cannot drift.
 
 Regrouping bytes is not the same as inventing them: every byte is upstream's,
 and which field each lands in is what the two sections state. The padding is
@@ -41,9 +43,9 @@ unambiguous.
 coerced.** The NIST API's signature is variable-length and the KAT generator
 drives the raw signing call, which has no equivalent of Algorithm 10's restart
 on an over-long compression — so a record can exceed what the fixed-width form
-holds. Exactly one of the 200 does; [`UNENCODABLE`](#UNENCODABLE) names it and
-[`records`](#records) refuses to load a file whose set of such records differs
-from what is recorded there, so this cannot quietly become two.
+holds. Exactly one of the 200 does. [`unencodable`](#unencodable) reports which,
+and [`falcon_kat_test`](falcon_kat_test.py) pins the answer — the boundary is
+data, so the loader states it and a test asserts it.
 
 ## What the records carry, and the two things they deliberately do not
 
@@ -88,23 +90,12 @@ from typing import NamedTuple
 
 from python.runfiles import Runfiles
 
+from sig_frx.lattice.falcon.testing import falcon_reference
 from sig_frx.testing import kat
 
 _RUNFILES = Runfiles.Create()
 
 _PATH = "falcon_round3/KAT/falcon{}-KAT.rsp"
-
-# §3.11.6's `sm` layout, in bytes: the length prefix, then the salt.
-_SIGLEN_BYTES = 2
-_SALT_BYTES = 40
-
-# Table 3.3's degrees and the sizes §3.11 fixes for each — the published values
-# rather than this module's formulas, since checking a formula against itself
-# proves nothing.
-_SETS: dict[str, dict[str, int]] = {
-    "Falcon-512": {"degree": 512, "signature_size": 666},
-    "Falcon-1024": {"degree": 1024, "signature_size": 1280},
-}
 
 
 class Record(NamedTuple):
@@ -141,70 +132,16 @@ def _parse(text: str) -> list[dict[str, str]]:
     return blocks
 
 
-def _signature(sm: bytes, message: bytes, name: str) -> bytes | None:
-    """§3.11.6's `sm` regrouped into the §3.11.3 signature the seam takes.
-
-    `None` when the record has no §3.11.3 encoding at all — see
-    [`UNENCODABLE`](#UNENCODABLE). Every other check here is a claim about the
-    two sections agreeing, and each would fire on a set that parsed but meant
-    something else: a wrong offset yields a plausible-looking byte string that
-    rejects everything, which is indistinguishable from a broken verifier.
-    """
-    degree = _SETS[name]["degree"]
-    logn = degree.bit_length() - 1
-    siglen = int.from_bytes(sm[:_SIGLEN_BYTES], "big")
-
-    salt_end = _SIGLEN_BYTES + _SALT_BYTES
-    salt = sm[_SIGLEN_BYTES:salt_end]
-    body_start = salt_end + len(message)
-    if sm[salt_end:body_start] != message:
-        raise ValueError(f"{name}: `sm` does not carry `msg` where §3.11.6 puts it")
-    nonceless = sm[body_start:]
-    if len(nonceless) != siglen:
-        raise ValueError(
-            f"{name}: `sm` tail is {len(nonceless)} bytes against a stated {siglen}"
-        )
-    if nonceless[0] != 0x20 | logn:
-        raise ValueError(
-            f"{name}: nonce-less header is {nonceless[0]:#04x}, "
-            f"not §3.11.6's {0x20 | logn:#04x}"
-        )
-
-    encoded = nonceless[1:]
-    padding = _SETS[name]["signature_size"] - 1 - _SALT_BYTES - len(encoded)
-    if padding < 0:
-        return None
-    return bytes([0x30 | logn]) + salt + encoded + b"\x00" * padding
-
-
-# Records the generator published that §3.11.3 cannot express, by `count`.
-#
-# The NIST API carries a *variable-length* signature and the reference's
-# `crypto_sign` writes whatever `enc_s` compresses to. §3.11.3's form is
-# **fixed** at `sbytelen`, so it holds at most `sbytelen - 41` bytes of `enc_s`,
-# and Algorithm 10's signing loop is what keeps a real signer inside that — it
-# restarts when the compression does not fit. The KAT generator drives the raw
-# API, which has no such loop, so a record can exceed the bound.
-#
-# Exactly one of the 200 published does. Falcon-1024 `count = 82` compresses to
-# 1240 bytes, needing 1281 against a `signature_size` of 1280; Falcon-512's
-# widest is 619, needing 660 against 666. It is dropped rather than truncated or
-# padded differently, because there is no §3.11.3 byte string that means it —
-# the seam's `verify` takes a `signature_max_size` array and this record does not
-# fit one. A test pins this set so that a source change cannot quietly grow it.
-UNENCODABLE: dict[str, tuple[int, ...]] = {
-    "Falcon-512": (),
-    "Falcon-1024": (82,),
-}
-
-
 @lru_cache(maxsize=None)
-def records(name: str) -> tuple[Record, ...]:
-    """Every published record at one parameter set that §3.11.3 can express.
+def _load(name: str) -> tuple[tuple[Record, ...], tuple[int, ...]]:
+    """`(expressible, unencodable)` — the split, and nothing decided about it.
 
-    In the file's own order, minus [`UNENCODABLE`](#UNENCODABLE).
+    The boundary is reported rather than adjudicated here, which is what
+    `ml_dsa_vectors.excluded_by_reason` does for the census its own gate pins.
+    A loader that raised on an unexpected boundary would fail every consumer,
+    including two benches, where the claim belongs to one test.
     """
-    path = _RUNFILES.Rlocation(_PATH.format(_SETS[name]["degree"]))
+    path = _RUNFILES.Rlocation(_PATH.format(falcon_reference.PARAMETER_SETS[name]["n"]))
     if path is None:  # pragma: no cover - a packaging error, not a case
         raise FileNotFoundError(
             f"the {name} known-answer file is missing from the runfiles; "
@@ -221,7 +158,9 @@ def records(name: str) -> tuple[Record, ...]:
         case = int(block["count"])
         if len(message) != int(block["mlen"]):
             raise ValueError(f"{name}: `msg` and `mlen` disagree at {case}")
-        signature = _signature(bytes.fromhex(block["sm"]), message, name)
+        signature = falcon_reference.signature_from_aggregate(
+            bytes.fromhex(block["sm"]), message, name
+        )
         if signature is None:
             dropped.append(case)
             continue
@@ -234,20 +173,31 @@ def records(name: str) -> tuple[Record, ...]:
                 signature=signature,
             )
         )
-    if tuple(dropped) != UNENCODABLE[name]:
-        raise ValueError(
-            f"{name}: records without a §3.11.3 encoding are {tuple(dropped)}, "
-            f"where {UNENCODABLE[name]} was recorded — the source changed"
-        )
-    return tuple(out)
+    return tuple(out), tuple(dropped)
+
+
+def records(name: str) -> tuple[Record, ...]:
+    """Every published record at one parameter set that §3.11.3 can express."""
+    return _load(name)[0]
+
+
+def unencodable(name: str) -> tuple[int, ...]:
+    """The `count`s §3.11.3 cannot express, which `falcon_kat_test` pins.
+
+    The NIST API's signature is variable-length and the generator drives the raw
+    signing call, which carries no equivalent of Algorithm 10's restart when
+    `enc_s` compresses longer than `sbytelen - 41`. So a published record can
+    exceed what the fixed-width form holds, and one of the 200 does.
+    """
+    return _load(name)[1]
 
 
 def secret_key(name: str) -> bytes:
     """The count-0 record's `sk` — §3.11.5's decoder gated on published bytes.
 
-    Beside the records rather than on them, for the reason the module docstring
-    gives: a `secret_key` on a `kat.KatVector` drives the shared harness into
-    signing that does not exist yet.
+    A `Record` carries this and a `kat.KatVector` does not: [`vectors`](#vectors)
+    is what withholds it, because the harness drives any vector carrying one into
+    a `sign` that does not exist yet.
     """
     return records(name)[0].secret_key
 
@@ -269,7 +219,8 @@ def vectors(name: str, limit: int | None) -> list[kat.KatVector]:
     point — a moved bit is evidence only against something that verified before
     it moved.
     """
-    chosen = records(name)[:limit] if limit is not None else records(name)
+    # `seq[:None]` is the whole sequence, so `None` needs no branch.
+    chosen = records(name)[:limit]
     return [
         kat.KatVector(
             case_id=f"falcon-round3 KAT {name} count={record.case}",

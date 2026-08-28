@@ -407,17 +407,17 @@ def _block(name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     Filtered to one message length first, the way `compaction_bench` filters
     them: a batch carries one static length and the KAT messages do not all
-    share one.
+    share one. The generator gives every record a distinct `mlen`, so today the
+    filter keeps exactly one and the batch is that signature tiled — see
+    `--instances`.
+
+    Takes `records` rather than `vectors`: this wants bytes, and a `Record`'s
+    fields are non-optional where a `kat.KatVector`'s are, which is what the
+    three-way `is not None` filter here used to be for.
     """
-    whole = [
-        vector
-        for vector in falcon_vectors.vectors(name, limit=None)
-        if vector.public_key is not None
-        and vector.message is not None
-        and vector.signature is not None
-    ]
-    length = len(whole[0].message or b"")
-    chosen = [vector for vector in whole if len(vector.message or b"") == length]
+    whole = falcon_vectors.records(name)
+    length = len(whole[0].message)
+    chosen = [record for record in whole if len(record.message) == length]
     parts = [
         np.stack(
             [

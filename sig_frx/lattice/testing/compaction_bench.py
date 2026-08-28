@@ -482,15 +482,9 @@ def _falcon_block(name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     keygen-only case can exist, and a verification bench has nothing to do with
     one.
     """
-    whole = [
-        vector
-        for vector in falcon_vectors.vectors(name, limit=None)
-        if vector.public_key is not None
-        and vector.message is not None
-        and vector.signature is not None
-    ]
-    length = len(whole[0].message or b"")
-    chosen = [vector for vector in whole if len(vector.message or b"") == length]
+    whole = falcon_vectors.records(name)
+    length = len(whole[0].message)
+    chosen = [record for record in whole if len(record.message) == length]
     parts = [
         np.stack(
             [

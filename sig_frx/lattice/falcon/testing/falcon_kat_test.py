@@ -54,11 +54,17 @@ from sig_frx.lattice.falcon.testing import falcon_reference as ref
 from sig_frx.lattice.falcon.testing import falcon_vectors
 from sig_frx.testing import kat
 
-# The vectors per degree this gate takes, out of the 100 published. Chosen to
-# hold the target inside its bucket on the leg that decides it — the value is
-# argued in //sig_frx/lattice/falcon/testing/BUILD.bazel next to the measurement
-# it comes from, since it is a budget rather than a property of Falcon.
-GATE_VECTORS = 4
+# The vectors per degree this gate takes, out of the 100 published. A budget
+# rather than a property of Falcon, so the measurement that chose it lives in
+# //sig_frx/lattice/falcon/testing/BUILD.bazel beside the bucket it has to fit.
+_GATE_VECTORS = 4
+
+# The published records §3.11.3 cannot express, pinned here rather than in the
+# loader: a boundary is a claim about the source, and `ml_dsa_kat_test`'s
+# `_EXCLUDED` states the same kind of claim in the same place. The loader
+# reports it and this asserts it, so a regenerated source fails one test rather
+# than every consumer of the fixture.
+_UNENCODABLE = {"Falcon-512": (), "Falcon-1024": (82,)}
 
 
 class FalconKatTest(parameterized.TestCase):
@@ -67,33 +73,33 @@ class FalconKatTest(parameterized.TestCase):
         self, name: str, **params: Any
     ) -> None:
         del params
-        kat.check(falcon.named(name), falcon_vectors.vectors(name, limit=GATE_VECTORS))
+        kat.check(falcon.named(name), falcon_vectors.vectors(name, limit=_GATE_VECTORS))
 
     @parameterized.parameters(*ref.parameter_cases())
     def test_the_bound_does_not_empty_the_gate(self, name: str, **params: Any) -> None:
         """A cap that ate the set would look exactly like a cheaper gate.
 
         So the count is asserted rather than assumed, and against the published
-        total rather than against itself: `GATE_VECTORS` records reach the
+        total rather than against itself: `_GATE_VECTORS` records reach the
         harness, they are the shortest ones, and there are more where they came
         from — which is what says the sweep next door has something left to do.
         """
         del params
         published = falcon_vectors.records(name)
-        gated = falcon_vectors.vectors(name, limit=GATE_VECTORS)
+        gated = falcon_vectors.vectors(name, limit=_GATE_VECTORS)
 
-        self.assertLen(gated, GATE_VECTORS)
-        self.assertLess(GATE_VECTORS, len(published), "the bound is not a bound")
+        self.assertLen(gated, _GATE_VECTORS)
+        self.assertLess(_GATE_VECTORS, len(published), "the bound is not a bound")
         self.assertEqual(
             [vector.case_id for vector in gated],
             [
-                f"falcon-round3 KAT {name} count={record.case}"
-                for record in published[:GATE_VECTORS]
+                vector.case_id
+                for vector in falcon_vectors.vectors(name, limit=None)[:_GATE_VECTORS]
             ],
         )
 
     @parameterized.parameters(*ref.parameter_cases())
-    def test_the_reference_accepts_every_gated_case(
+    def test_the_reference_accepts_every_published_case(
         self, name: str, **params: Any
     ) -> None:
         """The loaded set is evidence only if it reproduces upstream's verdict.
@@ -101,17 +107,33 @@ class FalconKatTest(parameterized.TestCase):
         These bytes were regrouped out of §3.11.6's aggregate into §3.11.3's
         padded signature, so this is what says the regrouping put every field
         where the standard says it goes — independently of the implementation
-        the case is meant to gate. It runs on the gated subset here and on all
-        100 in the sweep, because it is host arithmetic and cheap either way;
-        what makes it worth repeating there is that a later record could differ
-        in a way the first few do not.
+        the case is meant to gate.
+
+        Unbounded, where the harness pass above is not. `_GATE_VECTORS` bounds
+        *traced shapes* and this compiles nothing, so slicing it would apply a
+        budget to work the budget does not cover — and the sweep would then have
+        to carry a copy of this method to reach the rest.
         """
         del params
-        for record in falcon_vectors.records(name)[:GATE_VECTORS]:
+        for record in falcon_vectors.records(name):
             self.assertTrue(
                 ref.verify(record.public_key, record.message, record.signature, name),
                 f"count={record.case} is not accepted by the reference",
             )
+
+    @parameterized.parameters(*ref.parameter_cases())
+    def test_the_records_without_an_encoding_are_the_ones_stated(
+        self, name: str, **params: Any
+    ) -> None:
+        """§3.11.3 is fixed-width and the NIST API's signature is not.
+
+        The generator drives the raw signing call, which carries no equivalent
+        of Algorithm 10's restart when `enc_s` compresses past `sbytelen - 41`,
+        so a published record can have no §3.11.3 form at all. Pinning which
+        ones is what stops a regenerated source from quietly dropping more.
+        """
+        del params
+        self.assertEqual(falcon_vectors.unencodable(name), _UNENCODABLE[name])
 
 
 if __name__ == "__main__":

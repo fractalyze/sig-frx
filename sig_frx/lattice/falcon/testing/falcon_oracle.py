@@ -55,6 +55,7 @@ import functools
 import pathlib
 
 from sig_frx.lattice.falcon import encoding, falcon
+from sig_frx.lattice.falcon.testing import falcon_reference
 
 # `nist.c`'s aggregate: a big-endian signature length, then the salt, then the
 # message, then the nonce-less signature. §3.11.6 rather than §3.11.3, which is
@@ -130,25 +131,16 @@ def sign(
         return None
 
     aggregate = signed.raw[: signed_len.value]
-    body = _SIGLEN_SIZE + encoding.SALT_SIZE
-    salt = aggregate[_SIGLEN_SIZE:body]
-    nonceless = aggregate[body + len(message) :]
-    if len(nonceless) != int.from_bytes(aggregate[:_SIGLEN_SIZE], "big"):
-        raise AssertionError("the reference's own length field disagrees with `sm`")
-    if nonceless[0] != encoding.degree_header(degree, 0x2):
-        raise AssertionError(
-            f"expected §3.11.6's nonce-less header, got 0x{nonceless[0]:02x}"
-        )
-    compressed = nonceless[1:]
-    padding = params.signature_size - 1 - encoding.SALT_SIZE - len(compressed)
-    if padding < 0:  # pragma: no cover - upstream enforces `sbytelen` itself
-        raise AssertionError(
-            f"the reference produced {len(compressed)} compressed bytes, past "
-            f"what a Falcon-{degree} signature holds"
-        )
-    return (
-        bytes([encoding.degree_header(degree, 0x3)])
-        + salt
-        + compressed
-        + b"\x00" * padding
+    # The same regrouping the `.rsp` loader runs, held in one place: §3.11.6's
+    # aggregate is what both the reference's live output and its published
+    # records arrive as. `None` means the reference produced more compressed
+    # bytes than a signature holds, which upstream enforces for itself.
+    signature = falcon_reference.signature_from_aggregate(
+        aggregate, message, f"Falcon-{degree}"
     )
+    if signature is None:  # pragma: no cover - upstream enforces `sbytelen`
+        raise AssertionError(
+            f"the reference produced a signature past what a Falcon-{degree} "
+            "signature holds"
+        )
+    return signature
