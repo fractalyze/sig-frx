@@ -26,11 +26,90 @@ py_library(
         "harness.py",
     ],
     deps = [
+        "//sig_frx/hash:tweakable",
         "//sig_frx/hash/leansig:params",
         requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),
     ],
+)
+
+# What leanSpec's PRF derives, at both presets. Values only, like the other
+# vector libraries here; the provenance lives in the module.
+py_library(
+    name = "prf_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "prf_vectors.py",
+    ],
+)
+
+# The key pair and the six signatures one substituted seed produces. It reaches
+# `prf_vectors` for that seed rather than restating it, the way
+# `encoding_vectors` reaches `mode_vectors` — one value, one home.
+py_library(
+    name = "signing_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "signing_vectors.py",
+    ],
+    deps = [":prf_vectors"],
+)
+
+# Two SHAKE128 derivations and their refusals. Host-only — there is no traced
+# leg to compile, since hashing bytes is not array work — so this is the
+# cheapest suite here: 2.9 s on the CPU leg and 3.6 s on the GPU leg, a
+# nineteenth of the 60 s budget and well inside the half-a-budget rule in
+# ../../../../docs/reference/measurement.md.
+py_test(
+    name = "prf_test",
+    size = "small",
+    srcs = ["prf_test.py"],
+    deps = [
+        ":harness",
+        ":prf_vectors",
+        "//sig_frx/hash/leansig:prf",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The signer's whole surface: key generation, the sliding window, and six
+# signatures byte-compared against upstream. Every case builds a `TEST` key pair
+# — 256 slots of 4 chains, then 8 Merkle levels — and each sign case grinds a
+# block of randomness on top of that.
+#
+# `medium`, and the GPU leg is what decides it: 53.4 s there against 48.6 s on
+# the CPU leg. That is under `small`'s 60 s budget but at 89% of it, which the
+# half-a-budget rule in ../../../../docs/reference/measurement.md is exactly
+# about — a target sized that tightly flakes on a loaded executor. At `medium`
+# it is a sixth of the 300 s budget. A workstation run reads 20 s and argues for
+# `small`; per that page it is right about the local number and the local number
+# is not the one that decides.
+#
+# Both figures are post-cleanup and moved a lot: the suite was generating a
+# whole-lifetime key pair per case, which put the CPU leg at 74.3 s.
+py_test(
+    name = "signing_test",
+    size = "medium",
+    srcs = ["signing_test.py"],
+    deps = [
+        ":harness",
+        ":signing_vectors",
+        "//sig_frx/hash/leansig",
+        "//sig_frx/hash/leansig:encoding",
+        "//sig_frx/hash/leansig:field",
+        "//sig_frx/hash/leansig:params",
+        "//sig_frx/hash/leansig:prf",
+        "//sig_frx/hash/leansig:signing",
+        "//sig_frx/hash/leansig:ssz",
+        "//sig_frx/hash/leansig:tweakable",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
 )
 
 py_test(

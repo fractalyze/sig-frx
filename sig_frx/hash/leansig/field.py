@@ -77,6 +77,56 @@ def to_field(canonical: ArrayLike) -> Array:
     return fnp.asarray(np.asarray(canonical, dtype=np.int64).astype(F))
 
 
+def host_column(values: ArrayLike, describe: str, bound: int) -> np.ndarray:
+    """`values` as a host `int64` column, refused unless all of it is in range.
+
+    Three things in this package take a column of host integers and have to
+    know every entry is bounded before packing it: a tweak field, whose
+    neighbour it would otherwise carry into ([`tweakable.py`](tweakable.py)); a
+    PRF input, whose fixed-width big-endian packing it would overflow
+    ([`prf.py`](prf.py)); and a public parameter, which the cast into the field
+    would silently *reduce* rather than refuse
+    ([`leansig.py`](leansig.py)). All three failures are a wrong value that is
+    still well-formed, so none of them is caught downstream.
+
+    `describe` is the whole of the caller's own sentence — "a step takes 8 bits
+    in a packed tweak, so it must be in [0, 256)" — because what makes each
+    bound wrong differs and the diagnosis is the useful half. What is shared,
+    and written once here, is the mechanism and the tail that counts the
+    offenders and names the first.
+    """
+    column = np.asarray(values, dtype=np.int64).reshape(-1)
+    outside = (column < 0) | (column >= bound)
+    if np.any(outside):
+        raise ValueError(
+            f"{describe}; {int(np.count_nonzero(outside))} of {column.size} "
+            f"entries are not, the first being {int(column[np.argmax(outside)])}"
+        )
+    return column
+
+
+def lane_reversed(canonical: ArrayLike) -> Array:
+    """Canonical residues in leanSpec's order -> the lane-reversed field array.
+
+    The placement half of `lane_reversed_limbs`, for values that are residues
+    already and so have nothing to decompose. A PRF squeeze is what wants it —
+    SHAKE128 hands back a digest as `hash_length` residues read big-endian
+    ([`prf.py`](prf.py)) — and so is a public parameter arriving as the numbers a
+    key pair published rather than as bytes.
+
+    Here rather than at either caller for the reason the module docstring gives:
+    the reversal spelled per call site is a reversal that can be forgotten at
+    one, and a forgotten one is a silently different hash. The last axis is the
+    one that moves, so a `[N, k]` batch reverses each row and a `[k]` vector
+    reverses itself.
+
+    Host-side, like everything else here. The traced counterpart is
+    [`ssz.py`](ssz.py)'s, which reverses residues that arrived in lanes off the
+    wire and goes through `poseidon`'s own seam to do it.
+    """
+    return to_field(np.asarray(canonical, dtype=np.int64)[..., ::-1])
+
+
 def lane_reversed_limbs(value: int | np.ndarray, num_limbs: int) -> Array:
     """`value` base-p, as the lane-reversed field vector a leanSig hash takes.
 
