@@ -237,6 +237,11 @@ signing work over the rationals instead, embedded in `C`, and that transform —
 [`fft.py`](../../sig_frx/lattice/falcon/fft.py) — carries a requirement the
 integer one does not.
 
+The requirement belongs to the **domain and not to that one module**.
+[`keygen.py`](../../sig_frx/lattice/falcon/keygen.py)'s rational arithmetic is
+held to the same rule, which is why the guard — `fft.require_scope` — is public
+and shared rather than copied.
+
 **The precision is a security property, not a numerical nicety.** Falcon's
 analysis assumes double precision, and `ffSampling` is where that is
 load-bearing: too little of it moves the sampled distribution away from the ideal
@@ -247,7 +252,11 @@ On the host that costs nothing, because numpy is `complex128` natively. Traced i
 costs a scope, so a traced caller wraps the whole operation in `double_precision`
 and every entry point **raises** outside it rather than returning a narrowed
 result — the stack's own signal there is a warning, which is the wrong shape for
-a difference a security analysis rests on. How that scope behaves in general
+a difference a security analysis rests on. Every entry point means every one
+that a caller reaches, not every one that happens to divide: a guard delegated
+to whatever the callee eventually calls covers only the paths that get there,
+and the paths that do not are the ones nobody thinks to check. How that scope
+behaves in general
 belongs to FRX rather than to this repo and is described in
 [`conventions/frx.md`](https://github.com/fractalyze/claude-plugins/blob/main/plugins/playbook/conventions/frx.md).
 The edge that decides the calling convention here is that it scopes an operation

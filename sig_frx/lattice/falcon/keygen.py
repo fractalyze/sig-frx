@@ -563,10 +563,12 @@ def gram_schmidt_squared_norm(f: ArrayLike, g: ArrayLike) -> Any:
     ([`falcon_reference`](testing/falcon_reference.py)) does compute them, which
     is what makes the test a check of the identity rather than of itself.
 
-    Reads the namespace off its arguments, as [`fft`](fft.py) does: key
-    generation's rejection loop is concrete, so this is called on the host,
-    where the double-precision scope is unnecessary — and lifting it here would
-    make the scope mandatory for a caller that never needed one.
+    Reads the namespace off its arguments rather than calling
+    [`fft.require_scope`](fft.py) as the tree below does, and does not need to:
+    the transform on the next line is itself a guarded entry point, so a traced
+    call outside the scope refuses there. The narrowing one line earlier is
+    discarded with the exception. Key generation's rejection loop is concrete,
+    so this runs on the host, where the scope is unnecessary either way.
     """
     xnp = namespace(f, g)
     left, right = xnp.asarray(f, dtype=np.float64), xnp.asarray(g, dtype=np.float64)
@@ -1155,7 +1157,7 @@ def gram(
     `B̂` itself — Algorithm 10 lines 3 and 7 — so a `gram` that transformed
     internally would compute the same four transforms twice.
     """
-    xnp = namespace(f_hat, g_hat, big_f_hat, big_g_hat)
+    xnp = fft.require_scope(f_hat, g_hat, big_f_hat, big_g_hat)
     small_f, small_g = xnp.asarray(f_hat), xnp.asarray(g_hat)
     large_f, large_g = xnp.asarray(big_f_hat), xnp.asarray(big_g_hat)
     # `(−f)·(−f)*` is `f·f*` and `(−f)·(−F)*` is `f·F*`, so both of `B`'s
@@ -1186,7 +1188,7 @@ def ldl(g00: ArrayLike, g01: ArrayLike, g11: ArrayLike) -> tuple[Any, Any, Any]:
     product as written, so the two forms are held against each other rather than
     the simplification being taken on trust.
     """
-    xnp = namespace(g00, g01, g11)
+    xnp = fft.require_scope(g00, g01, g11)
     diagonal = xnp.asarray(g00)
     l10 = xnp.conj(xnp.asarray(g01)) / diagonal
     d11 = xnp.asarray(g11) - (l10 * xnp.conj(l10)).real * diagonal
@@ -1243,8 +1245,13 @@ def ffldl(g00: ArrayLike, g01: ArrayLike, g11: ArrayLike) -> FalconTree:
     stands for both dimensions the ring contributes, which is what makes the
     leaves multiply to `q^n` for a basis of determinant `q` rather than to
     `q^(2n)`.
+
+    The precision guard is called here rather than left to
+    [`fft.split`](fft.py) further down, which is the same refusal one level
+    later for every degree but two — at `n = 2` the loop returns before it ever
+    splits, so a transitive guard is exactly the degree that has none.
     """
-    xnp = namespace(g00, g01, g11)
+    xnp = fft.require_scope(g00, g01, g11)
     if np.ndim(g00) != 1:
         raise ValueError(f"a Gram matrix entry is one polynomial, not {np.ndim(g00)}")
     degree = np.shape(g00)[-1]
@@ -1285,6 +1292,10 @@ def normalize(tree: FalconTree, sigma: float) -> FalconTree:
 
     Only the leaves move. `values` is `L10` per node and is untouched by
     normalization, which is why the two trees share one type.
+
+    A narrowed leaf here is a narrowed `σ'`, which [`fft`](fft.py) states is
+    what moves the sampled distribution off the ideal one — the leak itself,
+    not a rounding nuisance. Hence a refusal rather than frx's warning.
     """
-    xnp = namespace(tree.leaves)
+    xnp = fft.require_scope(tree.leaves)
     return FalconTree(tree.values, sigma / xnp.sqrt(xnp.asarray(tree.leaves)))
