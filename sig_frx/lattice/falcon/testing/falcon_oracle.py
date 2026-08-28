@@ -175,6 +175,8 @@ def verify(public_key: bytes, message: bytes, signature: bytes, degree: int) -> 
     from sig_frx.lattice.falcon import falcon
 
     params = falcon.PARAMETER_SETS[f"Falcon-{degree}"]
+    # Where §3.11.3's compressed run starts, past the header byte and the salt.
+    body = 1 + encoding.SALT_SIZE
     if len(signature) != params.signature_size:
         raise ValueError(
             f"a Falcon-{degree} signature is {params.signature_size} bytes, "
@@ -182,15 +184,16 @@ def verify(public_key: bytes, message: bytes, signature: bytes, degree: int) -> 
         )
     if signature[0] != encoding.degree_header(degree, 0x3):
         return False
-    salt = signature[1 : 1 + encoding.SALT_SIZE]
-    compressed = signature[1 + encoding.SALT_SIZE :].rstrip(b"\x00")
+    salt = signature[1:body]
+    compressed = signature[body:].rstrip(b"\x00")
     nonceless = bytes([encoding.degree_header(degree, 0x2)]) + compressed
     aggregate = (
         len(nonceless).to_bytes(_SIGLEN_SIZE, "big") + salt + message + nonceless
     )
 
     library = _library(degree)
-    recovered = ctypes.create_string_buffer(max(len(aggregate), 1))
+    # At least `2 + 40 + 1` bytes by the guards above, so never empty.
+    recovered = ctypes.create_string_buffer(len(aggregate))
     length = ctypes.c_ulonglong(0)
     status = library.crypto_sign_open(
         recovered, ctypes.byref(length), aggregate, len(aggregate), public_key
