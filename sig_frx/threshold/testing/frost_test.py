@@ -23,6 +23,7 @@ existed for it).
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -139,20 +140,20 @@ class _GroupOnly:
     def scalar_base_mult(self, scalar: int) -> bytes:
         return self._suite.scalar_base_mult(scalar)
 
-    def deserialize_element(self, data: bytes) -> Any:
-        return self._suite.deserialize_element(data)
+    def deserialize_elements(self, data: Sequence[bytes]) -> Any:
+        return self._suite.deserialize_elements(data)
 
-    def element_add(self, left: Any, right: Any) -> Any:
-        return self._suite.element_add(left, right)
+    def elements_add(self, left: Any, right: Any) -> Any:
+        return self._suite.elements_add(left, right)
 
-    def element_scalar_mult(self, element: Any, scalar: int) -> Any:
-        return self._suite.element_scalar_mult(element, scalar)
+    def elements_scalar_mult(self, elements: Any, scalars: Sequence[int]) -> Any:
+        return self._suite.elements_scalar_mult(elements, scalars)
 
-    def identity_element(self) -> Any:
-        return self._suite.identity_element()
+    def sum_elements(self, elements: Any) -> Any:
+        return self._suite.sum_elements(elements)
 
-    def serialize_element(self, element: Any) -> bytes:
-        return self._suite.serialize_element(element)
+    def serialize_elements(self, elements: Any) -> list[bytes]:
+        return self._suite.serialize_elements(elements)
 
 
 if TYPE_CHECKING:
@@ -202,20 +203,20 @@ class GroupSeamTest(parameterized.TestCase):
             frost.encode_group_commitment_list(bare, v.commitment_list),
             frost.encode_group_commitment_list(v.cs, v.commitment_list),
         )
-        decoded = {
-            entry.identifier: (
-                bare.deserialize_element(entry.hiding),
-                bare.deserialize_element(entry.binding),
-            )
-            for entry in v.commitment_list
-        }
-        factors = dict.fromkeys(decoded, 1)
+        identifiers = [entry.identifier for entry in v.commitment_list]
+        hidings = bare.deserialize_elements([e.hiding for e in v.commitment_list])
+        bindings = bare.deserialize_elements([e.binding for e in v.commitment_list])
+        factors = dict.fromkeys(identifiers, 1)
         self.assertEqual(
-            v.cs.serialize_element(
-                frost.compute_group_commitment(bare, decoded, factors)
+            v.cs.serialize_elements(
+                frost.compute_group_commitment(
+                    bare, identifiers, hidings, bindings, factors
+                )
             ),
-            v.cs.serialize_element(
-                frost.compute_group_commitment(v.cs, decoded, factors)
+            v.cs.serialize_elements(
+                frost.compute_group_commitment(
+                    v.cs, identifiers, hidings, bindings, factors
+                )
             ),
         )
 
@@ -398,11 +399,12 @@ class Secp256k1SchnorrTest(absltest.TestCase):
         commitment_bytes = signature[: cs.element_size]
         z = cs.deserialize_scalar(signature[cs.element_size :])
         challenge = cs.h2(commitment_bytes + public_key + message)
-        expected = cs.element_add(
-            cs.deserialize_element(commitment_bytes),
-            cs.element_scalar_mult(cs.deserialize_element(public_key), challenge),
+        expected = cs.elements_add(
+            cs.deserialize_elements([commitment_bytes]),
+            cs.elements_scalar_mult(cs.deserialize_elements([public_key]), [challenge]),
         )
-        return cs.scalar_base_mult(z) == cs.serialize_element(expected)
+        (encoded,) = cs.serialize_elements(expected)
+        return cs.scalar_base_mult(z) == encoded
 
     def _naive(
         self, cs: frost.Ciphersuite, public_key: bytes, message: bytes, signature: bytes

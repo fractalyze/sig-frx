@@ -17,6 +17,7 @@ not need).
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -81,41 +82,58 @@ class Ed25519Sha512:
         return value
 
     def scalar_base_mult(self, scalar: int) -> bytes:
-        return self.serialize_element(
-            self.element_scalar_mult(self.curve.generator, scalar)
+        (encoded,) = self.serialize_elements(
+            self.elements_scalar_mult(self.curve.generator, [scalar])
         )
+        return encoded
 
-    def deserialize_element(self, data: bytes) -> np.ndarray:
+    def deserialize_elements(self, data: Sequence[bytes]) -> np.ndarray:
         # RFC 9591 §6.1 deserializes group elements per RFC 8032 §5.1.3,
         # canonicity refusals included — the ciphersuite names the strict
-        # reading, not one of the consensus relaxations.
-        point, ok = edwards.decode(
+        # reading, not one of the consensus relaxations. `decode` already
+        # takes a `[B, 32]` byte batch, so the axis costs nothing to hand it.
+        points, ok = edwards.decode(
             self.curve,
-            np.frombuffer(data, dtype=np.uint8)[None, :],
+            np.array([np.frombuffer(entry, dtype=np.uint8) for entry in data]),
             canonical_only=True,
         )
-        if not bool(np.asarray(ok)[0]):
-            raise ValueError("not a canonical encoding of a curve point")
-        if bool(np.asarray(edwards.is_identity(self.curve, point))[0]):
-            raise ValueError("the identity element has no place on the wire")
-        return point.astype(self.curve.accumulator)
+        bad = [i for i, flag in enumerate(np.asarray(ok)) if not bool(flag)]
+        if bad:
+            raise ValueError(
+                f"not a canonical encoding of a curve point (entries {bad})"
+            )
+        identity = np.asarray(edwards.is_identity(self.curve, points))
+        wire = [i for i, flag in enumerate(identity) if bool(flag)]
+        if wire:
+            raise ValueError(
+                f"the identity element has no place on the wire (entries {wire})"
+            )
+        return points.astype(self.curve.accumulator)
 
-    def element_add(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    def elements_add(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
         return left + right
 
-    def element_scalar_mult(self, element: np.ndarray, scalar: int) -> np.ndarray:
+    def elements_scalar_mult(
+        self, elements: np.ndarray, scalars: Sequence[int]
+    ) -> np.ndarray:
         # Every scalar crossing this seam is already in [0, L-1] (the seam's
         # scalar contract), so multiple's % L is a no-op, not a reduction.
-        return edwards.multiple(self.curve, [scalar], element)
+        return edwards.multiple(self.curve, list(scalars), elements)
 
-    def identity_element(self) -> np.ndarray:
-        return self.curve.identity.astype(self.curve.accumulator)
+    def sum_elements(self, elements: np.ndarray) -> np.ndarray:
+        return edwards.sum_points(self.curve, elements)
 
-    def serialize_element(self, element: np.ndarray) -> bytes:
-        if bool(np.asarray(edwards.is_identity(self.curve, element))[0]):
-            raise ValueError("the identity element has no encoding here")
-        ((x, y),) = edwards.affine_ints(self.curve, element)
-        return edwards.encode_affine(x, y)
+    def serialize_elements(self, elements: np.ndarray) -> list[bytes]:
+        identity = np.asarray(edwards.is_identity(self.curve, elements))
+        bad = [i for i, flag in enumerate(identity) if bool(flag)]
+        if bad:
+            raise ValueError(
+                f"the identity element has no encoding here (entries {bad})"
+            )
+        return [
+            edwards.encode_affine(x, y)
+            for x, y in edwards.affine_ints(self.curve, elements)
+        ]
 
     def verify(
         self, public_key: ArrayLike, message: ArrayLike, signature: ArrayLike
