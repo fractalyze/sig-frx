@@ -258,12 +258,17 @@ py_test(
 # is reached through `ctypes`, which is what lets the same test hold this repo's
 # `verify` and the reference's `crypto_sign` in one process and compare them
 # directly.
+#
+# `no-remote` for the reason the archive's own build file records at length: the
+# auto-detected C++ toolchain declares the configuring machine's builtin include
+# directories, not the Buildbarn workers'.
 [
     cc_binary(
         name = "libfalcon%d_oracle.so" % degree,
         testonly = True,
         srcs = ["falcon_oracle.c"],
         linkshared = True,
+        tags = ["no-remote"],
         deps = ["@falcon_round3//:falcon%d" % degree],
     )
     for degree in [
@@ -296,14 +301,16 @@ py_library(
 # a handful of reference signatures and the verdicts `verify` returns on them —
 # is seconds. That is the same shape as `falcon_test`, which is `large` for it.
 #
-# The GPU leg is the slower of the two on this workstation, 114.1 s against the
-# CPU leg's 65.5 s, and ../../../../docs/reference/measurement.md allows a
-# GPU-decided budget to be sized from a local run on a comparable device. It is
-# not sized from that alone: the CPU leg's executor runs 1.6-3.4x a workstation,
-# which puts its unmeasured CI figure anywhere up to about 220 s, and that would
-# make **it** the deciding leg. `medium` would then be 74% of its 300 s, past the
-# half-a-budget rule; `large` covers the worst of both readings at 25% and needs
-# no second guess about which leg decides. Re-measure once CI records it.
+# The GPU leg measures **118.0 s on CI** — a workstation read 114.1 s, so the
+# 1.03x ratio is the one ../../../../docs/reference/measurement.md records for
+# this family. That alone would argue for `medium`, at 39% of its 300 s.
+#
+# `large` because the CPU leg is the one that has not reported. It reads 65.5 s
+# on a workstation, and its executor runs 1.6-3.4x that, which puts it anywhere
+# up to about 220 s — 74% of `medium`, past the half-a-budget rule, and the
+# deciding leg if it lands there. `large` covers the worse reading at 25% and
+# needs no second guess about which leg decides. Narrow it once the CPU leg has
+# recorded a figure of its own.
 py_test(
     name = "falcon_interop_test",
     size = "large",

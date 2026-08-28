@@ -14,6 +14,23 @@
 # `crypto_sign`: the oracle reaches it through `dlopen`, so without it the
 # linker drops every object as unused and produces a shared object with no
 # Falcon in it.
+#
+# `no-remote` because this is the only C in the build and the CPU leg executes
+# on Buildbarn (//.bazelrc.rbe). The workers do have a compiler — these actions
+# ran there — but the C++ toolchain is the one bazel auto-detects by inspecting
+# the machine that *configured* it, so its declared builtin include directories
+# are the runner's. The workers' are gcc 11's, and every source here reaches
+# `stdint.h`, so bazel rejects the compile it just ran:
+#
+#   absolute path inclusion(s) found in rule '@@+http_archive+falcon_round3//:falcon512'
+#     '/usr/lib/gcc/x86_64-linux-gnu/11/include/stdint.h'
+#
+# Running the compiles where the toolchain was detected costs a few seconds of
+# an otherwise remote build and keeps the interop test gating every pull
+# request, which is what matters: a target excluded from a leg has never had its
+# budget validated there (../../../../docs/reference/testing.md). The standing
+# fix is a hermetic C toolchain in //MODULE.bazel — worth doing if this repo
+# ever builds C for a second reason, and over-built for one test today.
 
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
@@ -23,6 +40,7 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
         srcs = glob(["Reference_Implementation/falcon%d/falcon%dint/*.c" % (degree, degree)]),
         hdrs = glob(["Reference_Implementation/falcon%d/falcon%dint/*.h" % (degree, degree)]),
         includes = ["Reference_Implementation/falcon%d/falcon%dint" % (degree, degree)],
+        tags = ["no-remote"],
         visibility = ["//visibility:public"],
         alwayslink = True,
     )
