@@ -115,6 +115,7 @@ def signature_from_aggregate(sm: bytes, message: bytes, name: str) -> bytes | No
     format defines — and because a fixture that regrouped bytes with the
     module under test would be checking a formula against itself. The constants
     are this file's own for the same reason.
+    [`aggregate_from_signature`](#aggregate_from_signature) is the way back.
     """
     n = PARAMETER_SETS[name]["n"]
     logn = n.bit_length() - 1
@@ -141,6 +142,50 @@ def signature_from_aggregate(sm: bytes, message: bytes, name: str) -> bytes | No
     if padding < 0:
         return None
     return bytes([0x30 | logn]) + salt + compressed + b"\x00" * padding
+
+
+def aggregate_from_signature(
+    signature: bytes, message: bytes, name: str
+) -> bytes | None:
+    """§3.11.3's signature as the §3.11.6 signed message the NIST API reads.
+
+    [`signature_from_aggregate`](#signature_from_aggregate) run backwards, and
+    beside it because the two are one fact about two sections: a change to the
+    padding rule or to either header nibble has to be a change to both, which
+    is only obvious when they are adjacent. `crypto_sign_open` reads
+    `siglen ‖ r ‖ M ‖ header ‖ enc_s` and nothing else, so handing it §3.11.3's
+    form directly rejects **every** case — indistinguishable from a broken
+    signer, which is why the regrouping is the first thing to doubt when a
+    caller starts refusing everything at once.
+
+    The trailing zeros §3.11.3 pads to `sbytelen` are dropped rather than
+    passed on: the aggregate states its own length and the reference checks the
+    compressed run against it, so padding it never saw reads as malformed. The
+    strip is exact rather than approximate — Algorithm 17 ends each coefficient
+    with a terminating `1`, so the last byte of a well-formed `enc_s` is never
+    zero and there is nothing but padding to take.
+
+    `None` for a header that is not §3.11.3's, which the caller has to be told
+    about rather than the reference: the byte written here is `0x20 | logn`
+    whatever byte was read, so a corrupted header would be repaired on the way
+    through and the signature accepted. A wrong *length* is a caller error
+    instead — §3.11.3's form is fixed-width, so those bytes are not a signature
+    at all.
+    """
+    params = PARAMETER_SETS[name]
+    logn = params["n"].bit_length() - 1
+    if len(signature) != params["signature_size"]:
+        raise ValueError(
+            f"{name}: a signature is {params['signature_size']} bytes, "
+            f"got {len(signature)}"
+        )
+    if signature[0] != 0x30 | logn:
+        return None
+
+    salt = signature[1 : 1 + SALT_SIZE]
+    compressed = signature[1 + SALT_SIZE :].rstrip(b"\x00")
+    nonceless = bytes([0x20 | logn]) + compressed
+    return len(nonceless).to_bytes(SIGLEN_SIZE, "big") + salt + message + nonceless
 
 
 def bits_of(data: bytes) -> list[int]:

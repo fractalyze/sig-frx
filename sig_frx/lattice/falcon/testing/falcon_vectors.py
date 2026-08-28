@@ -33,6 +33,8 @@ signature is that regrouping of `sm`, which
 [`falcon_reference.signature_from_aggregate`](falcon_reference.py) performs and
 asserts its way through — the same transform `falcon_oracle` runs to hand the
 reference's own output to the seam, held in one place so the two cannot drift.
+Its inverse sits beside it, which is what puts a signature produced here back to
+the reference, so a change to either direction is a change to both.
 
 Regrouping bytes is not the same as inventing them: every byte is upstream's,
 and which field each lands in is what the two sections state. The padding is
