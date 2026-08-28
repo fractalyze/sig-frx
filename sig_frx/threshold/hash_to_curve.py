@@ -178,9 +178,16 @@ def hash_to_field(message: bytes, dst: bytes) -> list[int]:
 def _map_to_curve_simple_swu(u: int) -> tuple[int, int]:
     """RFC 9380 §6.6.2 on `E'`, transcribed as its ten numbered operations.
 
-    Straight-line rather than App. F.2's optimized form: this runs once per
-    map at `B = 1`, and the numbered version is the one a reader can check
-    against the document line by line.
+    Straight-line rather than App. F.2's optimized form: the numbered version
+    is the one a reader can check against the document line by line, and this
+    map is what the published vectors pin `Q0` and `Q1` against.
+
+    That trade was free while the only caller was `B = 1`, and is not any
+    more — a batch makes these five modular exponentiations the hot loop, and
+    two of them are avoidable (the squareness test duplicates the square root
+    that follows it, and the isogeny inverts twice where one inverse serves).
+    Taking them is a change to the arithmetic the standard's own values gate,
+    so it is worth doing deliberately rather than in passing.
     """
     # 1-3. `x1`, with the exceptional case the condition on `Z` exists to make
     # safe: where the denominator vanishes, `B / (Z * A)` has a square `g(x1)`.

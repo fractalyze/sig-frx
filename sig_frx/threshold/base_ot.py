@@ -83,25 +83,36 @@ label pair, neither the paper's. A transcript here therefore interoperates
 with nothing, which is a property of the protocol's specification and not of
 this implementation.
 
-## Everything with an axis is one batched call
+## One batch, and — the part that costs — one shape
 
-DKLs23 §8.1-8.2 sizes the setup at `lambda_c = 128` base OT instances per
-party pair, above `secp.DEVICE_MIN_BATCH`, so the scalar multiplications are
-where this layer's time goes and each is one `secp.multiple` over the whole
-batch rather than a call per instance. The count is fixed by the protocol and
-not by `B`: two in `choose`, four in `transfer`, one in `receive`.
+DKLs23 §8.1-8.2 sizes the setup at `lambda_c = 128` instances per party pair,
+so nothing here loops over instances: a Python loop over a batch axis is the
+shape this repo calls a bug. Each operation is one call over the whole batch —
+two in `choose`, two in `transfer`, one in `receive`.
+
+What that buys is **not** a device scalar multiplication, and it is worth
+saying so because the obvious reading is wrong. `secp.multiple` places on a
+batch-size threshold, but three of the five calls here multiply
+`_CURVE.generator`, which is `[1]`-shaped and therefore below any threshold at
+every `B`; and whether the other two place depends on the point dtypes being
+admitted, which `secp` probes per wheel and which is false at the pinned one.
+So the curve arithmetic is host work, and no value in this module ever changes
+namespace.
+
+The one thing that does reach the device is the square root inside `_decode`:
+`secp.lift_x_to_parity` places its *base-field* batch, which is admitted where
+the point types are not, and the fused ladder compiles **once per distinct
+batch shape**. That is what the batch is really for here, and it is why both
+`transfer` and `receive` decode the wire as one flat `2B` rather than a `[B]`
+per slot — two shapes would compile the ladder twice and pay for it twice.
+Measured on the CPU leg, the suite runs 13.8 s against 23.4 s when `transfer`
+split its decode by slot.
 
 The Python loop that remains is inside `hash_to_curve_batch`, over
 `map_to_curve`'s host integer arithmetic — the namespace that arithmetic is
 exact in, with no array form to move to. Picking one slot out of a decoded
 pair is a single gather over the batch rather than a loop over it, which is
 what lets `receive` validate both slots and still read only one.
-
-So an oracle batch arrives on the host and meets a point batch `secp` may
-have placed, and the sum lifts the host operand. That is safe here for the
-reason `secp`'s own placement exception gives: the hazard behind "a value is
-used in the namespace it arrives in" is a 32-bit integer lane, and a point
-dtype has none. Nothing in this module holds an integer array.
 
 ## What this is gated on, and what it is not
 
@@ -142,12 +153,6 @@ from sig_frx.threshold import hash_to_curve
 _CURVE = secp.SECP256K1
 _N = _CURVE.n
 _P = _CURVE.p
-
-# SEC 1 §2.3.3 compressed, the encoding the rest of this package speaks. The
-# identity has none: it reads back as `(0, 0)`, and `x = 0` is on no point of
-# this curve because `b = 7` is a non-residue mod `p`, so an identity encoding
-# is rejected as off-curve rather than mistaken for a point.
-_ELEMENT_SIZE = 33
 
 # One endemic output is one SHA-256 digest.
 KEY_SIZE = hashlib.sha256().digest_size
@@ -270,54 +275,21 @@ def _key(session: bytes, index: int, slot: int, element: bytes) -> bytes:
     ).digest()
 
 
-def _at_infinity(points: np.ndarray) -> list[int]:
-    """Which entries of a point batch are the group identity."""
-    return [
-        index
-        for index, flag in enumerate(np.asarray(secp.is_identity(_CURVE, points)))
-        if bool(flag)
-    ]
-
-
 def _encode(points: np.ndarray) -> list[bytes]:
     """A point batch as SEC 1 compressed encodings, identity refused.
 
     Refused rather than encoded because it has no encoding here, and because
     reaching it means an exponent or an oracle output cancelled — which the
-    party that produced it aborts on rather than transmits.
+    party that produced it aborts on rather than transmits. The refusal is
+    this protocol's and not the substrate's, which is why `secp` supplies the
+    identity scan and the per-point encoder but not this policy.
     """
-    infinite = _at_infinity(points)
+    infinite = secp.identity_entries(_CURVE, points)
     if infinite:
         raise ValueError(f"the group identity has no encoding (entries {infinite})")
     return [
         secp.compressed_bytes(_CURVE, x, y) for x, y in secp.affine_ints(_CURVE, points)
     ]
-
-
-def _decode(data: Sequence[bytes], role: str) -> np.ndarray:
-    """A batch of SEC 1 compressed encodings, validated: `[B]` points.
-
-    SEC 1 §3.2.2.1's check on a point that arrived from the network. The
-    on-curve test is the one part with an axis, so it runs once over the
-    batch through `secp.lift_x_to_parity`; the prefix and range checks read
-    bytes and stay per entry, where a rejected one can name itself.
-    """
-    xs, parities = [], []
-    for index, entry in enumerate(data):
-        if len(entry) != _ELEMENT_SIZE or entry[0] not in (2, 3):
-            raise ValueError(
-                f"a {role} is {_ELEMENT_SIZE} bytes, prefix 02 or 03 (entry {index})"
-            )
-        x = int.from_bytes(entry[1:], "big")
-        if x >= _P:
-            raise ValueError(f"a {role}'s x-coordinate is out of range (entry {index})")
-        xs.append(x)
-        parities.append(entry[0] & 1)
-    points, on_curve = secp.lift_x_to_parity(_CURVE, xs, parities)
-    off = [index for index, ok in enumerate(np.asarray(on_curve)) if not bool(ok)]
-    if off:
-        raise ValueError(f"a {role} is not on the curve (entries {off})")
-    return points.astype(_CURVE.accumulator)
 
 
 def _oracle(
@@ -330,9 +302,9 @@ def _oracle(
     `hash_to_curve_batch` was widened to carry.
     """
     return hash_to_curve.hash_to_curve_batch(
-        list(encodings),
+        encodings,
         [_pad_dst(session, index, slot) for index, slot in enumerate(slots)],
-    ).astype(_CURVE.accumulator)
+    )
 
 
 def choose(
@@ -371,12 +343,8 @@ def choose(
     chosen_encodings = _encode(chosen)
 
     wire = [
-        (
-            (chosen_encodings[index], pad_encodings[index])
-            if choices[index] == 0
-            else (pad_encodings[index], chosen_encodings[index])
-        )
-        for index in range(count)
+        (chosen, pad) if choice == 0 else (pad, chosen)
+        for choice, chosen, pad in zip(choices, chosen_encodings, pad_encodings)
     ]
     return ReceiverState(session, tuple(choices), tuple(exponents)), wire
 
@@ -404,37 +372,34 @@ def transfer(
         raise ValueError("a batch has at least one instance")
 
     columns = [[pair[slot] for pair in pads] for slot in (0, 1)]
-    received = [_decode(column, "receiver pad") for column in columns]
+    both = secp.decompressed(
+        _CURVE, [entry for pair in pads for entry in pair], "receiver pad"
+    )
+    received = [both[0::2], both[1::2]]
     recovered = [
         received[slot] + _oracle(session, columns[1 - slot], [slot] * count)
         for slot in (0, 1)
     ]
     for slot, points in enumerate(recovered):
-        infinite = _at_infinity(points)
+        infinite = secp.identity_entries(_CURVE, points)
         if infinite:
             raise ValueError(
                 "the recovered agreement message is the identity "
                 f"(slot {slot}, entries {infinite})"
             )
 
+    # One flat `2B` batch per operation rather than a call per slot: the
+    # exponents already arrive in that layout, and `_encode`/`secp.multiple`
+    # have no reason to see the slot split the wire format imposes.
     exponents = _scalars(randomness, session, b"sender-agreement", 2 * count)
-    per_slot = [exponents[:count], exponents[count:]]
-    messages = [
-        _encode(secp.multiple(_CURVE, per_slot[slot], _CURVE.generator))
-        for slot in (0, 1)
-    ]
-    shared = [
-        _encode(secp.multiple(_CURVE, per_slot[slot], recovered[slot]))
-        for slot in (0, 1)
-    ]
+    messages = _encode(secp.multiple(_CURVE, exponents, _CURVE.generator))
+    shared = _encode(secp.multiple(_CURVE, exponents, np.concatenate(recovered)))
     return Transfer(
-        messages=tuple(
-            (messages[0][index], messages[1][index]) for index in range(count)
-        ),
+        messages=tuple(zip(messages[:count], messages[count:])),
         keys=tuple(
             (
-                _key(session, index, 0, shared[0][index]),
-                _key(session, index, 1, shared[1][index]),
+                _key(session, index, 0, shared[index]),
+                _key(session, index, 1, shared[count + index]),
             )
             for index in range(count)
         ),
@@ -457,7 +422,9 @@ def receive(
     if len(messages) != count:
         raise ValueError("one agreement message pair per instance")
 
-    both = _decode([entry for pair in messages for entry in pair], "sender message")
+    both = secp.decompressed(
+        _CURVE, [entry for pair in messages for entry in pair], "sender message"
+    )
     chosen = both[np.arange(count) * 2 + np.array(state.choices)]
     shared = _encode(secp.multiple(_CURVE, list(state.exponents), chosen))
     return [

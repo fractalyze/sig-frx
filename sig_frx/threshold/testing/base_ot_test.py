@@ -60,11 +60,11 @@ and it is here because the abort it pins is the module's to own.
 
 ## The batch the protocol actually runs at
 
-Everything above is sized to make a failure readable, which puts all of it
-below `secp.DEVICE_MIN_BATCH` and therefore on the host. `DeviceBatchTest`
-runs `lambda_c = 128` so the traced path is exercised too — see its own note.
-It costs the target most of its budget and is the reason for the bucket the
-BUILD file argues for.
+Everything above is sized to make a failure readable, which is far below the
+`lambda_c = 128` a real setup runs. `DeviceBatchTest` runs that size — see its
+own note for what it catches that the small batches cannot. It costs the
+target most of its budget and is the reason for the bucket the BUILD file
+argues for.
 
 ## The reference transcription
 
@@ -81,11 +81,13 @@ agreeing with itself.
 from __future__ import annotations
 
 import hashlib
+from typing import NamedTuple
 
 import numpy as np
 from absl.testing import absltest, parameterized
 
 from sig_frx.classical import secp
+from sig_frx.classical.testing import weierstrass_reference
 from sig_frx.threshold import base_ot, hash_to_curve
 
 _CURVE = secp.SECP256K1
@@ -100,12 +102,13 @@ _RECEIVER_RANDOMNESS = bytes(range(32))
 _SENDER_RANDOMNESS = bytes(range(32, 64))
 _SESSION = b"dkls23-setup"
 
-# On no point of this curve: `5^3 + 7` is a quadratic non-residue mod `p`.
+# On no point of this curve — asserted against `weierstrass_reference` below
+# rather than stated, so a curve constant that drifted would fail here.
 _OFF_CURVE_X = 5
 
-# secp256k1's `b`, for the reference decompression below. `a` is zero, so the
-# curve equation the naive side needs is `y^2 = x^3 + b` and nothing more.
-_B = 7
+# The same `x` as a wire encoding, which is how both the sender and the
+# receiver see a point that is not one.
+_OFF_CURVE_ENCODING = bytes([2]) + _OFF_CURVE_X.to_bytes(32, "big")
 
 # DKLs23 §8.1: "Roy's protocol requires a one-time setup that comprises exactly
 # lambda_c instances of OT", and §8.2 fixes `lambda_c = 128`.
@@ -203,9 +206,18 @@ def _reference_oracle(
     )
 
 
+class _Expected(NamedTuple):
+    """Everything the batched module produces, from the figure's own form."""
+
+    wire: list[tuple[bytes, bytes]]
+    messages: list[tuple[bytes, bytes]]
+    sender_keys: list[tuple[bytes, bytes]]
+    receiver_keys: list[bytes]
+
+
 def _reference(
     choices: list[int], session: bytes, receiver_bytes: bytes, sender_bytes: bytes
-) -> dict:
+) -> _Expected:
     """MR19 Figure 8 at `n = 2`, one instance at a time.
 
     Returns every value the batched module also produces, so a disagreement
@@ -256,22 +268,17 @@ def _reference(
 
         # Receiver: open the slot it asked for.
         shared = _affine_mul(
-            agreement_exponents[index], _decode_affine(sender_messages[index][choice])
+            agreement_exponents[index], _decode_affine(messages[choice])
         )
         receiver_keys.append(_reference_key(session, index, choice, _encode(shared)))
 
-    return {
-        "wire": wire,
-        "messages": sender_messages,
-        "sender_keys": sender_keys,
-        "receiver_keys": receiver_keys,
-    }
+    return _Expected(wire, sender_messages, sender_keys, receiver_keys)
 
 
 def _decode_affine(encoding: bytes) -> tuple[int, int]:
     """SEC 1 §2.3.4 decompression, in integers, for the reference side."""
     x = int.from_bytes(encoding[1:], "big")
-    y = pow((pow(x, 3, _P) + _B) % _P, (_P + 1) // 4, _P)
+    y = pow(weierstrass_reference.rhs(_CURVE, x), (_P + 1) // 4, _P)
     if y % 2 != encoding[0] & 1:
         y = (-y) % _P
     return x, y
@@ -297,10 +304,22 @@ class ReferenceTest(parameterized.TestCase):
         sent = base_ot.transfer(wire, _SESSION, _SENDER_RANDOMNESS)
         opened = base_ot.receive(state, sent.messages)
 
-        self.assertEqual(wire, expected["wire"])
-        self.assertEqual(list(sent.messages), expected["messages"])
-        self.assertEqual(list(sent.keys), expected["sender_keys"])
-        self.assertEqual(opened, expected["receiver_keys"])
+        self.assertEqual(wire, expected.wire)
+        self.assertEqual(list(sent.messages), expected.messages)
+        self.assertEqual(list(sent.keys), expected.sender_keys)
+        self.assertEqual(opened, expected.receiver_keys)
+
+
+def _assert_opens_at_choices(
+    case: absltest.TestCase,
+    choices: list[int],
+    sent: base_ot.Transfer,
+    opened: list[bytes],
+) -> None:
+    """Each instance opens its own slot and no other — the OT's whole claim."""
+    for index, choice in enumerate(choices):
+        case.assertEqual(opened[index], sent.keys[index][choice])
+        case.assertNotEqual(opened[index], sent.keys[index][1 - choice])
 
 
 class RoundTripTest(absltest.TestCase):
@@ -311,9 +330,7 @@ class RoundTripTest(absltest.TestCase):
         state, wire = base_ot.choose(choices, _SESSION, _RECEIVER_RANDOMNESS)
         sent = base_ot.transfer(wire, _SESSION, _SENDER_RANDOMNESS)
         opened = base_ot.receive(state, sent.messages)
-        for index, choice in enumerate(choices):
-            self.assertEqual(opened[index], sent.keys[index][choice])
-            self.assertNotEqual(opened[index], sent.keys[index][1 - choice])
+        _assert_opens_at_choices(self, choices, sent, opened)
 
     def test_instances_do_not_share_a_key(self) -> None:
         """Two instances with the same choice bit still get different keys.
@@ -361,11 +378,8 @@ class PublishedBreakTest(absltest.TestCase):
         _, wire = base_ot.choose([0, 1], _SESSION, _RECEIVER_RANDOMNESS)
         honest = wire[0][0]
 
-        # `x = 5` is on no point of secp256k1: `5^3 + 7` is a non-residue.
-        off_curve = bytes([2]) + _OFF_CURVE_X.to_bytes(32, "big")
-        self.assertFalse(
-            secp.on_curve(_CURVE, _OFF_CURVE_X, _decode_affine(off_curve)[1])
-        )
+        off_curve = _OFF_CURVE_ENCODING
+        self.assertFalse(weierstrass_reference.has_point_at(_CURVE, _OFF_CURVE_X))
         cases = {
             "off the curve": off_curve,
             "x at the modulus": bytes([2]) + _P.to_bytes(32, "big"),
@@ -481,7 +495,7 @@ class SelectiveFailureTest(absltest.TestCase):
         sender corrupted that slot, which recovers the choice bit one instance
         at a time.
         """
-        bad = bytes([2]) + _OFF_CURVE_X.to_bytes(32, "big")
+        bad = _OFF_CURVE_ENCODING
         for choice in (0, 1):
             for corrupted in (0, 1):
                 with self.subTest(choice=choice, corrupted=corrupted):
@@ -533,12 +547,11 @@ class InterfaceTest(absltest.TestCase):
 class DeviceBatchTest(absltest.TestCase):
     """The protocol at the batch size it actually runs at.
 
-    Every other class here runs sizes chosen to make a failure readable, and
-    all of them are below `secp.DEVICE_MIN_BATCH` — so all of them execute on
-    the host, leaving the property the module is shaped around untested.
     DKLs23 §8.1-8.2 sizes the one-time setup at `lambda_c = 128` instances per
-    party pair, above the threshold, so a real run's scalar multiplications
-    are traced ones over kernels the host path never compiles.
+    party pair. That crosses `secp.DEVICE_MIN_BATCH`, so the square root
+    inside the wire decode compiles a traced ladder here that none of the
+    small batches above reach — the one place this module leaves the host, and
+    the target's whole runtime.
 
     One test, because one is what the axis costs to cover: a batch that
     reduced over its axis, that broadcast one derivation across it, or that
@@ -564,9 +577,7 @@ class DeviceBatchTest(absltest.TestCase):
         self.assertLen(wire, _LAMBDA_C)
         self.assertLen(sent.messages, _LAMBDA_C)
         self.assertLen(opened, _LAMBDA_C)
-        for index, choice in enumerate(choices):
-            self.assertEqual(opened[index], sent.keys[index][choice])
-            self.assertNotEqual(opened[index], sent.keys[index][1 - choice])
+        _assert_opens_at_choices(self, choices, sent, opened)
 
 
 if __name__ == "__main__":

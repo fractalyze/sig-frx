@@ -23,6 +23,7 @@ py_library(
         "__init__.py",
         "weierstrass_reference.py",
     ],
+    visibility = ["//sig_frx:__subpackages__"],
     deps = ["//sig_frx/classical:secp"],
 )
 
