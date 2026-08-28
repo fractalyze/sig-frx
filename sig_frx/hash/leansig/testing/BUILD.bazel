@@ -338,21 +338,27 @@ py_library(
 # The gate on the shipped scheme: 46 chains over a 32-level tree, against
 # signatures upstream produced under its own published keys.
 #
-# `medium`, sized by ratio rather than by local seconds, because no CI leg has
-# run this yet. `leansig_test` is the sibling that has: 28.8 s on this
-# workstation's GPU leg against 42.7 s on CI's, a 1.5x. This target reads 21.5 s
-# beside it under the same invocation, which puts its CI GPU leg near 32 s — 53%
-# of `small`'s 60 s, and the half-a-budget rule in
-# ../../../../docs/reference/measurement.md moves a target up at half. The CPU
-# leg is not what decides: 11.7 s local, against the GPU leg's 21.5 s.
-# **Re-read both from the CI legs once they report** — the ratio is one sibling's
-# and sizes a bucket, not a number.
+# `medium`, decided by the CPU leg: 33.7 s there against 19.9 s on the GPU leg,
+# both fresh in CI run 33135147374. That is 56% of `small`'s 60 s, and the
+# half-a-budget rule in ../../../../docs/reference/measurement.md moves a target
+# up at half; at `medium` it is an eighth of the 300 s budget.
 #
-# It being *cheaper* than the `TEST` suite it sits beside is worth knowing,
-# because that suite's own comment predicted the opposite. The shape is bigger by
-# every measure and the compile is not, since a preset is one fused region either
-# way; what costs is the number of distinct batch widths a suite traces, and this
-# one traces two where `leansig_test` traces several plus its refusal paths.
+# **Which leg decides inverted between the workstation and CI**, and that is the
+# case that page is about. Locally the GPU leg is the slow one — 21.5 s against
+# the CPU leg's 11.7 s — so a local reading argues the GPU leg sizes this, and
+# on CI the order flips with a wider margin the other way. An earlier revision
+# sized the bucket by carrying `leansig_test`'s local-to-CI GPU ratio across to
+# this target, predicting ~32 s on the leg that came in at 19.9 s: the factor is
+# per-target, as that page says, and a sibling's does not transfer even between
+# two suites over the same scheme.
+#
+# What did hold is the shape argument. `leansig_test`'s own comment predicted a
+# `PROD` verification suite would be far dearer than it; instead the two are
+# comparable — this one is well under it on the GPU leg and a little over on the
+# CPU leg — despite 46 chains against 4 and 32 tree levels against 8. A preset is
+# one fused region either way, so what costs is the number of distinct batch
+# widths a suite traces, and this one traces two where that suite traces several
+# plus its refusal paths.
 py_test(
     name = "leansig_kat_test",
     size = "medium",
