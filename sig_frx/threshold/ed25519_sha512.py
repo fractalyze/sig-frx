@@ -120,6 +120,11 @@ class Ed25519Sha512:
         # scalar contract), so multiple's % L is a no-op, not a reduction.
         return edwards.multiple(self.curve, list(scalars), elements)
 
+    def select_elements(
+        self, elements: np.ndarray, indices: Sequence[int]
+    ) -> np.ndarray:
+        return elements[list(indices)]
+
     def sum_elements(self, elements: np.ndarray) -> np.ndarray:
         return edwards.sum_points(self.curve, elements)
 
