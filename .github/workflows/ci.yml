@@ -7,8 +7,20 @@ permissions: read-all
 on:
   push:
     branches: ["main"]
+  # No `branches:` filter, deliberately. That filter matches a pull request's
+  # **base**, so a stacked pull request — one opened against another feature
+  # branch rather than against `main` — got no `build-and-test` at all, and the
+  # gap does not close by itself: when the parent merges, GitHub retargets the
+  # child to `main` with a `pull_request` event of type `edited`, which is not
+  # in the default `[opened, synchronize, reopened]`. So no run starts on the
+  # retarget either, and the child arrives at `main` with zero runs against its
+  # head commit, blocked on required checks that nothing will ever produce.
+  #
+  # That is not hypothetical: #264 sat that way behind #262 until it was closed
+  # and reopened by hand, and #265 behind it would have done the same had a
+  # rebase not happened to push it. A stack three deep is normal here, so the
+  # filter costs a run per stacked push and buys a class of silent breakage.
   pull_request:
-    branches: ["main"]
   # The full known-answer sweep. Per-PR runs drop the `slow_kat`-tagged suites
   # (see .bazelrc.ci); this run puts them back, so an exhaustive sweep across
   # every parameter set runs daily rather than never.
