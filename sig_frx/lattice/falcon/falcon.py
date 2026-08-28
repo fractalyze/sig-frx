@@ -127,7 +127,7 @@ from sig_frx import context as context_rules
 from sig_frx.batch import require_batch
 from sig_frx.hashes import shake256
 from sig_frx.lattice import rejection
-from sig_frx.lattice.falcon import arith, encoding, keygen
+from sig_frx.lattice.falcon import arith, encoding, fft, keygen, sign
 from sig_frx.lattice.falcon.arith import Q
 from sig_frx.signature import Signature
 
@@ -172,6 +172,12 @@ class FalconParams:
     n: int  # ring degree, `deg(ϕ)`
     squared_norm_bound: int  # `⌊β²⌋`, the largest accepted `‖(s1, s2)‖²`
     signature_size: int  # `sbytelen`, the padded signature length
+    # The width the sampler rounds with, before the tree divides it into each
+    # leaf's own. Transcribed rather than derived for the reason
+    # `squared_norm_bound` above it is: it comes out of a smoothing-parameter
+    # argument the standard makes once and tabulates, not out of an expression
+    # over `n` and `q` that this file could carry instead.
+    sigma: float
 
     def __post_init__(self) -> None:
         if self.n not in arith.DEGREES:
@@ -221,11 +227,13 @@ PARAMETER_SETS: dict[str, FalconParams] = {
         n=512,
         squared_norm_bound=34034726,
         signature_size=666,
+        sigma=165.736617183,
     ),
     "Falcon-1024": FalconParams(
         n=1024,
         squared_norm_bound=70265242,
         signature_size=1280,
+        sigma=168.388571447,
     ),
 }
 
@@ -278,6 +286,44 @@ def _draw_bytes(seed: bytes, attempt: int) -> np.ndarray:
     label = attempt.to_bytes(_ATTEMPT_LABEL_BYTES, "big")
     digest = hashlib.shake_256(seed + label).digest(keygen.ATTEMPT_BYTES)
     return np.frombuffer(digest, dtype=np.uint8)
+
+
+# What one signature's sampler is expected to consume, with room. A call reads
+# nine bytes per `BaseSampler` draw plus one for the sign and one or more for the
+# acceptance, at about 1.74 iterations per coefficient and `2n` coefficients —
+# roughly 20 KB at `Falcon-512` and 40 KB at `Falcon-1024`. A restart consumes
+# more of the same stream rather than starting a new one.
+_SAMPLER_CHUNK = 1 << 17
+
+
+def _sampler_bytes(seed: bytes) -> Any:
+    """The byte source `sign.ff_sampling`'s sampler reads, expanded from `seed`.
+
+    **`hashlib` for the reason [`_draw_bytes`](#_draw_bytes) gives**, and more
+    so: this squeeze is longer than key generation's, and the device row
+    compiles a program sized to its output.
+
+    One stream for the whole signature, restarts included. Algorithm 10 draws
+    the salt once, outside both of its loops, so a rejected attempt must not
+    redraw it — but it does need randomness the rejected attempt has not seen,
+    and continuing the same stream is what gives it that. Re-squeezing longer is
+    sound rather than a second stream: SHAKE is an extendable-output function,
+    so a longer digest extends the shorter one instead of replacing it.
+    """
+    buffer = b""
+    position = 0
+
+    def take(count: int) -> bytes:
+        nonlocal buffer, position
+        if position + count > len(buffer):
+            buffer = hashlib.shake_256(seed).digest(
+                max(2 * len(buffer), _SAMPLER_CHUNK)
+            )
+        chunk = buffer[position : position + count]
+        position += count
+        return chunk
+
+    return take
 
 
 def _within_bound(values: ArrayLike, bound: int) -> Any:
@@ -406,15 +452,94 @@ class Falcon:
         randomness: ArrayLike | None = None,
         context: ArrayLike | None = None,
     ) -> Array:
-        """§3.9's `Sign` — not yet implemented.
+        """Algorithm 10 — one signature, as `signature_size` bytes.
 
-        ffSampling and the discrete Gaussian sampler are
-        [#27](https://github.com/fractalyze/sig-frx/issues/27), gated on the
-        same FFT.
+        **Concrete, like `keygen` and for the same two reasons.** Both of
+        Algorithm 10's loops have data-dependent trip counts, and the sampler
+        underneath draws from a table by comparison — neither has a traced form,
+        and `security.md` puts signing outside what this repo claims anyway. A
+        traced `secret_key` therefore raises here rather than somewhere deeper.
+
+        **`randomness` is the salt, and it is required.** §3.9 draws
+        `r ← {0,1}^320` per signature and that is what makes two signatures over
+        one message differ; the seam's rule is that it never draws for itself,
+        because an implicit draw is how a scheme stops being reproducible
+        against its own vectors. So the caller supplies 40 bytes.
+
+        **The sampler's randomness is not the salt.** It is expanded from the
+        salt and the secret key together, which keeps a signature reproducible
+        from its own inputs — useful for a test, and not a weakening, since the
+        salt is fresh per signature and the key is secret. It is not the
+        reference's stream: matching that would mean transcribing its ChaCha20
+        PRNG, which no part of the standard fixes, so **signatures here are not
+        the published ones byte for byte** (the decision recorded on #178). What
+        is held instead is that they verify, here and by the reference.
+
+        **The restart is line 11's, and line 8's is inside it.**
+        [`sign.attempt`](sign.py) returns `None` where the norm bound rejects,
+        and a `⊥` from the encoder restarts the same way — both continue the one
+        sampler stream rather than redrawing the salt, which Algorithm 10 draws
+        once outside both loops.
         """
-        raise NotImplementedError(
-            "Falcon signing is sig-frx#27, gated on the FFT in #178; "
-            "verification is independent of it and is implemented"
+        context_rules.require_empty(context, "Falcon (FN-DSA)")
+        if randomness is None:
+            raise ValueError(
+                "Falcon draws a fresh 40-byte salt per signature (§3.9), and the "
+                "seam does not draw it — pass `randomness`"
+            )
+        salt = np.asarray(randomness, dtype=np.uint8)
+        if salt.shape != (encoding.SALT_SIZE,):
+            raise ValueError(
+                f"a Falcon salt is {encoding.SALT_SIZE} bytes, got shape "
+                f"{tuple(salt.shape)}"
+            )
+        key = np.asarray(secret_key, dtype=np.uint8)
+        if key.shape != (self.secret_key_size,):
+            raise ValueError(
+                f"a {self.params.n}-degree secret key is {self.secret_key_size} "
+                f"bytes, got shape {tuple(key.shape)}"
+            )
+
+        n = self.params.n
+        # §3.11.5, then (3.35) for the quarter it leaves out.
+        f, g, big_f, ok = encoding.sk_decode(key, n)
+        if not bool(np.asarray(ok)):
+            raise ValueError("the secret key is not a well-formed §3.11.5 encoding")
+        big_g = keygen.recover_g(f, g, big_f)
+        basis = tuple(
+            fft.fft(np.asarray(entry, dtype=np.float64))
+            for entry in (f, g, big_f, big_g)
+        )
+        # Algorithm 4 lines 4-7, rebuilt here because §3.11.5 encodes the
+        # trapdoor and not the tree — `keygen` deliberately does not build one.
+        tree = keygen.normalize(keygen.ffldl(*keygen.gram(*basis)), self.params.sigma)
+
+        body = np.asarray(message, dtype=np.uint8)
+        # Line 2, and `verify` hashes `r ‖ m` the same way — the salt ahead of
+        # the message, which is what stops one message's signature repeating.
+        point = np.asarray(hash_to_point(np.concatenate([salt, body]), n))
+        t0, t1 = sign.target(point, basis[0], basis[2])
+        stream = _sampler_bytes(salt.tobytes() + key.tobytes())
+
+        for _ in range(_MAX_ATTEMPTS):
+            drawn = sign.attempt(
+                t0, t1, tree, basis, self.params.squared_norm_bound, stream
+            )
+            if drawn is None:
+                continue  # line 8 rejected the point's norm
+            _, s2 = drawn
+            signature, encoded = encoding.sig_encode(
+                salt, s2, n, self.params.signature_size
+            )
+            if encoded:
+                return fnp.asarray(signature, dtype=np.uint8)
+            # Line 11's `⊥`: the point was short enough and still did not fit
+            # the encoding, which is a property of its coefficients rather than
+            # of its norm.
+        raise RuntimeError(
+            f"Algorithm 10 drew {_MAX_ATTEMPTS} points at degree {n} without one "
+            "passing the norm bound and the encoder; the acceptance rate makes "
+            "that impossible unless the sampler or the tree is wrong"
         )
 
     # -- verification ------------------------------------------------------

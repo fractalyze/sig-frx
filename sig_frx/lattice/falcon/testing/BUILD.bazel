@@ -139,6 +139,16 @@ py_test(
 # the degree does not change what the case asserts, and a `Falcon-1024` key
 # measured 140 s against 46 s, because a solve can be spent and then thrown
 # away by line 13.
+#
+# Algorithm 10's cases were added for free, and "free" is a decision rather than
+# luck: they need a key, and generating a second one took the GPU leg to 425.4 s
+# — 47%, which the leg's own 1.07x spread turns into a bad run past half. The
+# pair is a pure function of its seed, so `falcon_test._key_pair` generates it
+# once and both the key-generation case and the signing cases read it. Back to
+# **353.0 s on the GPU leg and 297.5 s on the CPU one**, which is 39% of `large`
+# and where this sat before signing existed. Every `sign` still rebuilds the
+# ffLDL tree, because §3.11.5 encodes the trapdoor and not the tree — that cost
+# is the seam's shape, not a fixture that could be hoisted too.
 py_test(
     name = "falcon_test",
     size = "large",
