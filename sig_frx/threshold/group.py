@@ -39,6 +39,12 @@ What travels, and how:
   condition in the protocol above surfaces as a `ValueError` here rather than
   as a silently wrong point. One bad entry rejects the call: a batch is one
   protocol message, and half of one is not a thing a caller can act on.
+- **Selecting from a batch is the group's operation, not the caller's.**
+  A protocol that wants one participant's element out of a batch asks for it by
+  index; it does not slice. The decoded form is the implementation's own, so a
+  caller that indexed it would be assuming a shape the seam never promised —
+  and `select_elements` returns a batch like everything else, so the result is
+  still `B = 1` rather than a loose element.
 - **There is no identity member.** It existed to seed a Python loop that
   accumulated elements one at a time, and `sum_elements` is that loop as a
   reduction, so the seed has no remaining caller. A group that needs the
@@ -57,11 +63,17 @@ Implementations are ordinary objects: no base class, no registration.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
+
+# The decoded element batch. Unbound on purpose: nothing generic here ever
+# looks inside one — a batch is produced by the group, handed back to the
+# group, and never indexed or unpacked by a caller — and a bound would have to
+# name a substrate, in the module whose whole contract is to name none.
+E = TypeVar("E")
 
 
 @runtime_checkable
-class PrimeOrderGroup(Protocol):
+class PrimeOrderGroup(Protocol[E]):
     """The group operations and codecs a threshold protocol needs.
 
     Names nothing from any one protocol — see the module docstring for what
@@ -77,12 +89,14 @@ class PrimeOrderGroup(Protocol):
 
     def scalar_base_mult(self, scalar: int) -> bytes: ...
 
-    def deserialize_elements(self, data: Sequence[bytes]) -> Any: ...
+    def deserialize_elements(self, data: Sequence[bytes]) -> E: ...
 
-    def elements_add(self, left: Any, right: Any) -> Any: ...
+    def elements_add(self, left: E, right: E) -> E: ...
 
-    def elements_scalar_mult(self, elements: Any, scalars: Sequence[int]) -> Any: ...
+    def elements_scalar_mult(self, elements: E, scalars: Sequence[int]) -> E: ...
 
-    def sum_elements(self, elements: Any) -> Any: ...
+    def select_elements(self, elements: E, indices: Sequence[int]) -> E: ...
 
-    def serialize_elements(self, elements: Any) -> list[bytes]: ...
+    def sum_elements(self, elements: E) -> E: ...
+
+    def serialize_elements(self, elements: E) -> list[bytes]: ...

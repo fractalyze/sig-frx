@@ -110,6 +110,11 @@ class Secp256k1Sha256:
     ) -> np.ndarray:
         return secp.multiple(self.curve, list(scalars), elements)
 
+    def select_elements(
+        self, elements: np.ndarray, indices: Sequence[int]
+    ) -> np.ndarray:
+        return elements[list(indices)]
+
     def sum_elements(self, elements: np.ndarray) -> np.ndarray:
         return secp.sum_points(self.curve, elements)
 
