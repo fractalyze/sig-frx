@@ -44,6 +44,45 @@ class ToFieldTest(absltest.TestCase):
         self.assertNotEqual(int(stored[0]), 1)
 
 
+class LaneReversedTest(absltest.TestCase):
+    """The placement on its own, for residues with nothing to decompose."""
+
+    def test_it_reverses_the_last_axis(self) -> None:
+        canonical = [1, 2, 3, 4]
+
+        got = field.lane_reversed(canonical)
+
+        self.assertEqual(np.asarray(got).astype(np.uint32).tolist(), [4, 3, 2, 1])
+
+    def test_a_batch_reverses_each_row(self) -> None:
+        """The last axis is the vector; everything before it is the caller's.
+
+        A PRF squeeze hands over `[N, hash_length]` and a reversal of the whole
+        array would also reverse the row order — which round-trips, self-checks,
+        and derives every chain start under the wrong slot.
+        """
+        got = field.lane_reversed([[1, 2, 3], [4, 5, 6]])
+
+        self.assertEqual(
+            np.asarray(got).astype(np.uint32).tolist(), [[3, 2, 1], [6, 5, 4]]
+        )
+
+    def test_it_agrees_with_the_decomposing_form(self) -> None:
+        """On limbs already decomposed, the two place them the same way.
+
+        `lane_reversed_limbs` is `decompose, place, convert` and this is the last
+        two, so a value below the prime — one limb's worth — has to come back
+        identical from both. They would not if either spelled the reversal
+        itself.
+        """
+        value = 12345
+
+        self.assertEqual(
+            np.asarray(field.lane_reversed_limbs(value, 3)).astype(np.uint32).tolist(),
+            np.asarray(field.lane_reversed([value, 0, 0])).astype(np.uint32).tolist(),
+        )
+
+
 class LaneReversedLimbsTest(absltest.TestCase):
     """The composite every caller reaches for: decompose, place, convert."""
 

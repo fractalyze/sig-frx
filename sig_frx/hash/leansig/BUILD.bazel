@@ -107,6 +107,24 @@ py_library(
     ],
 )
 
+# The signer's PRF — SHAKE128, and the seed every chain start expands from. It
+# reaches `field` for the prime and the placement and nothing else: hashing bytes
+# is not array work, so this is the one module here with no Poseidon in it.
+py_library(
+    name = "prf",
+    srcs = [
+        "__init__.py",
+        "prf.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":field",
+        ":params",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
 # The wire format: SSZ over KoalaBear residues, and the two rejections a decode
 # owes a verifier. It reaches `poseidon` only for the lane-reversal seam — the
 # placement every decoded digest needs and no module open-codes.
@@ -128,6 +146,29 @@ py_library(
     ],
 )
 
+# The signer's state: the top/bottom split, the resident window, and the key
+# generation that fills them. It drives the same `tree` and `wots` walks the
+# verifier runs — what it owns is the whole-tree addressing they are handed.
+py_library(
+    name = "signing",
+    srcs = [
+        "__init__.py",
+        "signing.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":encoding",
+        ":params",
+        ":prf",
+        ":tweakable",
+        "//sig_frx/hash:tree",
+        "//sig_frx/hash:tweakable",
+        "//sig_frx/hash:wots",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
 # The scheme: the verifier over every layer below it. Depends on the shared
 # hash-based machinery rather than restating it — `tree.root_from_path` is the
 # Merkle climb, `wots.chain` the Winternitz walk, and `tweakable` the operand
@@ -143,6 +184,8 @@ py_library(
         ":encoding",
         ":field",
         ":params",
+        ":prf",
+        ":signing",
         ":ssz",
         ":tweakable",
         "//sig_frx:batch",

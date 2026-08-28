@@ -47,16 +47,15 @@ on, so they take a Python integer and hand back the limbs
 one `compress`, and the decode is division and masking over values that are all
 below `PRIME` and so all fit a lane.
 
-That boundary is a real one for batch verification and it is not resolved here.
-A verifier holds `[B]` roots and `[B]` slots, and the two encoders would meet them
-with a Python loop. Every stage here is therefore one signature's, batch axis
-included — `compress` is one-dimensional too, so a leading axis on the decode
-alone would be a seam nothing could reach, and whether the batch arrives natively
-or through `frx.vmap` is not this slice's to guess. What the seam does about it is
-the verify slice's question — item 6 of
-[#195](https://github.com/fractalyze/sig-frx/issues/195), where the slot being a
-per-entry input already needs an answer — and the constraint to carry into it is
-the one above: the decomposition is bignum division, not a shift schedule.
+That boundary is a real one and it is settled the way it had to be. Every stage
+here is one signature's, batch axis included — `compress` is one-dimensional too,
+so a leading axis on the decode alone would be a seam nothing could reach — and
+the batch arrives through `frx.vmap` in `codewords` below rather than as a second
+transcription. The host half stays host: a verifier meets its `[B]` roots and
+slots with `encode_messages` and `encode_epochs`, which decompose on the host and
+lift once, and a signer meets its one of each with the singular forms. The
+constraint underneath all of it is the one above — the decomposition is bignum
+division, not a shift schedule.
 
 ## The rejection loop, and where it is not
 
@@ -64,13 +63,15 @@ the one above: the decomposition is bignum division, not a shift schedule.
 leanSig's is over `rho` with `MAX_TRIES`, and it is **a host loop**: signing is
 host-side here, and the acceptance test is a public function of public inputs —
 the verifier recomputes it from the `rho` the signature carries — so a
-data-dependent trip count leaks nothing a verifier does not already hold. The
-loop itself is the signer's and is not in this module, which is upstream's split
-too: `target_sum_encode` reports one attempt and the caller retries.
+data-dependent trip count leaks nothing a verifier does not already hold.
 
-When that signer lands, `wots_c.grind` is the shape it wants rather than a fresh
-one: a host search that tries a *block* of candidates per pass, so the loop is
-one batched dispatch per block instead of a Python iteration per candidate.
+The loop itself is not in this module, which is upstream's split too:
+`target_sum_encode` reports on one attempt and the caller retries. It lives in
+[`signing.py`](signing.py)'s `search`, in the shape this section predicted it
+would want — `wots_c.grind`'s, a host search trying a *block* of candidates per
+pass, so the cost is one batched dispatch per block rather than a Python
+iteration per candidate. `codewords` below is the batched entry point that made
+that possible, and the verifier is its other caller.
 
 ## Lane order
 
@@ -86,9 +87,11 @@ module owns the convention and a second one re-deriving it is what spreads it.
 
 from __future__ import annotations
 
-from functools import lru_cache
+from collections.abc import Callable
+from functools import lru_cache, partial
 from typing import Final
 
+import frx
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
@@ -96,14 +99,11 @@ from frx.typing import ArrayLike
 from sig_frx.arrays import namespace
 from sig_frx.hash.leansig import field, poseidon
 from sig_frx.hash.leansig.field import lane_reversed_limbs
-from sig_frx.hash.leansig.params import TWEAK_PREFIX_MESSAGE, LeanSigParams
-
-MESSAGE_BYTES: Final = 32
-"""What leanSig signs: a 32-byte root, upstream's `Bytes32`.
-
-Not a parameter — no preset moves it, and `MESSAGE_LENGTH_FIELD_ELEMENTS = 9`
-does not pin it, since 9 base-p limbs hold far more than 256 bits.
-"""
+from sig_frx.hash.leansig.params import (
+    MESSAGE_BYTES,
+    TWEAK_PREFIX_MESSAGE,
+    LeanSigParams,
+)
 
 _MESSAGE_HASH_WIDTH: Final = 24
 """The permutation the message hash runs on, fixed by upstream at the call site.
@@ -302,6 +302,22 @@ def target_sum_encode(
     Same operands as `message_hash`, and `accepted` is narrowed by the second
     filter — the digits must also sum to `target_sum`. A false flag is what a
     signer retries on, with fresh `randomness`.
+
+    **This, and not `message_hash`, is what both callers want**, and the two are
+    easy to confuse because they take the same operands and differ by one `&`.
+    The filter is the whole of what makes a codeword unforgeable. A verifier
+    walks each chain `base - 1 - digit` steps from the value the signature
+    released, so a codeword whose digits are all at least the signed one's
+    reaches the same endpoints and rebuilds the same root — *any* codeword does,
+    given released values that match it. The target sum is what collapses that
+    set to a single point: two codewords that dominate elementwise and sum alike
+    are equal. Drop the filter and the scheme is forgeable while every published
+    vector still passes, which is why
+    [`verify_vectors.py`](testing/verify_vectors.py) carries one case that fails
+    on this and nothing else.
+
+    Upstream spells the same rejection as `target_sum_encode(...) is None` in its
+    `verify` phase 2, so it is its check rather than an extra one.
     """
     digits, accepted = message_hash(
         message_elements, parameter, epoch_elements, randomness, params=params
@@ -311,3 +327,44 @@ def target_sum_encode(
     # one line (`CLAUDE.md`). The widest sum here is `dimension * (base - 1)`.
     on_layer = digits.sum(dtype=np.uint32) == np.uint32(params.target_sum)
     return digits, accepted & on_layer
+
+
+def codewords(
+    message_elements: Array,
+    parameters: Array,
+    epoch_elements: Array,
+    randomness: Array,
+    *,
+    params: LeanSigParams,
+) -> tuple[Array, Array]:
+    """`target_sum_encode` over a leading batch axis: `[B, dimension]`, `[B]`.
+
+    The batched form both entry points of the scheme reach — a verifier holds `B`
+    signatures and a signer holds a block of randomness candidates for one — and
+    it is here for the reason `encode_messages` and `encode_epochs` are: the
+    singular form is what a reader checks against upstream, and the batch is what
+    anything actually calls.
+
+    Every operand carries the batch axis, including the three a signer's block
+    does not vary. Broadcasting them at the call site rather than giving this an
+    `in_axes` for each is `wots_c.grind`'s shape
+    ([`../shrincs/wots_c.py`](../shrincs/wots_c.py)) and keeps one callable for
+    two callers instead of one per axis pattern.
+
+    `frx.vmap` around the one-signature body rather than a second transcription
+    of it over a batch axis — [`tweakable.py`](tweakable.py)'s `_compression` and
+    `_leaf_sponge` are the same shape, and `ml_dsa.py` gives the reason: a
+    batch-shaped copy is a second thing to keep in agreement with the first.
+    """
+    return _vmapped(params)(message_elements, parameters, epoch_elements, randomness)
+
+
+@lru_cache(maxsize=None)
+def _vmapped(params: LeanSigParams) -> Callable[..., tuple[Array, Array]]:
+    """One vmapped `target_sum_encode` per preset, memoized.
+
+    Built per call it would re-trace the same graph on every eager call — silent,
+    and orders of magnitude over the work, which is what
+    [`tweakable.py`](tweakable.py)'s memoized modes are guarding against too.
+    """
+    return frx.vmap(partial(target_sum_encode, params=params))

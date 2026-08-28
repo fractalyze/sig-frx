@@ -16,9 +16,10 @@ and this repo's are not. Anyone re-deriving a signature size or a chain count
 from the technical note will get different numbers: the note gives `v = 64`, and
 the widely-quoted 3112-byte signature is that figure. `PROD` is `v = 46`.
 
-**Only the columns something here reads.** `MAX_TRIES` is the last one upstream
-carries that nothing here does — the signer's rejection loop is what reads it,
-and it arrives with that slice. `HASH_LENGTH_FIELD_ELEMENTS` and `CAPACITY`
+**Only the columns something here reads.** Every column upstream carries now has
+a reader: `MAX_TRIES` was the last one outstanding and arrived, as predicted,
+with the signer's rejection loop ([`signing.py`](signing.py)).
+`HASH_LENGTH_FIELD_ELEMENTS` and `CAPACITY`
 arrived exactly that way, with the tweakable hash family
 ([`tweakable.py`](tweakable.py)); `LOG_LIFETIME` arrived with the wire format
 ([`ssz.py`](ssz.py)), which sizes an authentication path by it. That is
@@ -38,6 +39,19 @@ from functools import cached_property
 from typing import Final
 
 from sig_frx.hash.leansig.field import PRIME
+
+MESSAGE_BYTES: Final = 32
+"""What leanSig signs: a 32-byte root, upstream's `Bytes32`.
+
+Not a preset parameter — no row below moves it, and
+`MESSAGE_LENGTH_FIELD_ELEMENTS = 9` does not pin it, since 9 base-p limbs hold
+far more than 256 bits. Here anyway, with the tweak prefixes, because this
+module is the package leaf that everything imports and the width has two
+readers that must not disagree: [`encoding.py`](encoding.py) hashes the root,
+and [`prf.py`](prf.py) binds a signing attempt's randomness to it. `prf` cannot
+reach `encoding` for it — that would pull Poseidon into the one module here
+with none — so a second literal `32` was the alternative.
+"""
 
 TWEAK_PREFIX_CHAIN: Final = 0x00
 """A Winternitz chain step — `TWEAK_PREFIX_CHAIN`.
@@ -64,9 +78,9 @@ class LeanSigParams:
     path.
 
     Upstream additionally requires it even, because its tree splits into a top
-    and a bottom half of `log_lifetime / 2` levels each. That check arrives with
-    the split, which nothing here has yet — the same rule this module's docstring
-    states for a column, read one level down."""
+    and a bottom half of `log_lifetime / 2` levels each. That check is below,
+    having arrived with the split ([`signing.py`](signing.py)) — the same rule
+    this module's docstring states for a column, read one level down."""
 
     dimension: int
     """`DIMENSION`, the `v` of the papers: how many chains a signature commits to,
@@ -83,6 +97,14 @@ class LeanSigParams:
 
     target_sum: int
     """`TARGET_SUM`: the hypercube layer a codeword has to land on to be accepted."""
+
+    max_tries: int
+    """`MAX_TRIES`: how many randomness draws a signer makes before giving up.
+
+    A safety rail rather than a budget. Landing on the target layer is about one
+    attempt in nine hundred at `PROD` and one in fifty at `TEST`, so a hundred
+    thousand is far past where a working signer stops — reaching it means the
+    parameters are wrong, not that the search was unlucky."""
 
     parameter_length: int
     """`PARAMETER_LENGTH`: the public parameter, in field elements."""
@@ -113,6 +135,16 @@ class LeanSigParams:
             raise ValueError(
                 f"Q * BASE^Z must equal PRIME - 1 = {PRIME - 1}, got "
                 f"{self.quotient} * {self.base}^{self.digits_per_element}"
+            )
+        # Upstream's other validator. The signer's tree is a top half over a
+        # bottom half of equal height, so an odd exponent has no split — and
+        # what an unchecked one produces is a bottom tree one level short of
+        # where the top tree starts reading, which is a wrong key rather than
+        # an error.
+        if self.log_lifetime % 2:
+            raise ValueError(
+                f"the tree splits into halves of log_lifetime / 2 levels, so "
+                f"log_lifetime must be even; got {self.log_lifetime}"
             )
 
     @cached_property
@@ -148,6 +180,7 @@ PROD: Final = LeanSigParams(
     digits_per_element=8,
     quotient=127,
     target_sum=200,
+    max_tries=100_000,
     parameter_length=5,
     tweak_length=2,
     message_length=9,
@@ -164,6 +197,7 @@ TEST: Final = LeanSigParams(
     digits_per_element=8,
     quotient=127,
     target_sum=6,
+    max_tries=100_000,
     parameter_length=5,
     tweak_length=2,
     message_length=9,

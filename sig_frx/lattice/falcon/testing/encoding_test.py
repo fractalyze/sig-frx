@@ -81,6 +81,30 @@ class Bits(parameterized.TestCase):
         got = encoding.bytes_to_bits_high_first(fnp.asarray(bytearray(data), np.uint8))
         np.testing.assert_array_equal(np.asarray(got), ref.bits_of(data))
 
+    def test_bits_to_bytes_undoes_bytes_to_bits(self) -> None:
+        data = bytes(random.Random(12).randrange(256) for _ in range(64))
+        bits = encoding.bytes_to_bits_high_first(fnp.asarray(bytearray(data), np.uint8))
+        np.testing.assert_array_equal(
+            np.asarray(encoding.bits_to_bytes_high_first(bits)), bytearray(data)
+        )
+
+    @parameterized.parameters(1, 3, 5, 6, 7, 8, 14)
+    def test_packing_fields_undoes_reading_them(self, width: int) -> None:
+        """The two are inverses at every width §3.11 uses, not only at whole bytes.
+
+        The widths that are not divisors of eight are the ones that matter: a
+        field then straddles a byte, which is the case a per-byte implementation
+        of either direction would get wrong while agreeing at 8 and 14.
+        """
+        rng = random.Random(width + 100)
+        values = [rng.randrange(1 << width) for _ in range(8 * 8)]
+        bits = encoding.bits_from_fields_high_first(
+            fnp.asarray(values, np.uint32), width
+        )
+        packed = encoding.bits_to_bytes_high_first(bits)
+        got = encoding.unpack_fields_high_first(packed, width)
+        np.testing.assert_array_equal(np.asarray(got), values)
+
     @parameterized.parameters(1, 3, 7, 8, 14, 16)
     def test_fields_are_big_endian_across_the_stream(self, width: int) -> None:
         rng = random.Random(width)
@@ -103,11 +127,7 @@ class PublicKey(parameterized.TestCase):
         n = params["n"]
         rng = random.Random(n)
         h = [rng.randrange(ref.Q) for _ in range(n)]
-        bits: list[int] = [0] * 8
-        bits[4:8] = [(n.bit_length() - 1) >> s & 1 for s in range(3, -1, -1)]
-        for value in h:
-            bits.extend((value >> shift) & 1 for shift in range(13, -1, -1))
-        blob = ref.bytes_of(bits)
+        blob = ref.pk_encode(h, n)
         self.assertLen(blob, params["public_key_size"])
         got, ok = encoding.pk_decode(fnp.asarray(bytearray(blob), np.uint8), n)
         self.assertTrue(bool(ok))
@@ -118,12 +138,7 @@ class PublicKey(parameterized.TestCase):
     def test_a_coefficient_at_or_above_q_is_refused(self, **params: Any) -> None:
         """Fourteen bits hold 16383, so `q ≤ h_i` is representable and forgeable."""
         n = params["n"]
-        bits: list[int] = [0] * 8
-        bits[4:8] = [(n.bit_length() - 1) >> s & 1 for s in range(3, -1, -1)]
-        for index in range(n):
-            value = ref.Q if index == 3 else 0
-            bits.extend((value >> shift) & 1 for shift in range(13, -1, -1))
-        blob = ref.bytes_of(bits)
+        blob = ref.pk_encode([ref.Q if i == 3 else 0 for i in range(n)], n)
         _, ok = encoding.pk_decode(fnp.asarray(bytearray(blob), np.uint8), n)
         self.assertFalse(bool(ok))
         self.assertIsNone(ref.pk_decode(blob, n))
@@ -135,6 +150,107 @@ class PublicKey(parameterized.TestCase):
         blob[0] = (n.bit_length() - 1) ^ 1
         _, ok = encoding.pk_decode(fnp.asarray(blob, np.uint8), n)
         self.assertFalse(bool(ok))
+
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_the_encoder_writes_what_the_reference_writes(self, **params: Any) -> None:
+        n = params["n"]
+        rng = random.Random(n + 1)
+        h = [rng.randrange(ref.Q) for _ in range(n)]
+        got = encoding.pk_encode(fnp.asarray(h, np.uint32), n)
+        self.assertEqual(bytes(np.asarray(got)), ref.pk_encode(h, n))
+        self.assertLen(np.asarray(got), params["public_key_size"])
+
+
+class PrivateKey(parameterized.TestCase):
+    """§3.11.5 — three runs at two widths, and the value it forbids."""
+
+    def _draw(self, n: int, seed: int) -> tuple[list[int], list[int], list[int]]:
+        """Coefficients inside each width's *valid* range, minimum excluded.
+
+        The forbidden value is the subject of its own case below, so it is kept
+        out of the ones that are about the encoding.
+        """
+        rng = random.Random(seed)
+        width = ref.SK_WIDTHS[n]
+        limit = 1 << (width - 1)
+        small = [rng.randrange(-limit + 1, limit) for _ in range(2 * n)]
+        return small[:n], small[n:], [rng.randrange(-127, 128) for _ in range(n)]
+
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_round_trips_through_the_reference(self, **params: Any) -> None:
+        n = params["n"]
+        f, g, big_f = self._draw(n, n)
+        blob = encoding.sk_encode(
+            fnp.asarray(f, np.int32),
+            fnp.asarray(g, np.int32),
+            fnp.asarray(big_f, np.int32),
+            n,
+        )
+        self.assertLen(np.asarray(blob), params["secret_key_size"])
+        self.assertEqual(bytes(np.asarray(blob)), ref.sk_encode(f, g, big_f, n))
+
+        back_f, back_g, back_big_f, ok = encoding.sk_decode(blob, n)
+        self.assertTrue(bool(ok))
+        for got, want, name in (
+            (back_f, f, "f"),
+            (back_g, g, "g"),
+            (back_big_f, big_f, "F"),
+        ):
+            with self.subTest(polynomial=name):
+                np.testing.assert_array_equal(np.asarray(got), want)
+        self.assertEqual(ref.sk_decode(bytes(np.asarray(blob)), n), (f, g, big_f))
+
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_the_forbidden_minimum_is_refused(self, **params: Any) -> None:
+        """§3.11.5 excludes `−2^(w−1)`, which two's complement would otherwise carry.
+
+        One case per run, because the check has to reach all three: `f` and `g`
+        at the degree's width and `F` at eight, where a single case would leave
+        two of the three unexercised and passing.
+        """
+        n = params["n"]
+        width = ref.SK_WIDTHS[n]
+        for index, (position, size) in enumerate(((0, width), (n, width), (2 * n, 8))):
+            with self.subTest(run="fgF"[index]):
+                f, g, big_f = self._draw(n, n + 2)
+                joined = f + g + big_f
+                joined[position] = -(1 << (size - 1))
+                blob = ref.sk_encode(joined[:n], joined[n : 2 * n], joined[2 * n :], n)
+                _, _, _, ok = encoding.sk_decode(
+                    fnp.asarray(bytearray(blob), np.uint8), n
+                )
+                self.assertFalse(bool(ok))
+                self.assertIsNone(ref.sk_decode(blob, n))
+
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_a_wrong_header_is_refused(self, **params: Any) -> None:
+        """`0101nnnn`, so both the nibble and the degree are part of the verdict."""
+        n = params["n"]
+        for label, header in (
+            ("public key's nibble", n.bit_length() - 1),
+            ("the neighbouring degree", 0x50 | ((n.bit_length() - 1) ^ 1)),
+        ):
+            with self.subTest(header=label):
+                blob = bytearray(params["secret_key_size"])
+                blob[0] = header
+                _, _, _, ok = encoding.sk_decode(fnp.asarray(blob, np.uint8), n)
+                self.assertFalse(bool(ok))
+
+    def test_the_width_table_is_the_sections_own(self) -> None:
+        """The implementation carries two rows of §3.11.5's table; this is all eight.
+
+        A table with only the used rows cannot say whether the rule was read
+        correctly, and the boundaries are where a misreading lands — so the two
+        the implementation defines are checked against a transcription that
+        covers the degrees either side of them.
+        """
+        self.assertEqual(
+            ref.SK_WIDTHS,
+            {2: 8, 4: 8, 8: 8, 16: 8, 32: 8, 64: 7, 128: 7, 256: 6, 512: 6, 1024: 5},
+        )
+        for degree, width in encoding.SK_FG_BITS.items():
+            with self.subTest(degree=degree):
+                self.assertEqual(width, ref.SK_WIDTHS[degree])
 
 
 class Decompress(parameterized.TestCase):

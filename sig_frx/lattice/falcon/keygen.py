@@ -1,11 +1,16 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """Falcon key generation — Algorithm 5's draw, Algorithm 6 under it, and the tree.
 
-Five sections, in the order key generation runs them rather than the order they
+Six sections, in the order key generation runs them rather than the order they
 were built:
 
 - **Algorithm 5** draws `f` and `g` from a discrete Gaussian and rejects the
   pair unless the basis is short enough and `f` is a unit.
+- **the two `Z_q` steps** — Algorithm 4 line 9's public key `h = g·f^{-1}`, and
+  (3.35)'s recovery of the `G` that §3.11.5 does not encode. They are the only
+  part of key generation that lives where verification does
+  ([`arith.py`](arith.py)), and the recovery is a key *loading* step rather than
+  one Algorithm 5 runs.
 - **the descent** (Algorithm 6's left-hand side) recurses on the field norm:
   `f` of degree `n` becomes `N(f) = f_e² - x·f_o²` of degree `n/2`.
 - **the base case** closes it at degree 1, where the NTRU equation is Bezout's.
@@ -16,14 +21,15 @@ were built:
   ([#27](https://github.com/fractalyze/sig-frx/issues/27)) walks.
 
 The restart loop that drives Algorithm 5 lands with the caller that has a loop
-to put it in — [#26](https://github.com/fractalyze/sig-frx/issues/26).
+to put it in, which is [`falcon.Falcon.keygen`](falcon.py).
 
-The five share almost nothing: the descent is `bigint`'s residues, the base
+The six share almost nothing: the descent is `bigint`'s residues, the base
 case is `bigint`'s limbs under a `fori_loop`, the walk up is a host loop over
-`fft`, Algorithm 5 is `fft` and `arith` and a table built with `decimal`, and
-the tree is `float64` with no integer in it at all. They are one module because
-they are one operation, and the reason to split would be that the file stops
-being readable rather than that the sections differ.
+`fft`, Algorithm 5 is `fft` and a table built with `decimal`, the two `Z_q`
+steps are one opcode each, and the tree is `float64` with no integer in it at
+all. They are one module because they are one operation, and the reason to
+split would be that the file stops being readable rather than that the sections
+differ.
 
 ## The two directions are sized differently, and on purpose
 
@@ -423,6 +429,13 @@ def base_case(f0: ArrayLike, g0: ArrayLike, bits: int, q: int) -> tuple[Any, Any
 
 # -- Algorithm 5: the draw and the two checks ---------------------------------
 
+# (3.29)'s `4096` — the draws one polynomial always costs, whatever its degree,
+# and eight bytes each. Named because four things read them: the guard and the
+# reshape in `draw_polynomial`, the per-attempt budget below, and the scheme
+# module that has to squeeze exactly that many bytes.
+DRAW_COUNT = 4096
+DRAW_BYTES = 8
+
 # §3.8.2's `σ_{f,g} = 1.17·sqrt(q/2n)` at `n = 4096`, which is the width one
 # draw carries. A coefficient at degree `n` is the sum of `4096/n` of them, so
 # its variance is `(4096/n)·σ²` — the standard's `σ_{f,g}` for that degree,
@@ -492,9 +505,13 @@ def draw_polynomial(degree: int, stream: ArrayLike) -> Any:
     the draw be traced at all: a cumulative table turns "sample until accepted"
     into "count the thresholds this uniform passes".
     """
-    if 4096 % degree:
-        raise ValueError(f"degree {degree} does not divide 4096")
-    bytes_ = fnp.asarray(stream).astype(np.uint32)
+    if DRAW_COUNT % degree:
+        raise ValueError(f"degree {degree} does not divide {DRAW_COUNT}")
+    # Lifting for the caller would put a device dispatch on each of the ~17
+    # attempts a key costs, on a path that is concrete throughout
+    # ([`conventions.md`](../../../docs/reference/conventions.md)).
+    xnp = namespace(stream)
+    bytes_ = xnp.asarray(stream).astype(np.uint32)
 
     def word(chunk: Any) -> Any:
         """Four bytes as one 32-bit value, most significant first."""
@@ -522,9 +539,11 @@ def draw_polynomial(degree: int, stream: ArrayLike) -> Any:
     top, bottom = _draw_table()[:, 0], _draw_table()[:, 1]
     high, low = high[:, None], low[:, None]
     passed = (high > top) | ((high == top) & (low >= bottom))
-    magnitude = fnp.sum(passed, axis=-1, dtype=np.int32)
-    values = fnp.where(sign.astype(bool), -magnitude, magnitude)
-    return fnp.sum(values.reshape(degree, 4096 // degree), axis=-1, dtype=np.int32)
+    magnitude = xnp.sum(passed, axis=-1, dtype=np.int32)
+    values = xnp.where(sign.astype(bool), -magnitude, magnitude)
+    return xnp.sum(
+        values.reshape(degree, DRAW_COUNT // degree), axis=-1, dtype=np.int32
+    )
 
 
 def gram_schmidt_squared_norm(f: ArrayLike, g: ArrayLike) -> Any:
@@ -572,6 +591,124 @@ def invertible(f: ArrayLike) -> Any:
     """
     residues = arith.ntt(arith.to_field(fnp.asarray(f)))
     return fnp.all(residues.astype(np.uint32) != np.uint32(0))
+
+
+# -- the two `Z_q` steps ------------------------------------------------------
+
+
+def public_key(f: ArrayLike, g: ArrayLike) -> Any:
+    """Algorithm 4 line 9 — `h = g·f^{-1} mod q`, as `[n]` residues under `q`.
+
+    The whole of what a Falcon public key is. Read back with `astype` and never
+    a bitcast, since the field's storage is a Montgomery representative
+    ([`arith`](arith.py)), and left uncentered because §3.11.4 encodes "each
+    value in the 0 to `q − 1` range".
+
+    Lands on the device whatever the caller is, for the reason
+    [`invertible`](#invertible) does: `arith.ntt` is an opcode with no host
+    form. So key generation is host for the trapdoor and device for its two
+    `Z_q` steps, which is the same shape verification's `decompress` has.
+    """
+    f_hat = arith.ntt(arith.to_field(f))
+    g_hat = arith.ntt(arith.to_field(g))
+    return arith.intt(arith.base_div(g_hat, f_hat)).astype(np.uint32)
+
+
+def recover_g(f: ArrayLike, g: ArrayLike, big_f: ArrayLike) -> Any:
+    """(3.35) — `G = (q + g·F)/f mod ϕ`, the polynomial §3.11.5 does not encode.
+
+    A private key stores `f`, `g` and `F`; `G` is recomputed on load, which is
+    what makes the encoding a quarter shorter than the trapdoor it carries.
+
+    **The `q +` vanishes here and that is the point.** It is what makes the
+    numerator divisible by `f` over the integers, where this computes modulo `q`
+    and `q ≡ 0` — which is exactly the observation §3.11.5 makes when it says
+    the recovery "can be done modulo `q` as well, using the same techniques as
+    signature verification". So one division in the transform domain recovers a
+    polynomial whose coefficients are not residues at all.
+
+    What licenses reading the answer back as centered integers is that `G` is
+    *small*: §3.11.5 asserts it in as many words, and the encoding gives `F`
+    eight bits for the same reason. A `G` that outgrew `q/2` would come back as
+    a different polynomial with no complaint, so
+    [`keygen_test`](testing/keygen_test.py) checks the NTRU equation over the
+    recovered `G` rather than trusting the round trip.
+    """
+    numerator = arith.base_mul(
+        arith.ntt(arith.to_field(g)), arith.ntt(arith.to_field(big_f))
+    )
+    return arith.centered(
+        arith.intt(arith.base_div(numerator, arith.ntt(arith.to_field(f))))
+    )
+
+
+# What one attempt draws: `f` and `g`, at `DRAW_COUNT` draws of `DRAW_BYTES`
+# each. Exported as a byte count rather than as the shape it reshapes to,
+# because a caller only has to size a squeeze — the layout is this module's.
+_ATTEMPT_SHAPE = (2, DRAW_COUNT, DRAW_BYTES)
+ATTEMPT_BYTES = 2 * DRAW_COUNT * DRAW_BYTES
+
+
+def ntru_gen(stream: ArrayLike, degree: int) -> tuple[Any, Any, Any, Any] | None:
+    """Algorithm 5 once — `(f, g, F, G)`, or `None` where the standard restarts.
+
+    All three of the standard's rejections, and none of the retrying. **The
+    restart loop is the caller's**, for two reasons that point the same way: its
+    trip count is data, so it is a host loop and this module has no host loop to
+    put it in; and a restart needs *fresh bytes*, which means a seed expansion,
+    which is a scheme's decision and not Algorithm 5's — the standard says only
+    "restart". [`falcon.Falcon.keygen`](falcon.py) is where both live.
+
+    `stream` is [`ATTEMPT_BYTES`](#ATTEMPT_BYTES) bytes, `f`'s draw and then
+    `g`'s. Taking bytes rather than a seed is what keeps this deterministic in
+    its input and testable without a hash.
+
+    ## The order of the rejections is the standard's, and it is also the cheap one
+
+    Lines 7-11 come before line 12 in Algorithm 5, and what each costs shows
+    why: a measured run at `n = 512` took **16 rejections at line 10 costing
+    about 30 ms between them, then one accepted attempt costing 64 s**, nearly
+    all of it the solve. Reordering would put the expensive test first for
+    nothing.
+
+    Line 13's rejection is the one that cannot be moved earlier — the descent's
+    bottom is coprime for roughly half the pairs that reach it, and finding out
+    costs the descent. So a key costs a small number of *solves*, where it costs
+    a larger number of attempts.
+    """
+    draws = np.asarray(stream, dtype=np.uint8).reshape(_ATTEMPT_SHAPE)
+    f = np.asarray(draw_polynomial(degree, draws[0]))
+    g = np.asarray(draw_polynomial(degree, draws[1]))
+
+    # Line 7. On the device whatever the caller is, since `arith.ntt` has no
+    # host form — the one step of an attempt that leaves the host.
+    if not bool(np.asarray(invertible(f))):
+        return None
+    # Lines 9-11.
+    if float(np.asarray(gram_schmidt_squared_norm(f, g))) > GRAM_SCHMIDT_BOUND:
+        return None
+    # Line 12, and line 13's `⊥` is `ok`.
+    bits = max(int(np.abs(f).max()), int(np.abs(g).max())).bit_length()
+    limbs_f, limbs_g, _, ok = ntru_solve(
+        to_limbs(f, bits), to_limbs(g, bits), bits, arith.Q
+    )
+    if not bool(np.asarray(ok)):
+        return None
+    return f, g, _from_limbs(limbs_f), _from_limbs(limbs_g)
+
+
+def _from_limbs(limbs: ArrayLike) -> Any:
+    """A reduced `[degree, limbs]` back to the small integers it holds.
+
+    `F` and `G` come out of [`reduce`](#reduce) at whatever limb budget the
+    answer needed, and what they hold at that point fits eight bits — §3.11.5
+    gives `F` exactly that. So this narrows to `int32` rather than staying wide,
+    and the encoder is what would notice if it did not.
+    """
+    rows = np.asarray(limbs)
+    return np.array(
+        [bigint.from_limbs(row, signed=True) for row in rows], dtype=np.int32
+    )
 
 
 # -- the lift back up ---------------------------------------------------------

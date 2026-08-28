@@ -1,11 +1,14 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """Arithmetic in `Z_q` and the NTT over `q = 12289`, for Falcon (FN-DSA).
 
-Verification is the only Falcon operation that lives entirely in this ring — it
-recovers `s1 = c − s2·h mod q` and measures a norm — so this module is what
-verification needs and nothing more. Key generation and signing work over
-`Q[x]/(x^n + 1)` in the complex domain instead, which is a different transform
-with a precision requirement of its own and is not here.
+Verification is the only Falcon operation that lives *entirely* in this ring —
+it recovers `s1 = c − s2·h mod q` and measures a norm. Key generation is mostly
+elsewhere, over `Q[x]/(x^n + 1)` in the complex domain, which is a different
+transform with a precision requirement of its own and is not here; but two of
+its steps are `Z_q` and do reach in, so this module is the scheme's `Z_q` and
+not verification's alone. Those two are Algorithm 5 line 7's invertibility test
+and Algorithm 4 line 9's `h = g·f^{-1}`, and they live in
+[`keygen.py`](keygen.py) — what belongs here is the arithmetic, not the step.
 
 ## The field is a dtype, and so is the transform
 
@@ -181,3 +184,23 @@ def base_mul(a_hat: ArrayLike, b_hat: ArrayLike) -> Any:
     """
     xnp = namespace(a_hat, b_hat)
     return xnp.asarray(a_hat) * xnp.asarray(b_hat)
+
+
+def base_div(a_hat: ArrayLike, b_hat: ArrayLike) -> Any:
+    """Division in the transform domain, which is pointwise and exact.
+
+    **The one entry in this set the other two lattice schemes have no
+    counterpart for**, and it is the standard that asks for it rather than a
+    convenience: Algorithm 4 line 9 builds the public key as `h = g·f^{-1}`, and
+    §3.11.5 recovers the unencoded `G` as `(q + gF)/f`. Neither ML-DSA nor
+    ML-KEM ever divides, so this has no shared name to match and says so instead
+    of looking like an omission from theirs.
+
+    The inversion is the field dtype's, not this module's — the same rule
+    `base_mul` follows, one operation further. A zero divisor is what
+    [`keygen.invertible`](keygen.py) refuses before it can get here; the
+    standard's own check is Algorithm 5 line 7 and it is a rejection rather than
+    an error, so the guard belongs there and not in an arithmetic primitive.
+    """
+    xnp = namespace(a_hat, b_hat)
+    return xnp.asarray(a_hat) / xnp.asarray(b_hat)

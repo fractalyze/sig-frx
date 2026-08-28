@@ -81,7 +81,7 @@ from zk_dtypes import koalabear_mont as F
 
 from sig_frx.hash import tree
 from sig_frx.hash.leansig import poseidon
-from sig_frx.hash.leansig.field import lane_reversed_limbs
+from sig_frx.hash.leansig.field import host_column, lane_reversed_limbs
 from sig_frx.hash.leansig.params import (
     TWEAK_PREFIX_CHAIN,
     TWEAK_PREFIX_TREE,
@@ -128,17 +128,17 @@ def _column(values: ArrayLike, name: str, bits: int) -> np.ndarray:
     has no neighbour to corrupt, but its shift happens in `int64`, and a shift
     past that wraps silently. Neither is caught by the limb-fit check in
     [`field.py`](field.py), which only ever sees the sum.
+
+    The mechanism is `field.host_column`'s, which two other callers in this
+    package share; what stays here is the sentence, because the two hazards
+    above are what make *this* bound worth stating.
     """
-    column = np.asarray(values, dtype=np.int64).reshape(-1)
-    outside = (column < 0) | (column >= 1 << bits)
-    if np.any(outside):
-        raise ValueError(
-            f"{name} takes {bits} bits in a packed tweak, so it must be in "
-            f"[0, {1 << bits}); {int(np.count_nonzero(outside))} of "
-            f"{column.size} entries are not, the first being "
-            f"{int(column[np.argmax(outside)])}"
-        )
-    return column
+    return host_column(
+        values,
+        f"{name} takes {bits} bits in a packed tweak, so it must be in "
+        f"[0, {1 << bits})",
+        1 << bits,
+    )
 
 
 def _packed(
@@ -210,6 +210,31 @@ def node_tweaks(params: LeanSigParams) -> tree.NodeAddresses:
     `tree.NodeAddresses` records what that costs a caller.
     """
     return partial(tree_tweaks, params=params)
+
+
+def chain_columns(
+    slots: ArrayLike, *, params: LeanSigParams
+) -> tuple[np.ndarray, np.ndarray]:
+    """Every chain of every slot, as the `(epoch, chain_index)` column pair.
+
+    `slots` is `[B]` and the result is two `[B * dimension]` columns naming one
+    chain each, slot-major: slot 0's `dimension` chains, then slot 1's.
+
+    That layout is an invariant three callers have to agree on byte for byte —
+    the verifier's chain walk, the signer's leaf build and its release — and it
+    is stated once here because the two consumers of the pair are both in this
+    package: `chain_step_tweaks` below, and
+    [`prf.chain_starts`](prf.py), which take it as their signature. Spelling the
+    `repeat`/`tile` at each call site leaves three chances to transpose them,
+    which is a walk over the right chains at the wrong positions rather than an
+    error. `wots._position_columns` ([`../wots.py`](../wots.py)) is the same move
+    for FIPS 205's address prefix.
+    """
+    epochs = np.asarray(slots, dtype=np.int64).reshape(-1)
+    return (
+        np.repeat(epochs, params.dimension),
+        np.tile(np.arange(params.dimension), epochs.size),
+    )
 
 
 def chain_step_tweaks(
