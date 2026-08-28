@@ -1,10 +1,11 @@
 # Copyright 2026 The sig-frx Authors. SPDX-License-Identifier: Apache-2.0
 """The vocabulary every leanSig suite needs: lane order, and the two legs.
 
-Three suites here gate three layers of one scheme — the permutation, the two
-modes over it, and the message-to-codeword pipeline — and each of them meets the
-same two facts. Upstream's vectors are in leanSpec's lane order while everything
-[`poseidon.py`](../poseidon.py) runs is over the reverse of it, so a case
+Five suites here gate five layers of one scheme — the permutation, the two
+modes over it, the message-to-codeword pipeline, the PRF and the signer — and
+each of them meets the same two facts. Upstream's vectors are in leanSpec's
+lane order while everything [`poseidon.py`](../poseidon.py) runs is over the
+reverse of it, so a case
 reverses on the way in and back on the way out; and every case runs twice, once
 eagerly and once traced, because the two must agree in *dtype* as well as value.
 
@@ -31,6 +32,7 @@ import frx.numpy as fnp
 import numpy as np
 from zk_dtypes import koalabear_mont as F
 
+from sig_frx.hash import tweakable as shared_tweakable
 from sig_frx.hash.leansig import params
 from sig_frx.hash.leansig.params import LeanSigParams
 
@@ -104,6 +106,26 @@ def to_leanspec_rows(values: fnp.ndarray) -> list[list[int]]:
     row.
     """
     return [to_canonical(row)[::-1] for row in np.asarray(values)]
+
+
+def hex_of(values: Any) -> str:
+    """A `uint8` array as the hex string a vector states it in."""
+    return bytes(np.asarray(values, dtype=np.uint8)).hex()
+
+
+def bytes_of(hex_string: str) -> np.ndarray:
+    """A vector's hex string as the `uint8` row the seam takes."""
+    return np.frombuffer(bytes.fromhex(hex_string), dtype=np.uint8)
+
+
+def broadcast(operand: fnp.ndarray, count: int) -> fnp.ndarray:
+    """A `[k]` operand widened to `[count, k]`, as the batched entry points take.
+
+    `sig_frx.hash.tweakable.batched` under a name a suite can reach without
+    learning what a family is — the leanSig callers all hand it the same field
+    dtype, so there is nothing for a case to choose.
+    """
+    return shared_tweakable.batched(operand, count, dtype=F)
 
 
 def on_leg(function: Callable[..., Any], jit: bool) -> Callable[..., Any]:

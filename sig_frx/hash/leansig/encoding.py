@@ -99,14 +99,11 @@ from frx.typing import ArrayLike
 from sig_frx.arrays import namespace
 from sig_frx.hash.leansig import field, poseidon
 from sig_frx.hash.leansig.field import lane_reversed_limbs
-from sig_frx.hash.leansig.params import TWEAK_PREFIX_MESSAGE, LeanSigParams
-
-MESSAGE_BYTES: Final = 32
-"""What leanSig signs: a 32-byte root, upstream's `Bytes32`.
-
-Not a parameter — no preset moves it, and `MESSAGE_LENGTH_FIELD_ELEMENTS = 9`
-does not pin it, since 9 base-p limbs hold far more than 256 bits.
-"""
+from sig_frx.hash.leansig.params import (
+    MESSAGE_BYTES,
+    TWEAK_PREFIX_MESSAGE,
+    LeanSigParams,
+)
 
 _MESSAGE_HASH_WIDTH: Final = 24
 """The permutation the message hash runs on, fixed by upstream at the call site.
@@ -305,6 +302,22 @@ def target_sum_encode(
     Same operands as `message_hash`, and `accepted` is narrowed by the second
     filter — the digits must also sum to `target_sum`. A false flag is what a
     signer retries on, with fresh `randomness`.
+
+    **This, and not `message_hash`, is what both callers want**, and the two are
+    easy to confuse because they take the same operands and differ by one `&`.
+    The filter is the whole of what makes a codeword unforgeable. A verifier
+    walks each chain `base - 1 - digit` steps from the value the signature
+    released, so a codeword whose digits are all at least the signed one's
+    reaches the same endpoints and rebuilds the same root — *any* codeword does,
+    given released values that match it. The target sum is what collapses that
+    set to a single point: two codewords that dominate elementwise and sum alike
+    are equal. Drop the filter and the scheme is forgeable while every published
+    vector still passes, which is why
+    [`verify_vectors.py`](testing/verify_vectors.py) carries one case that fails
+    on this and nothing else.
+
+    Upstream spells the same rejection as `target_sum_encode(...) is None` in its
+    `verify` phase 2, so it is its check rather than an extra one.
     """
     digits, accepted = message_hash(
         message_elements, parameter, epoch_elements, randomness, params=params

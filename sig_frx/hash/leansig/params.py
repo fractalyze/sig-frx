@@ -40,6 +40,19 @@ from typing import Final
 
 from sig_frx.hash.leansig.field import PRIME
 
+MESSAGE_BYTES: Final = 32
+"""What leanSig signs: a 32-byte root, upstream's `Bytes32`.
+
+Not a preset parameter — no row below moves it, and
+`MESSAGE_LENGTH_FIELD_ELEMENTS = 9` does not pin it, since 9 base-p limbs hold
+far more than 256 bits. Here anyway, with the tweak prefixes, because this
+module is the package leaf that everything imports and the width has two
+readers that must not disagree: [`encoding.py`](encoding.py) hashes the root,
+and [`prf.py`](prf.py) binds a signing attempt's randomness to it. `prf` cannot
+reach `encoding` for it — that would pull Poseidon into the one module here
+with none — so a second literal `32` was the alternative.
+"""
+
 TWEAK_PREFIX_CHAIN: Final = 0x00
 """A Winternitz chain step — `TWEAK_PREFIX_CHAIN`.
 

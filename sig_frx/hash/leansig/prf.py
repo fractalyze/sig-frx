@@ -63,8 +63,8 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-from sig_frx.hash.leansig.field import PRIME, lane_reversed
-from sig_frx.hash.leansig.params import LeanSigParams
+from sig_frx.hash.leansig.field import PRIME, host_column, lane_reversed
+from sig_frx.hash.leansig.params import MESSAGE_BYTES, LeanSigParams
 
 KEY_BYTES: Final = 32
 """`PRF_KEY_LENGTH` — the master seed, in bytes.
@@ -109,12 +109,6 @@ only thing bounding it, where a slot is bounded by the lifetime.
 """
 
 
-_MESSAGE_BYTES: Final = 32
-"""What a signature's randomness is bound to — the same `Bytes32` root
-[`encoding.py`](encoding.py) hashes, checked here so a wrong-width message is
-refused before it reaches a squeeze that would accept any length."""
-
-
 def chain_starts(
     key: bytes, epochs: ArrayLike, chain_indices: ArrayLike, *, params: LeanSigParams
 ) -> Array:
@@ -151,7 +145,7 @@ def chain_starts(
 def randomness(
     key: bytes,
     epoch: int,
-    message: ArrayLike,
+    message: bytes,
     counters: ArrayLike,
     *,
     params: LeanSigParams,
@@ -167,7 +161,11 @@ def randomness(
     straight into the message hash and out onto the wire, and the codec restores
     upstream's order at the boundary ([`ssz.py`](ssz.py)).
     """
-    root = _root(message)
+    root = bytes(message)
+    if len(root) != MESSAGE_BYTES:
+        raise ValueError(
+            f"leanSig signs a {MESSAGE_BYTES}-byte root, got {len(root)} bytes"
+        )
     attempts = _column(counters, "counter", params.max_tries)
     prefix = _prefix(key, _RANDOMNESS) + _epoch_bytes(epoch) + root
     return _squeeze(
@@ -195,27 +193,6 @@ def _prefix(key: bytes, subdomain: bytes) -> bytes:
     return _DOMAIN + subdomain + material
 
 
-def _root(message: ArrayLike) -> bytes:
-    """The message a randomness draw is bound to, as its 32 bytes.
-
-    Taken as bytes or as a `uint8` array, because both callers are natural: a
-    test holds a literal and `LeanSig.sign` holds what the caller handed the
-    seam. The width is checked here rather than felt downstream — a squeeze
-    would accept any length.
-    """
-    root = (
-        np.frombuffer(message, dtype=np.uint8)
-        if isinstance(message, (bytes, bytearray, memoryview))
-        else np.asarray(message, dtype=np.uint8)
-    )
-    if root.shape != (_MESSAGE_BYTES,):
-        raise ValueError(
-            f"leanSig signs a {_MESSAGE_BYTES}-byte root, got shape "
-            f"{tuple(root.shape)}"
-        )
-    return bytes(root)
-
-
 def _epoch_bytes(epoch: int) -> bytes:
     """A slot in the four-byte big-endian packing upstream's PRF inputs use."""
     if not 0 <= epoch < 1 << (8 * _EPOCH_BYTES):
@@ -227,16 +204,12 @@ def _epoch_bytes(epoch: int) -> bytes:
 
 
 def _column(values: ArrayLike, name: str, bound: int) -> np.ndarray:
-    """A `[N]` host column, checked against what its packing admits."""
-    column = np.asarray(values, dtype=np.int64).reshape(-1)
-    outside = (column < 0) | (column >= bound)
-    if np.any(outside):
-        raise ValueError(
-            f"a {name} is in [0, {bound}); "
-            f"{int(np.count_nonzero(outside))} of {column.size} are not, "
-            f"the first being {int(column[np.argmax(outside)])}"
-        )
-    return column
+    """A `[N]` host column, checked against what its packing admits.
+
+    The mechanism is `field.host_column`'s, shared with the tweak builders;
+    what a PRF input's bound means is its own, so the sentence stays here.
+    """
+    return host_column(values, f"the {name} must be in [0, {bound})", bound)
 
 
 def _squeeze(inputs: list[bytes], length: int) -> Array:
@@ -252,12 +225,19 @@ def _squeeze(inputs: list[bytes], length: int) -> Array:
     bottom tree is three million, so a per-row lift would be one transfer each.
     """
     wide = _BYTES_PER_ELEMENT * length
-    return lane_reversed(
-        [
-            [
-                int.from_bytes(digest[at : at + _BYTES_PER_ELEMENT], "big") % PRIME
-                for at in range(0, wide, _BYTES_PER_ELEMENT)
-            ]
-            for digest in (hashlib.shake_128(data).digest(wide) for data in inputs)
-        ]
-    )
+    squeezed = b"".join(hashlib.shake_128(data).digest(wide) for data in inputs)
+    # Every element is 16 bytes read big-endian and reduced, which is upstream's
+    # `Fp(value=...)` — its constructor takes any integer and reduces, so this is
+    # a modulo rather than a rejection, and the bias it leaves is the margin the
+    # module docstring quantifies.
+    #
+    # Read as two 64-bit halves and recombined mod the prime rather than as a
+    # Python integer per element. The identity is exact and every intermediate
+    # stays under 2^62, so `int64` holds it. What it saves is the whole of the
+    # per-element Python: a `PROD` bottom tree is 3,014,656 chain starts, so the
+    # scalar form is 24.1 million `int.from_bytes` calls and a nested list that
+    # size, on the path `advance_preparation` runs at every window slide.
+    halves = np.frombuffer(squeezed, dtype=">u8").reshape(-1, length, 2)
+    high = (halves[..., 0] % PRIME).astype(np.int64)
+    low = (halves[..., 1] % PRIME).astype(np.int64)
+    return lane_reversed((high * ((1 << 64) % PRIME) + low) % PRIME)

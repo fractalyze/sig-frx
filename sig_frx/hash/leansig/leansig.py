@@ -290,13 +290,7 @@ class LeanSig:
         because there is one signature. It must be inside the prepared window —
         `advance_preparation` is what moves that.
         """
-        params = self.params
-        if secret_key.params != params:
-            raise ValueError(
-                "this key was generated at a different preset, and the position "
-                "packing differs by preset — so signing with it would produce a "
-                "signature that is wrong rather than one that fails a check"
-            )
+        params = signing.paired(self._family, secret_key)
         slot = _slot(position, self.signatures_per_key)
         prepared = secret_key.prepared
         if slot not in prepared:
@@ -305,14 +299,13 @@ class LeanSig:
                 f"[{prepared.start}, {prepared.stop}); call "
                 f"advance_preparation to slide the window forward"
             )
-        root = np.asarray(message, dtype=np.uint8)
-        if root.shape != (encoding.MESSAGE_BYTES,):
-            raise ValueError(
-                f"leanSig signs a {encoding.MESSAGE_BYTES}-byte root, got shape "
-                f"{tuple(root.shape)}"
-            )
-
-        randomness, digits = signing.search(secret_key, slot, bytes(root))
+        # The 32-byte width is not checked here: `search` reaches
+        # `encoding.encode_message` before it grinds anything, and that is the
+        # module that owns what leanSig signs. Restating it would be a second
+        # place for the two to disagree about a root.
+        randomness, digits = signing.search(
+            secret_key, slot, bytes(np.asarray(message, dtype=np.uint8))
+        )
         return ssz.encode_signature(
             signing.combined_path(secret_key, slot),
             randomness,
@@ -340,19 +333,15 @@ class LeanSig:
         generate a key for a parameter the caller did not name. Refusing is what
         upstream's `Fp` validation path does with the same input.
         """
-        residues = np.asarray(parameter, dtype=np.int64).reshape(-1)
+        residues = field.host_column(
+            parameter,
+            f"a public parameter is canonical residues in [0, {field.PRIME})",
+            field.PRIME,
+        )
         if residues.size != self.params.parameter_length:
             raise ValueError(
                 f"the public parameter is {self.params.parameter_length} field "
                 f"elements, got {residues.size}"
-            )
-        outside = (residues < 0) | (residues >= field.PRIME)
-        if np.any(outside):
-            raise ValueError(
-                f"a public parameter is canonical residues in [0, "
-                f"{field.PRIME}); {int(np.count_nonzero(outside))} of "
-                f"{residues.size} are not, the first being "
-                f"{int(residues[np.argmax(outside)])}"
             )
         return field.lane_reversed(residues)
 
@@ -397,6 +386,11 @@ def _slot(position: int, lifetime: int) -> int:
     A slot at or past the key's lifetime is a caller mistake rather than a
     verdict, which is the same reading `verify` gives its `[B]` column — there is
     no leaf to index, so there is nothing to compute an answer from.
+
+    The prepared-window check that follows it would reject the same slots, since
+    the window is always inside the lifetime — but it would advise sliding the
+    window forward, which no number of slides can reach. A wrong remedy is worse
+    than none, so the coarser bound is stated first.
     """
     slot = int(position)
     if not 0 <= slot < lifetime:

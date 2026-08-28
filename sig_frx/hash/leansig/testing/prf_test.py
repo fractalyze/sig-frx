@@ -17,7 +17,6 @@ against `sorted()` or against a sum.
 
 from __future__ import annotations
 
-import numpy as np
 from absl.testing import absltest, parameterized
 
 from sig_frx.hash.leansig import prf
@@ -94,7 +93,7 @@ class RandomnessTest(parameterized.TestCase):
         got = prf.randomness(
             _KEY,
             vector.epoch,
-            np.frombuffer(bytes.fromhex(vector.message), dtype=np.uint8),
+            bytes.fromhex(vector.message),
             [vector.counter],
             params=params,
         )

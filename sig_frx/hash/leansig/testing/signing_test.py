@@ -27,6 +27,8 @@ suite is not measuring the wiring it claims to.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest, parameterized
@@ -61,29 +63,31 @@ _FAMILY = tweakable.LeanSigTweakableHash(_SCHEME.params)
 _KEY = bytes.fromhex(PRF_KEY)
 
 
+@lru_cache(maxsize=None)
 def _key_pair() -> tuple[np.ndarray, signing.SecretKey]:
-    """The one key pair every case here is built from.
+    """The one key pair every case here is built from — generated once.
 
-    Rebuilt per test rather than shared at module scope: a `SecretKey` is a
-    resident state and `advance_preparation` returns a new one, so a shared
-    instance would let one case's window reach another's.
+    Shared rather than rebuilt per case, which is safe for the reason that
+    looks at first like a hazard: `SecretKey` and `SubTree` are frozen, and
+    `advance_preparation` returns a *new* key rather than moving this one, so
+    no case can slide another's window. Building it per case instead cost 42
+    whole-lifetime keygens — 1024 chain starts and ~20 dispatches each — which
+    was the whole reason this suite could not fit a `small` budget.
+
+    `test_it_is_deterministic` deliberately does not use this, since two
+    independent builds are the thing it is checking.
     """
     public, secret = _SCHEME.keygen(_KEY, PARAMETER)
     return np.asarray(public), secret
 
 
-def _bytes(value: object) -> str:
-    return bytes(np.asarray(value, dtype=np.uint8)).hex()
-
-
-def _advanced(secret: signing.SecretKey, times: int) -> signing.SecretKey:
-    for _ in range(times):
-        secret = _SCHEME.advance_preparation(secret)
-    return secret
-
-
 def _for_slot(secret: signing.SecretKey, slot: int) -> signing.SecretKey:
-    """The key with its window slid far enough forward to serve `slot`."""
+    """The key with its window slid far enough forward to serve `slot`.
+
+    The only advance helper the suite needs: a fixed count is the same loop
+    with a worse stop condition, and `prepared` is what every case actually
+    cares about.
+    """
     while slot not in secret.prepared:
         secret = _SCHEME.advance_preparation(secret)
     return secret
@@ -95,7 +99,7 @@ class KeygenTest(absltest.TestCase):
     def test_it_matches_upstream(self) -> None:
         public, _ = _key_pair()
 
-        self.assertEqual(_bytes(public), PUBLIC_KEY)
+        self.assertEqual(harness.hex_of(public), PUBLIC_KEY)
 
     def test_it_is_deterministic(self) -> None:
         """Twice from the same inputs is the same key.
@@ -109,17 +113,22 @@ class KeygenTest(absltest.TestCase):
         first, _ = _key_pair()
         second, _ = _key_pair()
 
-        self.assertEqual(_bytes(first), _bytes(second))
+        self.assertEqual(harness.hex_of(first), harness.hex_of(second))
 
     def test_the_parameter_travels_in_the_public_key(self) -> None:
-        """The container is `root ‖ parameter`, so the tail is what went in."""
+        """The container is `root ‖ parameter`, so what went in comes back out.
+
+        Read through `ssz.decode_public_key` rather than by unpacking the words
+        here: that module owns the wire format and is gated by its own suite, so
+        this is not gating it with itself — and a sixth open-coded reading of
+        four-byte residues is exactly what its docstring counts.
+        """
         public, _ = _key_pair()
 
-        tail = np.asarray(public)[-len(PARAMETER) * 4 :]
-        self.assertEqual(
-            [int(x) for x in tail.reshape(-1, 4) @ np.array([1, 256, 65536, 1 << 24])],
-            list(PARAMETER),
-        )
+        _, parameter, ok = ssz.decode_public_key(public, params=_SCHEME.params)
+
+        self.assertTrue(bool(ok))
+        self.assertEqual(harness.to_leanspec_order(parameter), list(PARAMETER))
 
     def test_a_parameter_of_the_wrong_length(self) -> None:
         with self.assertRaisesRegex(ValueError, "5 field elements"):
@@ -179,24 +188,25 @@ class PreparedWindowTest(absltest.TestCase):
         )
 
     def test_it_stops_at_the_end_of_the_lifetime(self) -> None:
-        """`MAX_ADVANCES` moves it and the next one is a fixed point.
+        """It moves `MAX_ADVANCES` times, then the next one is a fixed point.
 
         Returning the key unchanged rather than raising is upstream's answer,
         and it is what lets a caller advance in a loop without bounding the loop
-        itself.
+        itself — so the count is asserted by walking until it stops rather than
+        by advancing a fixed number of times and checking separately.
         """
         _, secret = _key_pair()
 
-        at_end = _advanced(secret, MAX_ADVANCES)
-        past_end = _SCHEME.advance_preparation(at_end)
+        moves = 0
+        while True:
+            moved = _SCHEME.advance_preparation(secret)
+            if moved.prepared == secret.prepared:
+                break
+            secret, moves = moved, moves + 1
 
+        self.assertEqual(moves, MAX_ADVANCES)
         self.assertEqual(
-            (at_end.prepared.start, at_end.prepared.stop), tuple(PREPARED_AT_END)
-        )
-        self.assertEqual(past_end.prepared, at_end.prepared)
-        self.assertEqual(
-            _advanced(secret, MAX_ADVANCES - 1).prepared.stop,
-            PREPARED_AT_END[1] - (PREPARED[1] - PREPARED[0]) // 2,
+            (secret.prepared.start, secret.prepared.stop), tuple(PREPARED_AT_END)
         )
 
     def test_the_slid_window_rebuilds_a_tree_that_matches_the_original(self) -> None:
@@ -233,13 +243,13 @@ class SignTest(parameterized.TestCase):
     @parameterized.named_parameters(*[(v.name, v) for v in SIGN_VECTORS])
     def test_it_matches_upstream(self, vector: SignVector) -> None:
         _, secret = _key_pair()
-        message = np.frombuffer(bytes.fromhex(vector.message), dtype=np.uint8)
+        message = harness.bytes_of(vector.message)
 
         signature = _SCHEME.sign(
             _for_slot(secret, vector.slot), message, position=vector.slot
         )
 
-        self.assertEqual(_bytes(signature), vector.signature)
+        self.assertEqual(harness.hex_of(signature), vector.signature)
 
     @parameterized.named_parameters(*[(v.name, v) for v in SIGN_VECTORS])
     def test_the_search_settles_where_upstream_does(self, vector: SignVector) -> None:
@@ -247,10 +257,16 @@ class SignTest(parameterized.TestCase):
 
         The signature bytes already pin the randomness, so this is not a second
         gate on the same value — it is what says *which* draw that was, and it
-        reads the search directly rather than through a signature. A signer whose
-        block search took the last landing candidate of a pass rather than the
-        first would produce a perfectly valid signature at some other attempt,
-        and upstream's would then disagree with it byte for byte.
+        reads the search directly rather than through a signature.
+
+        **It is also what pins "the first landing draw, not any".** The block is
+        128 candidates and about one in forty-nine lands at `TEST`, so a pass
+        holds two or three of them; a search that returned the last of a block
+        rather than the first would produce a perfectly valid signature at some
+        other attempt, and the randomness compared here would not be
+        `attempt`'s. That is asserted rather than assumed — `test_a_pass_holds
+        _more_than_one_landing_draw` is what keeps the case honest if a
+        regenerated vector set ever lands alone in its block.
         """
         _, secret = _key_pair()
         secret = _for_slot(secret, vector.slot)
@@ -273,45 +289,55 @@ class SignTest(parameterized.TestCase):
             ),
         )
 
-    @parameterized.named_parameters(*[(v.name, v) for v in SIGN_VECTORS])
-    def test_no_earlier_draw_lands_on_the_layer(self, vector: SignVector) -> None:
-        """Every attempt below the recorded one misses the target sum.
+    def test_the_search_takes_the_first_landing_draw(self) -> None:
+        """Across the set, `attempt` is the *first* draw of the block to land.
 
-        What makes `attempt` a fact about the scheme rather than a note about
-        this implementation: the search is not free to stop wherever it likes,
-        because upstream stops at the first landing draw and these are the draws
-        before it.
+        `test_the_search_settles_where_upstream_does` pins which draw the search
+        returned; this pins that it is the earliest one that could have been
+        returned, which is the half a signature's bytes cannot show. Both
+        matter because a signer that took the last landing candidate of a pass
+        instead would produce a perfectly valid signature upstream disagrees
+        with byte for byte.
+
+        Measured over the block the search actually tries, and the count is
+        asserted alongside: at `TEST` about one draw in forty-nine lands, so a
+        128-candidate block usually holds two or three — but not always. Five of
+        the six vectors here hold more than one and `slot31` holds exactly one,
+        which is why the discriminating claim is made over the set rather than
+        per vector. A regenerated set in which *every* block held one landing
+        draw would stop separating "first" from "last", and fails here.
         """
-        message = bytes.fromhex(vector.message)
-        params = _SCHEME.params
         _, secret = _key_pair()
-        block = prf.randomness(
-            _KEY, vector.slot, message, range(vector.attempt + 1), params=params
-        )
-        count = block.shape[0]
+        params = _SCHEME.params
+        counters = range(signing._GRIND_BLOCK)
+        blocks = []
+        for vector in SIGN_VECTORS:
+            message = bytes.fromhex(vector.message)
+            operands = [
+                harness.broadcast(operand, len(counters))
+                for operand in (
+                    encoding.encode_message(message, params=params),
+                    secret.parameter,
+                    encoding.encode_epoch(vector.slot, params=params),
+                )
+            ]
+            _, accepted = encoding.codewords(
+                operands[0],
+                operands[1],
+                operands[2],
+                prf.randomness(_KEY, vector.slot, message, counters, params=params),
+                params=params,
+            )
+            landed = np.flatnonzero(np.asarray(accepted)).tolist()
+            self.assertEqual(landed[0], vector.attempt, msg=vector.name)
+            blocks.append(len(landed))
 
-        _, accepted = encoding.codewords(
-            fnp.broadcast_to(
-                encoding.encode_message(message, params=params),
-                (count, params.message_length),
-            ),
-            fnp.broadcast_to(secret.parameter, (count, params.parameter_length)),
-            fnp.broadcast_to(
-                encoding.encode_epoch(vector.slot, params=params),
-                (count, params.tweak_length),
-            ),
-            block,
-            params=params,
-        )
-
-        self.assertEqual(
-            np.flatnonzero(np.asarray(accepted)).tolist(), [vector.attempt]
-        )
+        self.assertGreater(max(blocks), 1)
 
     @parameterized.named_parameters(*[(v.name, v) for v in SIGN_VECTORS])
     def test_the_verifier_accepts_it(self, vector: SignVector) -> None:
         public, secret = _key_pair()
-        message = np.frombuffer(bytes.fromhex(vector.message), dtype=np.uint8)
+        message = harness.bytes_of(vector.message)
 
         signature = _SCHEME.sign(
             _for_slot(secret, vector.slot), message, position=vector.slot
@@ -331,12 +357,7 @@ class SignTest(parameterized.TestCase):
     def test_the_whole_set_verifies_in_one_batch(self) -> None:
         """One call over every slot, which is what the seam is shaped for."""
         public, secret = _key_pair()
-        messages = np.stack(
-            [
-                np.frombuffer(bytes.fromhex(v.message), dtype=np.uint8)
-                for v in SIGN_VECTORS
-            ]
-        )
+        messages = np.stack([harness.bytes_of(v.message) for v in SIGN_VECTORS])
         signatures = np.stack(
             [
                 np.asarray(
@@ -364,12 +385,12 @@ class SignTest(parameterized.TestCase):
     def test_signing_twice_gives_one_signature(self) -> None:
         """Determinism in `(key, slot, message)`, which the PRF is what buys."""
         _, secret = _key_pair()
-        message = np.frombuffer(bytes.fromhex(SIGN_VECTORS[0].message), dtype=np.uint8)
+        message = harness.bytes_of(SIGN_VECTORS[0].message)
 
         first = _SCHEME.sign(secret, message, position=0)
         second = _SCHEME.sign(secret, message, position=0)
 
-        self.assertEqual(_bytes(first), _bytes(second))
+        self.assertEqual(harness.hex_of(first), harness.hex_of(second))
 
     def test_a_signature_does_not_carry_its_slot(self) -> None:
         """Two slots over one message differ, and neither says which it is.
@@ -379,13 +400,13 @@ class SignTest(parameterized.TestCase):
         made, not a label a verifier could read back.
         """
         _, secret = _key_pair()
-        message = np.frombuffer(bytes.fromhex(SIGN_VECTORS[0].message), dtype=np.uint8)
+        message = harness.bytes_of(SIGN_VECTORS[0].message)
 
         at_zero = _SCHEME.sign(secret, message, position=0)
         at_one = _SCHEME.sign(secret, message, position=1)
 
-        self.assertNotEqual(_bytes(at_zero), _bytes(at_one))
-        self.assertEqual(len(_bytes(at_zero)), len(_bytes(at_one)))
+        self.assertNotEqual(harness.hex_of(at_zero), harness.hex_of(at_one))
+        self.assertEqual(len(harness.hex_of(at_zero)), len(harness.hex_of(at_one)))
 
 
 class RefusalTest(absltest.TestCase):
@@ -394,7 +415,7 @@ class RefusalTest(absltest.TestCase):
     def setUp(self) -> None:
         super().setUp()
         self.public, self.secret = _key_pair()
-        self.message = np.frombuffer(bytes(range(32)), dtype=np.uint8)
+        self.message = harness.bytes_of(bytes(range(32)).hex())
 
     def test_a_slot_outside_the_prepared_window(self) -> None:
         """Served would mean deriving a bottom tree inside a signature."""
@@ -428,7 +449,7 @@ class WiringTest(absltest.TestCase):
         super().setUp()
         self.public, self.secret = _key_pair()
         self.vector = SIGN_VECTORS[0]
-        self.message = np.frombuffer(bytes.fromhex(self.vector.message), dtype=np.uint8)
+        self.message = harness.bytes_of(self.vector.message)
 
     def _verify(self, signature: object, slot: int) -> bool:
         return bool(

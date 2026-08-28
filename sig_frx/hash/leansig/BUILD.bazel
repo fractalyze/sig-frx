@@ -162,6 +162,7 @@ py_library(
         ":prf",
         ":tweakable",
         "//sig_frx/hash:tree",
+        "//sig_frx/hash:tweakable",
         "//sig_frx/hash:wots",
         requirement("frx"),
         requirement("numpy"),

@@ -26,6 +26,7 @@ py_library(
         "harness.py",
     ],
     deps = [
+        "//sig_frx/hash:tweakable",
         "//sig_frx/hash/leansig:params",
         requirement("frx"),
         requirement("numpy"),

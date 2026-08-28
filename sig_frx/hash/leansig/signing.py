@@ -84,7 +84,9 @@ from frx import Array
 from frx.typing import ArrayLike
 
 from sig_frx.hash import tree, wots
+from sig_frx.hash import tweakable as shared_tweakable
 from sig_frx.hash.leansig import encoding, prf, tweakable
+from sig_frx.hash.leansig.field import F
 from sig_frx.hash.leansig.params import LeanSigParams
 from sig_frx.hash.leansig.tweakable import LeanSigTweakableHash
 
@@ -99,10 +101,6 @@ class SubTree:
     carries per layer collapses to one number here, because a full-lifetime build
     leaves no holes.
     """
-
-    lowest_layer: int
-    """Which level of the whole tree `layers[0]` sits at — 0 for a bottom tree,
-    `log_lifetime / 2` for the top one."""
 
     start_index: int
     """The whole-tree index of `layers[0]`'s first node.
@@ -194,9 +192,6 @@ class SecretKey:
     personalized by it. It also travels in the public key.
     """
 
-    left_bottom_tree_index: int
-    """Which bottom tree the resident pair starts at."""
-
     left_bottom_tree: SubTree
     right_bottom_tree: SubTree
     """The two resident bottom trees — the prepared window, in the order they
@@ -213,9 +208,8 @@ class SecretKey:
         outside it is refused rather than served, because serving it means
         deriving a bottom tree's worth of chain starts inside a signature.
         """
-        width = leaves_per_bottom_tree(self.params)
-        start = self.left_bottom_tree_index * width
-        return range(start, start + 2 * width)
+        start = self.left_bottom_tree.start_index
+        return range(start, start + 2 * leaves_per_bottom_tree(self.params))
 
 
 def leaves_per_bottom_tree(params: LeanSigParams) -> int:
@@ -249,8 +243,7 @@ def leaves(
     epochs = np.asarray(slots, dtype=np.int64).reshape(-1)
     dimension = params.dimension
     rows = epochs.size * dimension
-    chains = np.tile(np.arange(dimension), epochs.size)
-    per_chain_slots = np.repeat(epochs, dimension)
+    per_chain_slots, chains = tweakable.chain_columns(epochs, params=params)
     ends = wots.chain(
         family,
         parameter,
@@ -271,20 +264,26 @@ def climb(
     parameter: ArrayLike,
     nodes: ArrayLike,
     *,
-    lowest_layer: int,
     start_index: int,
     levels: int,
     params: LeanSigParams,
-) -> tuple[Array, ...]:
+) -> SubTree:
     """`nodes` and every layer above them, up to a single root.
 
     One batched hash per level, and the levels are a Python loop because the
     height is a parameter rather than data — [`tree.py`](../tree.py)'s own split
     between what a tree builder and a path verifier each are.
 
-    Returned rather than reduced away because the signer needs the intermediate
-    layers: an authentication path is one node from each of them, and rebuilding
-    the tree per signature is what the resident state exists to avoid.
+    The layers are kept rather than reduced away because the signer needs the
+    intermediate ones: an authentication path is one node from each, and
+    rebuilding the tree per signature is what the resident state exists to
+    avoid.
+
+    A `SubTree` rather than a bare tuple, because `start_index` is load-bearing
+    twice over — it offsets the tweaks built here, *and* it is what `path` reads
+    a sibling by. Returning the two together is what stops a caller building a
+    subtree at one origin and describing it at another, which is a tree no
+    verifier agrees with rather than an error.
     """
     layers = [fnp.asarray(nodes, dtype=family.dtype)]
     for height in range(levels):
@@ -294,12 +293,10 @@ def climb(
                 parameter,
                 layers[-1],
                 1,
-                _node_addresses(
-                    lowest_layer + height, start_index >> height, params=params
-                ),
+                _node_addresses(height, start_index >> height, params=params),
             )
         )
-    return tuple(layers)
+    return SubTree(start_index=start_index, layers=tuple(layers))
 
 
 def bottom_tree(
@@ -318,26 +315,20 @@ def bottom_tree(
     one tree in isolation.
     """
     width = leaves_per_bottom_tree(params)
-    half = params.log_lifetime // 2
     start = index * width
-    return SubTree(
-        lowest_layer=0,
-        start_index=start,
-        layers=climb(
+    return climb(
+        family,
+        parameter,
+        leaves(
             family,
             parameter,
-            leaves(
-                family,
-                parameter,
-                prf_key,
-                np.arange(start, start + width),
-                params=params,
-            ),
-            lowest_layer=0,
-            start_index=start,
-            levels=half,
+            prf_key,
+            np.arange(start, start + width),
             params=params,
         ),
+        start_index=start,
+        levels=params.log_lifetime // 2,
+        params=params,
     )
 
 
@@ -361,7 +352,7 @@ def keygen(
     """
     half = params.log_lifetime // 2
     width = leaves_per_bottom_tree(params)
-    layers = climb(
+    lifetime = climb(
         family,
         parameter,
         leaves(
@@ -371,33 +362,35 @@ def keygen(
             np.arange(1 << params.log_lifetime),
             params=params,
         ),
-        lowest_layer=0,
         start_index=0,
         levels=params.log_lifetime,
         params=params,
     )
-    # The split is a slice of one dense climb: bottom tree `i` owns the nodes
-    # `[i * width, (i + 1) * width)` of the leaf layer and their reductions, and
-    # the top tree is every layer from the bottom roots up.
-    resident = [
-        SubTree(
-            lowest_layer=0,
+
+    def resident(index: int) -> SubTree:
+        """Bottom tree `index`, sliced out of the dense climb above.
+
+        It owns the leaf-layer nodes `[index * width, (index + 1) * width)` and
+        their reductions, so each layer narrows by half as the height rises and
+        the last one is the single bottom-tree root.
+        """
+        return SubTree(
             start_index=index * width,
             layers=tuple(
                 layer[(index * width) >> height : ((index + 1) * width) >> height]
-                for height, layer in enumerate(layers[: half + 1])
+                for height, layer in enumerate(lifetime.layers[: half + 1])
             ),
         )
-        for index in (0, 1)
-    ]
-    top = SubTree(lowest_layer=half, start_index=0, layers=layers[half:])
+
+    # The top tree is every layer from the bottom roots up, which needs no
+    # slicing — the dense climb built it whole.
+    top = SubTree(start_index=0, layers=lifetime.layers[half:])
     return top.root, SecretKey(
         params=params,
         prf_key=bytes(prf_key),
         parameter=fnp.asarray(parameter, dtype=family.dtype),
-        left_bottom_tree_index=0,
-        left_bottom_tree=resident[0],
-        right_bottom_tree=resident[1],
+        left_bottom_tree=resident(0),
+        right_bottom_tree=resident(1),
         top_tree=top,
     )
 
@@ -413,14 +406,13 @@ def advance_preparation(
     back unchanged — upstream's own answer, and it keeps a caller that advances
     in a loop from having to bound the loop itself.
     """
-    params = secret_key.params
+    params = paired(family, secret_key)
     width = leaves_per_bottom_tree(params)
-    left = secret_key.left_bottom_tree_index
+    left = secret_key.left_bottom_tree.start_index // width
     if (left + 3) * width > 1 << params.log_lifetime:
         return secret_key
     return replace(
         secret_key,
-        left_bottom_tree_index=left + 1,
         left_bottom_tree=secret_key.right_bottom_tree,
         right_bottom_tree=bottom_tree(
             family, secret_key.parameter, secret_key.prf_key, left + 2, params=params
@@ -460,9 +452,14 @@ def search(secret_key: SecretKey, slot: int, message: bytes) -> tuple[Array, Arr
     verifier does not already hold.
 
     A block of candidates per pass, for the reason `_GRIND_BLOCK` gives. The
-    three operands that do not move across a block are broadcast rather than
-    re-derived, which is what lets one batched `codewords` serve both this and
-    the verifier.
+    three operands that do not move across a block are broadcast *once*, above
+    the loop — `tweakable.batched` is the shared helper for widening a `[k]`
+    operand, and re-issuing it per pass would cost three dispatches a pass for
+    an identical result. Only the last pass is short, since `max_tries` is not a
+    multiple of the block, so it slices what it needs.
+
+    Broadcasting at all, rather than giving `codewords` an `in_axes` per
+    operand, is what lets one batched callable serve both this and the verifier.
 
     **The lowest**, not any that lands: upstream counts attempts from zero and
     stops at the first, so a signer that returned the last landing candidate of a
@@ -470,18 +467,27 @@ def search(secret_key: SecretKey, slot: int, message: bytes) -> tuple[Array, Arr
     disagrees with byte for byte.
     """
     params = secret_key.params
-    message_elements = encoding.encode_message(bytes(message), params=params)
-    epoch_elements = encoding.encode_epoch(slot, params=params)
+    shared = [
+        shared_tweakable.batched(operand, _GRIND_BLOCK, dtype=F)
+        for operand in (
+            encoding.encode_message(bytes(message), params=params),
+            secret_key.parameter,
+            encoding.encode_epoch(slot, params=params),
+        )
+    ]
     for base in range(0, params.max_tries, _GRIND_BLOCK):
         counters = np.arange(base, min(base + _GRIND_BLOCK, params.max_tries))
         randomness = prf.randomness(
             secret_key.prf_key, slot, message, counters, params=params
         )
         block = randomness.shape[0]
+        message_block, parameter_block, epoch_block = (
+            operand[:block] for operand in shared
+        )
         digits, accepted = encoding.codewords(
-            fnp.broadcast_to(message_elements, (block, params.message_length)),
-            fnp.broadcast_to(secret_key.parameter, (block, params.parameter_length)),
-            fnp.broadcast_to(epoch_elements, (block, params.tweak_length)),
+            message_block,
+            parameter_block,
+            epoch_block,
             randomness,
             params=params,
         )
@@ -491,9 +497,9 @@ def search(secret_key: SecretKey, slot: int, message: bytes) -> tuple[Array, Arr
             return randomness[first], digits[first]
     raise ValueError(
         f"no randomness below {params.max_tries} encodes this message onto the "
-        f"target-sum layer; about one draw in "
-        f"{round(1 / _acceptance_rate(params))} does, so this is a wrong "
-        f"parameter set rather than bad luck"
+        f"target-sum layer, so this is a wrong parameter set rather than bad "
+        f"luck — the target sum sits above the mean digit sum on purpose, but "
+        f"only by a few standard deviations"
     )
 
 
@@ -512,9 +518,8 @@ def release(
     batched hashes however the digits differ — the same masked walk `leaves` runs
     to the top and for the same reason.
     """
-    params = secret_key.params
-    chains = np.arange(params.dimension)
-    slots = np.full(params.dimension, slot)
+    params = paired(family, secret_key)
+    slots, chains = tweakable.chain_columns([slot], params=params)
     return wots.chain(
         family,
         secret_key.parameter,
@@ -523,6 +528,29 @@ def release(
         digits,
         tweakable.chain_step_tweaks(slots, chains, params=params),
     )
+
+
+def paired(family: LeanSigTweakableHash, secret_key: SecretKey) -> LeanSigParams:
+    """`secret_key`'s preset, checked against the family about to hash with it.
+
+    `SecretKey.params` exists so a key and a scheme cannot be crossed, so the
+    check belongs to every function that pairs the two rather than to whichever
+    caller happens to be the entry point. Every digest here is tweaked by a
+    position whose packing depends on the preset, so a crossed pair does not
+    fail — it rebuilds a subtree under the wrong tweaks and produces a key or a
+    signature that is self-consistently wrong.
+
+    `LeanSig.sign` calls it too, before the rejection loop rather than after —
+    the functions below would each catch a crossed pair on their own, but only
+    once thousands of hashes had been spent reaching them.
+    """
+    if family != LeanSigTweakableHash(secret_key.params):
+        raise ValueError(
+            "this key was generated at a different preset, and the position "
+            "packing differs by preset — so using it here would produce a "
+            "result that is wrong rather than one that fails a check"
+        )
+    return secret_key.params
 
 
 def combined_path(secret_key: SecretKey, slot: int) -> Array:
@@ -546,31 +574,6 @@ def combined_path(secret_key: SecretKey, slot: int) -> Array:
         else secret_key.right_bottom_tree
     )
     return fnp.concatenate([bottom.path(slot), secret_key.top_tree.path(slot // width)])
-
-
-def _acceptance_rate(params: LeanSigParams) -> float:
-    """What fraction of randomness draws lands a codeword on the target layer.
-
-    Counted rather than quoted, so a failed search's message carries this
-    parameter set's own number: the codewords of `dimension` digits in
-    `[0, base)` summing to `target_sum`, over `base^dimension`. That count is the
-    coefficient of `x^target_sum` in `(1 + x + ... + x^(base-1))^dimension`,
-    accumulated as a polynomial product — about 1 in 909 at `PROD` and 1 in 49 at
-    `TEST`.
-
-    Only an error message reaches for this, so it is host integer arithmetic and
-    exact until the final division. The abort in `aborting_decode` narrows the
-    rate further, by about `4.7e-10` per element, which no message would show.
-    """
-    counts = [1]
-    for _ in range(params.dimension):
-        widened = [0] * (len(counts) + params.base - 1)
-        for power, count in enumerate(counts):
-            for digit in range(params.base):
-                widened[power + digit] += count
-        counts = widened
-    landing = counts[params.target_sum] if params.target_sum < len(counts) else 0
-    return landing / params.base**params.dimension
 
 
 def _node_addresses(
