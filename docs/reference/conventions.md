@@ -237,10 +237,10 @@ signing work over the rationals instead, embedded in `C`, and that transform —
 [`fft.py`](../../sig_frx/lattice/falcon/fft.py) — carries a requirement the
 integer one does not.
 
-The requirement belongs to the **domain and not to that one module**. The
-`ffLDL` tree in [`keygen.py`](../../sig_frx/lattice/falcon/keygen.py) is the
-same rational arithmetic and is held to the same rule, which is why the guard —
-`fft.require_scope` — is public and shared rather than copied.
+The requirement belongs to the **domain and not to that one module**.
+[`keygen.py`](../../sig_frx/lattice/falcon/keygen.py)'s rational arithmetic is
+held to the same rule, which is why the guard — `fft.require_scope` — is public
+and shared rather than copied.
 
 **The precision is a security property, not a numerical nicety.** Falcon's
 analysis assumes double precision, and `ffSampling` is where that is

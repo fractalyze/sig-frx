@@ -544,10 +544,12 @@ def gram_schmidt_squared_norm(f: ArrayLike, g: ArrayLike) -> Any:
     ([`falcon_reference`](testing/falcon_reference.py)) does compute them, which
     is what makes the test a check of the identity rather than of itself.
 
-    Reads the namespace off its arguments, as [`fft`](fft.py) does: key
-    generation's rejection loop is concrete, so this is called on the host,
-    where the double-precision scope is unnecessary — and lifting it here would
-    make the scope mandatory for a caller that never needed one.
+    Reads the namespace off its arguments rather than calling
+    [`fft.require_scope`](fft.py) as the tree below does, and does not need to:
+    the transform on the next line is itself a guarded entry point, so a traced
+    call outside the scope refuses there. The narrowing one line earlier is
+    discarded with the exception. Key generation's rejection loop is concrete,
+    so this runs on the host, where the scope is unnecessary either way.
     """
     xnp = namespace(f, g)
     left, right = xnp.asarray(f, dtype=np.float64), xnp.asarray(g, dtype=np.float64)
@@ -1154,11 +1156,9 @@ def normalize(tree: FalconTree, sigma: float) -> FalconTree:
     Only the leaves move. `values` is `L10` per node and is untouched by
     normalization, which is why the two trees share one type.
 
-    **This is the one of the four that the sampler reads directly.** Its output
-    *is* `σ'`, so a narrowed leaf here is a narrowed standard deviation — which
-    [`fft`](fft.py) states is what moves the sampled distribution off the ideal
-    one. That is why it refuses rather than warns, and why the guard is on the
-    function rather than on the arithmetic inside it.
+    A narrowed leaf here is a narrowed `σ'`, which [`fft`](fft.py) states is
+    what moves the sampled distribution off the ideal one — the leak itself,
+    not a rounding nuisance. Hence a refusal rather than frx's warning.
     """
     xnp = fft.require_scope(tree.leaves)
     return FalconTree(tree.values, sigma / xnp.sqrt(xnp.asarray(tree.leaves)))

@@ -77,11 +77,15 @@ It undoes whatever `split` did. `fft_test` checks the halves against `f0` and
 
 ## What this module does not decide
 
-It stays in the coefficient-and-evaluation domain and knows nothing about
-`ffLDL`, the Gram matrix, or the sampler. Those recurse *through* `split` and
-`merge` and belong with the scheme
-([#26](https://github.com/fractalyze/sig-frx/issues/26),
+It computes nothing about `ffLDL`, the Gram matrix, or the sampler — those
+recurse *through* `split` and `merge`, and the arithmetic belongs with the
+scheme ([#26](https://github.com/fractalyze/sig-frx/issues/26),
 [#27](https://github.com/fractalyze/sig-frx/issues/27)).
+
+What it does own beyond the transform is the domain's **precision contract**:
+`double_precision` and the `require_scope` that enforces it are a matched pair,
+so `keygen`'s rational half calls the latter rather than carrying a second copy
+that could word the same refusal differently.
 """
 
 from __future__ import annotations

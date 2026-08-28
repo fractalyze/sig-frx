@@ -79,6 +79,11 @@ from sig_frx.lattice.falcon.testing import falcon_reference
 # by a bit or two, so they are a corridor rather than an equality.
 MEASURED_WIDTHS = (4, 11, 24, 51, 102, 203, 406, 807, 1593, 3151, 6302)
 
+# Table 3.3's `σ` at `n = 512`. Every case below that normalizes needs one and
+# none of them depends on which set it came from — the assertions are about
+# dtypes and refusals — so they share this rather than each naming a set.
+_SIGMA = falcon_reference.PARAMETER_SETS["Falcon-512"]["sigma"]
+
 
 def _draw(degree: int, seed: int) -> list[int]:
     """A cheap stand-in for the draw, for the tests that are not about the draw.
@@ -896,6 +901,18 @@ def _transformed(basis: _Basis) -> tuple[Any, ...]:
     return tuple(fft.fft(polynomial) for polynomial in basis)
 
 
+def _traced(basis: _Basis) -> tuple[Any, ...]:
+    """[`_transformed`](#_transformed)'s traced twin — the scope is the caller's.
+
+    Held open by the caller and not here, because the scope covers an operation
+    rather than a call: a helper that opened one and returned would hand back a
+    wide array that narrows on the caller's next line.
+    """
+    return tuple(
+        fft.fft(fnp.asarray(polynomial, dtype=np.float64)) for polynomial in basis
+    )
+
+
 def _tree(basis: _Basis) -> keygen.FalconTree:
     """Algorithm 4 lines 3-5 over a coefficient-domain `(f, g, F, G)`."""
     return keygen.ffldl(*keygen.gram(*_transformed(basis)))
@@ -1078,11 +1095,7 @@ class FfldlTest(parameterized.TestCase):
         basis = _basis(16, 12)
         host = _tree(basis)
         with fft.double_precision():
-            device = keygen.ffldl(
-                *keygen.gram(
-                    *(fft.fft(fnp.asarray(p, dtype=np.float64)) for p in basis)
-                )
-            )
+            device = keygen.ffldl(*keygen.gram(*_traced(basis)))
             values = [np.asarray(level) for level in device.values]
             leaves = np.asarray(device.leaves)
 
@@ -1153,12 +1166,11 @@ class FalconTreeTest(parameterized.TestCase):
         has no business in it — which is why one type carries both trees, and
         so is worth a case rather than a sentence.
         """
-        sigma = falcon_reference.PARAMETER_SETS["Falcon-512"]["sigma"]
         tree = _tree(_determinant_q_basis(32, 13))
-        normalized = keygen.normalize(tree, sigma)
+        normalized = keygen.normalize(tree, _SIGMA)
 
         np.testing.assert_allclose(
-            normalized.leaves, sigma / np.sqrt(np.asarray(tree.leaves)), rtol=1e-12
+            normalized.leaves, _SIGMA / np.sqrt(np.asarray(tree.leaves)), rtol=1e-12
         )
         self.assertLen(normalized.values, len(tree.values))
         for depth, (after, before) in enumerate(zip(normalized.values, tree.values)):
@@ -1203,52 +1215,38 @@ class FalconTreeTest(parameterized.TestCase):
 class PrecisionScopeTest(absltest.TestCase):
     """That the tree refuses a traced call outside `fft.double_precision()`.
 
-    The tree is `float64` arithmetic and Falcon's analysis assumes it. Traced
-    and outside the scope this stack narrows to 24 bits of mantissa against 53
-    with a warning rather than an error, which
-    [`fft`](../fft.py) states is the wrong shape for a precision this load
-    bearing — so all four entry points call
-    [`fft.require_scope`](../fft.py) and none of them narrow quietly.
-
-    `normalize` is the one that matters most and reads least like it: its output
-    *is* `σ'`, the per-coordinate standard deviation the sampler
-    ([#27](https://github.com/fractalyze/sig-frx/issues/27)) rounds with, so a
-    `float32` leaf here is a sampled distribution off the ideal one, which is
-    what leaks the basis.
+    The rationale for each refusal lives on the function that makes it —
+    [`keygen.normalize`](../keygen.py) for why `σ'` is the leaf that matters,
+    [`keygen.ffldl`](../keygen.py) for why ring degree 2 needs its own case —
+    and is not restated here.
 
     **The refusals are only half of this.** A guard that refused unconditionally
     would pass every negative case below, so the widths inside the scope are
     asserted beside them, and a host caller — which needs no scope, numpy being
-    `complex128` natively — is asserted to still go through.
+    `complex128` natively — is asserted to still go through. That is the shape
+    [`fft_test`](fft_test.py)'s `ScopeTest` uses for the same job one layer
+    down.
     """
 
-    def _traced_gram(self) -> tuple[Any, Any, Any]:
-        """`(G00, G01, G11)` genuinely `float64`/`complex128`, built inside the scope.
+    def _entry_points(
+        self, gram_entries: tuple[Any, Any, Any], tree: keygen.FalconTree
+    ) -> tuple[tuple[str, Any], ...]:
+        """Every guarded entry point, as one table both polarities drive from."""
+        g00, g01, g11 = gram_entries
+        return (
+            ("gram", lambda: keygen.gram(g00, g01, g00, g01)),
+            ("ldl", lambda: keygen.ldl(g00, g01, g11)),
+            ("ffldl", lambda: keygen.ffldl(g00, g01, g11)),
+            ("normalize", lambda: keygen.normalize(tree, _SIGMA)),
+        )
 
-        An array survives the scope with its dtype intact — it is the first
-        operation *outside* that narrows — which is exactly what makes these
-        usable as the input to a call that should refuse.
-        """
-        basis = _basis(16, 14)
+    def test_a_traced_call_refuses_outside_the_scope(self) -> None:
         with fft.double_precision():
-            return keygen.gram(
-                *(fft.fft(fnp.asarray(p, dtype=np.float64)) for p in basis)
-            )
+            entries = keygen.gram(*_traced(_basis(16, 14)))
+            tree = keygen.ffldl(*entries)
 
-    def test_every_entry_point_refuses_a_traced_call_outside_the_scope(self) -> None:
-        g00, g01, g11 = self._traced_gram()
-        with fft.double_precision():
-            tree = keygen.ffldl(g00, g01, g11)
-        sigma = falcon_reference.PARAMETER_SETS["Falcon-512"]["sigma"]
-
-        refusals = {
-            "gram": lambda: keygen.gram(g00, g01, g00, g01),
-            "ldl": lambda: keygen.ldl(g00, g01, g11),
-            "ffldl": lambda: keygen.ffldl(g00, g01, g11),
-            "normalize": lambda: keygen.normalize(tree, sigma),
-        }
-        for name, call in refusals.items():
-            with self.subTest(entry_point=name):
+        for name, call in self._entry_points(entries, tree):
+            with self.subTest(name):
                 with self.assertRaisesRegex(RuntimeError, "double precision"):
                     call()
 
@@ -1256,49 +1254,46 @@ class PrecisionScopeTest(absltest.TestCase):
         """The degree a guard delegated to `fft.split` would miss.
 
         `ffldl` returns from inside its loop as soon as the ring is degree 2, so
-        at `n = 2` it never splits — and a transitive guard is precisely no
-        guard there. Degenerate for Falcon's own parameter sets, which is why it
-        is worth a case: nothing else in this file would reach it.
+        at `n = 2` it never splits. Degenerate for Falcon's own parameter sets,
+        which is why it is worth a case: nothing else in this file reaches it.
         """
-        entries = (np.ones(2), np.ones(2, dtype=complex), np.ones(2))
-        traced = tuple(fnp.asarray(entry) for entry in entries)
+        entry = fnp.ones(2)
         with self.assertRaisesRegex(RuntimeError, "double precision"):
-            keygen.ffldl(*traced)
+            keygen.ffldl(entry, entry, entry)
 
-    def test_inside_the_scope_every_width_survives(self) -> None:
+    def test_the_scope_reaches_double_at_every_entry_point(self) -> None:
         """The positive half — otherwise a guard that always refused would pass."""
-        basis = _basis(16, 15)
-        sigma = falcon_reference.PARAMETER_SETS["Falcon-512"]["sigma"]
         with fft.double_precision():
-            g00, g01, g11 = keygen.gram(
-                *(fft.fft(fnp.asarray(p, dtype=np.float64)) for p in basis)
-            )
+            g00, g01, g11 = keygen.gram(*_traced(_basis(16, 15)))
             l10, _, d11 = keygen.ldl(g00, g01, g11)
             tree = keygen.ffldl(g00, g01, g11)
-            normalized = keygen.normalize(tree, sigma)
+            normalized = keygen.normalize(tree, _SIGMA)
+            # Read inside the scope: the first operation outside it narrows.
             widths = {
-                "G00": (g00, "float64"),
-                "G01": (g01, "complex128"),
-                "L10": (l10, "complex128"),
-                "D11": (d11, "float64"),
-                "values": (tree.values[0], "complex128"),
-                "leaves": (tree.leaves, "float64"),
-                "sigma'": (normalized.leaves, "float64"),
+                "G00": (np.asarray(g00).dtype, "float64"),
+                "G01": (np.asarray(g01).dtype, "complex128"),
+                "L10": (np.asarray(l10).dtype, "complex128"),
+                "D11": (np.asarray(d11).dtype, "float64"),
+                "values": (np.asarray(tree.values[0]).dtype, "complex128"),
+                "leaves": (np.asarray(tree.leaves).dtype, "float64"),
+                "sigma'": (np.asarray(normalized.leaves).dtype, "float64"),
             }
-            got = {name: np.asarray(value).dtype for name, (value, _) in widths.items()}
 
-        for name, (_, want) in widths.items():
-            with self.subTest(entry=name):
-                self.assertEqual(got[name], np.dtype(want))
+        for name, (got, want) in widths.items():
+            with self.subTest(name):
+                self.assertEqual(got, np.dtype(want))
 
-    def test_a_host_caller_needs_no_scope(self) -> None:
+    def test_a_host_call_needs_no_scope(self) -> None:
         """Which is the reason the guard reads the namespace instead of a flag."""
         basis = _basis(16, 16)
-        sigma = falcon_reference.PARAMETER_SETS["Falcon-512"]["sigma"]
         tree = _tree(basis)
+        for name, call in self._entry_points(keygen.gram(*_transformed(basis)), tree):
+            with self.subTest(name):
+                call()
         self.assertEqual(np.asarray(tree.leaves).dtype, np.dtype("float64"))
-        normalized = keygen.normalize(tree, sigma)
-        self.assertEqual(np.asarray(normalized.leaves).dtype, np.dtype("float64"))
+        self.assertEqual(
+            np.asarray(keygen.normalize(tree, _SIGMA).leaves).dtype, np.dtype("float64")
+        )
 
 
 if __name__ == "__main__":
