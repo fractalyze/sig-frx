@@ -38,14 +38,14 @@ from absl.testing import absltest, parameterized
 
 from sig_frx.lattice.falcon import encoding, falcon, keygen
 from sig_frx.lattice.falcon.testing import falcon_reference as ref
-from sig_frx.lattice.falcon.testing.falcon_vectors import VECTORS
+from sig_frx.lattice.falcon.testing import falcon_vectors
 from sig_frx.signature import Signature
 
 _PARAMETER_SETS = ref.parameter_cases()
 
 
-def _bytes(blob: str) -> np.ndarray:
-    return np.frombuffer(bytes.fromhex(blob), dtype=np.uint8)
+def _bytes(blob: bytes) -> np.ndarray:
+    return np.frombuffer(blob, dtype=np.uint8)
 
 
 def _verdict(
@@ -59,7 +59,7 @@ def _verdict(
     Every case below varies exactly one of the three inputs, so spelling the
     other two at each site is what the overrides remove.
     """
-    vector = VECTORS[name][0]
+    vector = falcon_vectors.records(name)[0]
     verdict = falcon.named(name).verify(
         (_bytes(vector.public_key) if public_key is None else public_key)[None, :],
         _bytes(vector.message)[None, :],
@@ -70,7 +70,7 @@ def _verdict(
 
 def _signature(name: str) -> np.ndarray:
     """A writable copy — `frombuffer` hands back a read-only view."""
-    return _bytes(VECTORS[name][0].signature).copy()
+    return _bytes(falcon_vectors.records(name)[0].signature).copy()
 
 
 class Sizes(parameterized.TestCase):
@@ -233,7 +233,7 @@ class CompilationUnit(parameterized.TestCase):
         self, name: str, **params: Any
     ) -> None:
         del params
-        vector = VECTORS[name][0]
+        vector = falcon_vectors.records(name)[0]
         good = _bytes(vector.signature)
         broken = good.copy()
         broken[60] ^= 1
@@ -252,7 +252,7 @@ class Malformed(parameterized.TestCase):
     def test_a_short_public_key_verifies_as_false(
         self, name: str, **params: Any
     ) -> None:
-        vector = VECTORS[name][0]
+        vector = falcon_vectors.records(name)[0]
         verdict = falcon.named(name).verify(
             np.zeros((1, params["public_key_size"] - 1), dtype=np.uint8),
             _bytes(vector.message)[None, :],
@@ -264,7 +264,7 @@ class Malformed(parameterized.TestCase):
     def test_a_short_signature_verifies_as_false(
         self, name: str, **params: Any
     ) -> None:
-        vector = VECTORS[name][0]
+        vector = falcon_vectors.records(name)[0]
         verdict = falcon.named(name).verify(
             _bytes(vector.public_key)[None, :],
             _bytes(vector.message)[None, :],
@@ -275,7 +275,7 @@ class Malformed(parameterized.TestCase):
     @parameterized.parameters(*_PARAMETER_SETS)
     def test_an_unbatched_argument_is_an_error(self, name: str, **params: Any) -> None:
         del params
-        vector = VECTORS[name][0]
+        vector = falcon_vectors.records(name)[0]
         with self.assertRaises(ValueError):
             falcon.named(name).verify(
                 _bytes(vector.public_key),
@@ -288,7 +288,7 @@ class Malformed(parameterized.TestCase):
         self, name: str, **params: Any
     ) -> None:
         del params
-        vector = VECTORS[name][0]
+        vector = falcon_vectors.records(name)[0]
         with self.assertRaises(ValueError):
             falcon.named(name).verify(
                 np.stack([_bytes(vector.public_key)] * 2),
@@ -300,7 +300,7 @@ class Malformed(parameterized.TestCase):
     def test_a_context_is_refused(self, name: str, **params: Any) -> None:
         """Falcon defines none, so accepting one would verify a different claim."""
         del params
-        vector = VECTORS[name][0]
+        vector = falcon_vectors.records(name)[0]
         with self.assertRaises(ValueError):
             falcon.named(name).verify(
                 _bytes(vector.public_key)[None, :],

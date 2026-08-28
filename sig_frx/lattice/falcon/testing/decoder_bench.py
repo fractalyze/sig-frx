@@ -411,7 +411,7 @@ def _block(name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     whole = [
         vector
-        for vector in falcon_vectors.vectors(name)
+        for vector in falcon_vectors.vectors(name, limit=None)
         if vector.public_key is not None
         and vector.message is not None
         and vector.signature is not None

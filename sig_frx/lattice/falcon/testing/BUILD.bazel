@@ -69,8 +69,12 @@ py_library(
         "__init__.py",
         "falcon_vectors.py",
     ],
+    data = ["@falcon_round3//:kat_vectors"],
     visibility = ["//sig_frx/lattice:__subpackages__"],
-    deps = ["//sig_frx/testing:kat"],
+    deps = [
+        "//sig_frx/testing:kat",
+        "@rules_python//python/runfiles",
+    ],
 )
 
 # The published verdicts and everything the shared harness derives from them.
@@ -78,14 +82,73 @@ py_library(
 # this one is the vectors, that one is the scheme's own structure.
 #
 # Sized from the executor, and the GPU leg decides here too: 172.1 s against the
-# CPU leg's 81.3 s. `medium` would be 57% of its 300 s — past the half-a-budget
-# rule in ../../../../docs/reference/measurement.md before any spread is counted
-# — so it takes the same bucket as `falcon_test`, at 19% of 900 s. The harness
-# derives a tampering and a batch pass per vector, each its own traced shape.
+# CPU leg's 81.3 s at the two vectors per degree this used to take. `medium`
+# would be 57% of its 300 s — past the half-a-budget rule in
+# ../../../../docs/reference/measurement.md before any spread is counted — so it
+# takes the same bucket as `falcon_test`. The harness derives a tampering and a
+# batch pass per vector, each its own traced shape.
+#
+# `falcon_kat_test.GATE_VECTORS` is 4, doubling that. What the doubling costs is
+# measured as a ratio rather than as one machine's clock: locally the target
+# runs **1.46x** at four vectors per degree against two, which resolves to a
+# fixed cost of about 54% and a marginal cost of about 23% per vector-per-degree.
+# Carrying the ratio onto the recorded GPU leg puts four vectors near 250 s, and
+# assuming the marginal cost is the whole of it — the pessimistic reading, since
+# the tracing this leg pays for is per shape — puts it at 344 s. That is 38% of
+# `large`'s 900 s against the previous 19%, so the bucket stands and the
+# half-a-budget rule is not reached. Confirm against the first CI run that
+# records it; a ratio carried across machines is an estimate, not a measurement.
 py_test(
     name = "falcon_kat_test",
     size = "large",
     srcs = ["falcon_kat_test.py"],
+    deps = [
+        ":falcon_reference",
+        ":falcon_vectors",
+        "//sig_frx/lattice/falcon",
+        "//sig_frx/testing:kat",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The exhaustive run: all 100 published records at both degrees, where the gate
+# above takes `GATE_VECTORS` of them.
+#
+# `slow_kat`, so .bazelrc.ci drops it from a pull request and the scheduled CI
+# run puts it back — the same trade `ml_dsa_sweep_test` and
+# `slh_dsa_sweep_test` make, and for the same reason. What makes the bound
+# necessary rather than merely tidy is that the generator varies `mlen` per
+# record, so 100 records are 100 traced shapes per degree and the cost is
+# ~50x the gate's rather than 50x its execution.
+#
+# Sharded four ways, which is the number of cases: two parameter sets times the
+# harness pass and the reference pass. Bazel shards by test case, so this puts
+# each `kat.check` in a shard of its own rather than splitting a batch — the two
+# reference passes are host arithmetic and finish immediately, so the wall clock
+# is the slower of the two harness runs plus the fixed cost each shard repeats.
+#
+# Measured locally rather than extrapolated, and carried as a ratio to the gate
+# next door because it is a workstation's clock: the slowest shard runs **7.0x**
+# `falcon_kat_test`, and the four shards come out 1.00 / 0.57 / 0.0015 / 0.0015
+# of that slowest one — Falcon-1024's harness pass, Falcon-512's, and the two
+# reference passes, which are host arithmetic and finish immediately. Sharding
+# therefore buys a wall clock of 64% of the unsharded total, and the imbalance
+# is inherent: two of the four cases are nearly free.
+#
+# **The headroom is real but not generous.** Carrying 7.0x onto the gate's
+# recorded GPU leg puts the slowest shard between 1750 s and 2400 s against
+# `eternal`'s 3600 s, so a leg 1.5x slower than that estimate would breach it.
+# Re-measure from the first scheduled run that records this — `slow_kat` means
+# no pull request will — and shard further if it lands above half the timeout.
+py_test(
+    name = "falcon_sweep_test",
+    size = "large",
+    timeout = "eternal",
+    srcs = ["falcon_sweep_test.py"],
+    shard_count = 4,
+    tags = ["slow_kat"],
     deps = [
         ":falcon_reference",
         ":falcon_vectors",
