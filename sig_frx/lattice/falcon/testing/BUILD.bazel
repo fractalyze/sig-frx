@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@sig_frx_pip//:requirements.bzl", "requirement")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
@@ -244,6 +245,73 @@ py_test(
         "//sig_frx/lattice/falcon:encoding",
         "//sig_frx/lattice/falcon:fft",
         "//sig_frx/lattice/falcon:keygen",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The reference implementation as a shared object, one per parameter set. The
+# only C this repo builds, and it exists because Falcon is gated on an
+# implementation rather than on a vector file (../../../../docs/reference/testing.md).
+#
+# `linkshared` rather than a `cc_test`, because the caller is Python: the oracle
+# is reached through `ctypes`, which is what lets the same test hold this repo's
+# `verify` and the reference's `crypto_sign` in one process and compare them
+# directly.
+[
+    cc_binary(
+        name = "libfalcon%d_oracle.so" % degree,
+        testonly = True,
+        srcs = ["falcon_oracle.c"],
+        linkshared = True,
+        deps = ["@falcon_round3//:falcon%d" % degree],
+    )
+    for degree in [
+        512,
+        1024,
+    ]
+]
+
+# The `ctypes` binding. Separate from the test because the shared objects are
+# its `data` — a test that grew a second oracle case would otherwise re-declare
+# them.
+py_library(
+    name = "falcon_oracle",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "falcon_oracle.py",
+    ],
+    data = [
+        ":libfalcon1024_oracle.so",
+        ":libfalcon512_oracle.so",
+    ],
+    deps = [
+        "//sig_frx/lattice/falcon",
+        "//sig_frx/lattice/falcon:encoding",
+    ],
+)
+
+# One `Falcon-512` key generation dominates this target; everything after it —
+# a handful of reference signatures and the verdicts `verify` returns on them —
+# is seconds. That is the same shape as `falcon_test`, which is `large` for it.
+#
+# The GPU leg is the slower of the two on this workstation, 114.1 s against the
+# CPU leg's 65.5 s, and ../../../../docs/reference/measurement.md allows a
+# GPU-decided budget to be sized from a local run on a comparable device. It is
+# not sized from that alone: the CPU leg's executor runs 1.6-3.4x a workstation,
+# which puts its unmeasured CI figure anywhere up to about 220 s, and that would
+# make **it** the deciding leg. `medium` would then be 74% of its 300 s, past the
+# half-a-budget rule; `large` covers the worst of both readings at 25% and needs
+# no second guess about which leg decides. Re-measure once CI records it.
+py_test(
+    name = "falcon_interop_test",
+    size = "large",
+    srcs = ["falcon_interop_test.py"],
+    deps = [
+        ":falcon_oracle",
+        ":falcon_vectors",
+        "//sig_frx/lattice/falcon",
         requirement("absl_py"),
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,

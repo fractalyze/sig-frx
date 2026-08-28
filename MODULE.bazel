@@ -16,6 +16,10 @@ bazel_dep(name = "platforms", version = "1.0.0")
 # direct-dependency-mismatch warning to every invocation.
 bazel_dep(name = "rules_python", version = "1.7.0")
 
+# Bazel 9 removed the native cc rules from the global namespace, so the Falcon
+# interop oracle — the only C this repo builds — needs this explicitly.
+bazel_dep(name = "rules_cc", version = "0.2.17")
+
 # The symmetric layer every scheme in this repo hashes through. It rides the
 # bzlmod module graph pinned to a commit rather than the pip lock: hash-frx is a
 # Bazel module and publishes no wheel, and a commit pin is exact, needs no
@@ -63,6 +67,29 @@ use_repo(pip, "sig_frx_pip")
 # upstream into a mystery failure here. Bumping the commit is a deliberate
 # change with the diff visible in the sha256s.
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+# Falcon is gated on an implementation rather than on a file, which
+# docs/reference/testing.md allows when a standard publishes no vectors of its
+# own: FN-DSA is still draft, so the authority is "the reference implementation
+# the standard points at". Verifying the reference's signatures needs only its
+# published KAT, which is transcribed in
+# //sig_frx/lattice/falcon/testing:falcon_vectors — but the reverse direction,
+# a key generated *here* being accepted *there*, needs that implementation
+# running, so the source archive is fetched and its C compiled.
+#
+# The sha256 is the same pin `falcon_vectors.py` records for the values it
+# transcribes, so the vectors and the oracle are gated on one artifact. The URL
+# carries no commit to pin to: the round-3 submission is frozen by the NIST
+# process, which is what stands in for one.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "falcon_round3",
+    build_file = "//sig_frx/lattice/falcon/testing:falcon_round3.BUILD",
+    sha256 = "d625407dbda9e5835f610aaeba1147e029988a6610e0107dfd292033138e1d47",
+    strip_prefix = "falcon-round3",
+    urls = ["https://falcon-sign.info/falcon-round3.zip"],
+)
 
 # The ACVP JSON split: prompt.json carries the inputs, expectedResults.json the
 # outputs, joined on (tgId, tcId). Both halves are needed for one vector set.
