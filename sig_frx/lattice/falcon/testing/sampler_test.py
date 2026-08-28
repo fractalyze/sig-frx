@@ -9,6 +9,7 @@ not gated on `SamplerZ` alone.
 from __future__ import annotations
 
 import math
+from unittest import mock
 
 from absl.testing import absltest, parameterized
 
@@ -150,6 +151,60 @@ class VectorTest(parameterized.TestCase):
                 self.assertEqual(
                     call.inverse_sigma * sampler.SIGMA_MIN[degree], call.ccs
                 )
+
+    def test_the_rounded_sigma_min_is_invisible_in_the_results(self) -> None:
+        """Why the check above it is not enough on its own.
+
+        Table 3.3 prints σmin to ten significant digits, and that rounded value
+        is what a reader transcribing from the specification reaches for. The
+        test above rejects it — but only because it compares `ccs` directly.
+
+        Substituting it changes **every** intermediate this file checks and
+        **no** result at all: all 1024 published integers still come back, while
+        all 1786 recorded `BerExp` values move. So a sampler gated on
+        `SamplerZ`'s output alone — the vector the specification actually
+        tabulates — is green on the wrong constant, and stays green until the
+        distribution is examined statistically or another implementation
+        disagrees.
+
+        That is `testing.md`'s "pin the intermediates beneath them too" as a
+        measurement rather than as advice, and it is the argument for this
+        file's whole shape. Falcon-512 alone: the point is about the constant,
+        not about the degree, and one corpus states it.
+        """
+        rounded = 1.277833697
+        self.assertNotEqual(rounded, sampler.SIGMA_MIN[512])
+        calls = sampler_vectors.calls(512)
+
+        with mock.patch.dict(sampler.SIGMA_MIN, {512: rounded}):
+            for index, call in enumerate(calls):
+                with self.subTest(call=index):
+                    self.assertEqual(
+                        sampler.sampler_z(
+                            call.center,
+                            call.inverse_sigma,
+                            512,
+                            sampler_vectors.cursor(call.randomness),
+                        ),
+                        call.result,
+                    )
+
+        moved = total = 0
+        for call in calls:
+            fraction = call.center - math.floor(call.center)
+            half_inverse_sigma_squared = call.inverse_sigma * call.inverse_sigma * 0.5
+            for iteration in call.iterations:
+                z = iteration.bit + (2 * iteration.bit - 1) * iteration.z0
+                offset = z - fraction
+                x = offset * offset * half_inverse_sigma_squared
+                x -= (iteration.z0 * iteration.z0) * _INV_TWICE_SIGMA0_SQUARED
+                shifted = _shifted_exponential(x, rounded * call.inverse_sigma)
+                moved += shifted != iteration.shifted_exponential
+                total += 1
+        # Every one of them, not merely some: a partial move would mean the
+        # constant is only sometimes reached, which is a different claim.
+        self.assertEqual(moved, total)
+        self.assertGreater(total, len(calls))
 
     @parameterized.parameters(*_DEGREES)
     def test_approx_exp_matches_every_published_intermediate(self, degree: int) -> None:

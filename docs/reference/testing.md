@@ -147,6 +147,17 @@ gated on, and the repository cache makes every build after the first offline.
 Pin the URL to a commit, never a branch: NIST regenerates these files in place,
 and a moving URL turns an upstream regeneration into a mystery failure here.
 
+**When the only URL upstream offers is a moving one, transcribe instead of
+fetching.** Some publishers ship a real artifact with no fixed-version address —
+leanSpec republishes its fixtures archive in place under the tag `latest`, and
+Falcon's round-3 submission is frozen by the NIST process rather than by a commit
+([`MODULE.bazel`](../../MODULE.bazel) records the second). An `http_file` against
+such a URL is the mystery failure the paragraph above forbids, one upstream
+re-spin away. So the values become transcribed constants, and what would have
+been the `http_file`'s provenance goes where they live instead: the archive's
+sha256, its size, its publication date, and the exact call each value came from.
+That is the same bar, paid in a different place — not a lighter one.
+
 ### Not every scheme is driven by the shared harness
 
 [`kat.py`](../../sig_frx/testing/kat.py) normalizes published *formats* into one

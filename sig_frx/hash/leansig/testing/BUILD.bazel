@@ -320,3 +320,55 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# The scheme's known-answer vectors: signatures upstream produced under two of
+# the eight validator key pairs its fixtures archive publishes, at `PROD`.
+# Transcribed constants rather than a fetched file for the reason
+# `poseidon_vectors` is — the archive is republished in place under a moving tag,
+# so there is no commit-pinned URL — and the provenance lives in the module.
+py_library(
+    name = "prod_verify_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "prod_verify_vectors.py",
+    ],
+)
+
+# The gate on the shipped scheme: 46 chains over a 32-level tree, against
+# signatures upstream produced under its own published keys.
+#
+# `medium`, decided by the CPU leg: 33.7 s there against 19.9 s on the GPU leg,
+# both fresh in CI run 33135147374. That is 56% of `small`'s 60 s, and the
+# half-a-budget rule in ../../../../docs/reference/measurement.md moves a target
+# up at half; at `medium` it is an eighth of the 300 s budget.
+#
+# **Which leg decides inverted between the workstation and CI**, and that is the
+# case that page is about. Locally the GPU leg is the slow one — 21.5 s against
+# the CPU leg's 11.7 s — so a local reading argues the GPU leg sizes this, and
+# on CI the order flips with a wider margin the other way. An earlier revision
+# sized the bucket by carrying `leansig_test`'s local-to-CI GPU ratio across to
+# this target, predicting ~32 s on the leg that came in at 19.9 s: the factor is
+# per-target, as that page says, and a sibling's does not transfer even between
+# two suites over the same scheme.
+#
+# What did hold is the shape argument. `leansig_test`'s own comment predicted a
+# `PROD` verification suite would be far dearer than it; instead the two are
+# comparable — this one is well under it on the GPU leg and a little over on the
+# CPU leg — despite 46 chains against 4 and 32 tree levels against 8. A preset is
+# one fused region either way, so what costs is the number of distinct batch
+# widths a suite traces, and this one traces two where that suite traces several
+# plus its refusal paths.
+py_test(
+    name = "leansig_kat_test",
+    size = "medium",
+    srcs = ["leansig_kat_test.py"],
+    deps = [
+        ":harness",
+        ":prod_verify_vectors",
+        "//sig_frx/hash/leansig",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)

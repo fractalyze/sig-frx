@@ -143,12 +143,6 @@ py_test(
 # real; the way under it is fewer records per run, which is what the gate next
 # door already does.
 #
-# `slow_kat`, so .bazelrc.ci drops it from a pull request and the scheduled CI
-# run puts it back — the same trade `ml_dsa_sweep_test` and `slh_dsa_sweep_test`
-# make, and for the same reason. What makes the bound necessary rather than
-# merely tidy is that the generator varies `mlen` per record, so 100 records are
-# 100 traced shapes per degree.
-#
 # These are workstation numbers and `slow_kat` keeps the target off every pull
 # request, so `eternal` is sized against an unmeasured leg. The levers if it
 # ever breaches: fewer records, or one target per degree so each is a single
@@ -182,6 +176,7 @@ py_test(
     srcs = ["encoding_test.py"],
     deps = [
         ":falcon_reference",
+        ":falcon_vectors",
         "//sig_frx/lattice/falcon:encoding",
         requirement("absl_py"),
         requirement("frx"),
@@ -427,4 +422,27 @@ py_test(
         "//sig_frx/lattice/falcon:sampler",
         requirement("absl_py"),
     ],
+)
+
+# The walk is host `complex128` and the 3 072 sampler calls under it are host
+# integers, so like `:sampler_test` this compiles nothing on either leg. From
+# CI: 2.8 s on the CPU leg, 1.2 s on the GPU one, of which 0.17 s is the cases
+# themselves — the rest is interpreter start and imports, which is why the two
+# legs sit within a couple of seconds instead of the multiple every traced
+# target here shows. `small` covers the deciding leg at 5% of its 60 s.
+py_test(
+    name = "sign_test",
+    size = "small",
+    srcs = ["sign_test.py"],
+    deps = [
+        ":falcon_reference",
+        ":sampler_vectors",
+        "//sig_frx/lattice/falcon:arith",
+        "//sig_frx/lattice/falcon:fft",
+        "//sig_frx/lattice/falcon:keygen",
+        "//sig_frx/lattice/falcon:sampler",
+        "//sig_frx/lattice/falcon:sign",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
 )

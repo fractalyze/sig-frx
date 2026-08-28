@@ -34,6 +34,7 @@ from absl.testing import absltest, parameterized
 
 from sig_frx.lattice.falcon import encoding
 from sig_frx.lattice.falcon.testing import falcon_reference as ref
+from sig_frx.lattice.falcon.testing import falcon_vectors
 
 _PARAMETER_SETS = ref.parameter_cases()
 
@@ -283,6 +284,85 @@ class Decompress(parameterized.TestCase):
         got, ok = encoding.decompress(fnp.asarray(bytearray(blob), np.uint8), n)
         self.assertTrue(bool(ok))
         np.testing.assert_array_equal(np.asarray(got), [0] * n)
+
+
+class Compress(parameterized.TestCase):
+    """Algorithm 17's reshaping, against Algorithm 17 and against real bytes."""
+
+    @parameterized.product(
+        case=_PARAMETER_SETS,
+        fill=(0.0, 0.01, 0.5, 1.0),
+    )
+    def test_agrees_with_the_reference_over_generated_polynomials(
+        self, case: dict[str, Any], fill: float
+    ) -> None:
+        """`fill` walks the unary runs from all-empty to every bit `slen` allows."""
+        n, length = case["n"], ref.slen(case["signature_size"])
+        s = _sample(case, seed=n + int(fill * 100), excess=int(_room(case) * fill))
+        want = ref.compress(s, length)
+        self.assertIsNotNone(want)
+        assert want is not None
+        got, ok = encoding.compress(s, length)
+        self.assertTrue(ok)
+        np.testing.assert_array_equal(got, np.frombuffer(want, dtype=np.uint8))
+
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_the_zero_polynomial_is_the_canonical_spelling(self, **params: Any) -> None:
+        """`000000001` per coefficient, and no sign bit set on a zero.
+
+        The one output `decompress` would refuse if it were built wrongly: a
+        sign bit over a zero magnitude is Algorithm 18's `-0`, which it rejects.
+        """
+        n, length = params["n"], ref.slen(params["signature_size"])
+        got, ok = encoding.compress([0] * n, length)
+        self.assertTrue(ok)
+        coefficients, valid = encoding.decompress(fnp.asarray(got, np.uint8), n)
+        self.assertTrue(bool(valid))
+        np.testing.assert_array_equal(np.asarray(coefficients), [0] * n)
+
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_a_polynomial_that_does_not_fit_is_refused(self, **params: Any) -> None:
+        """Line 8's `⊥`, which Algorithm 10 line 11 exists to catch.
+
+        One bit past what `slen` holds, reached by giving a single coefficient a
+        unary run one longer than the whole budget leaves.
+        """
+        n, length = params["n"], ref.slen(params["signature_size"])
+        s = [0] * n
+        s[0] = (_room(params) + 1) << 7
+        self.assertIsNone(ref.compress(s, length))
+        got, ok = encoding.compress(s, length)
+        self.assertFalse(ok)
+        self.assertLen(got, length // 8)
+
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_reproduces_the_published_signature_bytes(self, **params: Any) -> None:
+        """A published signature, decoded and re-encoded, is itself again.
+
+        The half neither the reference transcription nor a round trip supplies:
+        those hold this encoder to another reading of the standard and to its own
+        inverse, and both would still pass if the two agreed on something
+        upstream does not do. These are upstream's bytes.
+
+        Every published record, unbounded, where
+        [`falcon_kat_test`](falcon_kat_test.py) takes a few. A §3.11.3 signature
+        is padded to `sbytelen`, so all 100 are one traced shape — the varying
+        message length that makes the harness pass expensive is not an input
+        here.
+        """
+        n, sbytelen = params["n"], params["signature_size"]
+        for record in falcon_vectors.records(f"Falcon-{n}"):
+            with self.subTest(case=record.case):
+                published = np.frombuffer(record.signature, np.uint8)
+                salt, coefficients, ok = encoding.sig_decode(
+                    fnp.asarray(published, np.uint8), n, sbytelen
+                )
+                self.assertTrue(bool(ok))
+                again, encoded = encoding.sig_encode(
+                    np.asarray(salt), np.asarray(coefficients), n, sbytelen
+                )
+                self.assertTrue(encoded)
+                np.testing.assert_array_equal(again, published)
 
 
 class Rejections(parameterized.TestCase):

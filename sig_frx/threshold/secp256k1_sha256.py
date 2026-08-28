@@ -16,6 +16,7 @@ transcription beside it as the reference pair.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -71,36 +72,58 @@ class Secp256k1Sha256:
         return value
 
     def scalar_base_mult(self, scalar: int) -> bytes:
-        return self.serialize_element(
-            self.element_scalar_mult(self.curve.generator, scalar)
+        (encoded,) = self.serialize_elements(
+            self.elements_scalar_mult(self.curve.generator, [scalar])
         )
+        return encoded
 
-    def deserialize_element(self, data: bytes) -> np.ndarray:
-        """SEC 1 §2.3.4 compressed decoding plus §3.2.2.1 validation."""
-        if len(data) != 33 or data[0] not in (2, 3):
-            raise ValueError("a serialized element is 33 bytes, prefix 02 or 03")
-        x = int.from_bytes(data[1:], "big")
-        if x >= self.curve.p:
-            raise ValueError("the x-coordinate is out of range")
-        points, on_curve = secp.lift_x_to_parity(self.curve, [x], [data[0] & 1])
-        if not bool(on_curve[0]):
-            raise ValueError("the x-coordinate is not on the curve")
+    def deserialize_elements(self, data: Sequence[bytes]) -> np.ndarray:
+        """SEC 1 §2.3.4 compressed decoding plus §3.2.2.1 validation, batched.
+
+        The prefix and range checks are per entry and stay on the host — they
+        read bytes, and a rejected entry has to name itself. The lift is the
+        one piece with an axis to be large along, so it runs once over the
+        whole batch, which is also where `secp` decides the namespace.
+        """
+        xs, parities = [], []
+        for index, entry in enumerate(data):
+            if len(entry) != 33 or entry[0] not in (2, 3):
+                raise ValueError(
+                    f"a serialized element is 33 bytes, prefix 02 or 03 (entry {index})"
+                )
+            x = int.from_bytes(entry[1:], "big")
+            if x >= self.curve.p:
+                raise ValueError(f"the x-coordinate is out of range (entry {index})")
+            xs.append(x)
+            parities.append(entry[0] & 1)
+        points, on_curve = secp.lift_x_to_parity(self.curve, xs, parities)
+        off = [i for i, ok in enumerate(np.asarray(on_curve)) if not bool(ok)]
+        if off:
+            raise ValueError(f"the x-coordinate is not on the curve (entries {off})")
         return points.astype(self.curve.accumulator)
 
-    def element_add(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    def elements_add(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
         return left + right
 
-    def element_scalar_mult(self, element: np.ndarray, scalar: int) -> np.ndarray:
-        return secp.multiple(self.curve, [scalar], element)
+    def elements_scalar_mult(
+        self, elements: np.ndarray, scalars: Sequence[int]
+    ) -> np.ndarray:
+        return secp.multiple(self.curve, list(scalars), elements)
 
-    def identity_element(self) -> np.ndarray:
-        return np.zeros([1], dtype=self.curve.accumulator)
+    def sum_elements(self, elements: np.ndarray) -> np.ndarray:
+        return secp.sum_points(self.curve, elements)
 
-    def serialize_element(self, element: np.ndarray) -> bytes:
-        if bool(secp.is_identity(self.curve, element)[0]):
-            raise ValueError("the identity element has no encoding here")
-        ((x, y),) = secp.affine_ints(self.curve, element)
-        return secp.compressed_bytes(self.curve, x, y)
+    def serialize_elements(self, elements: np.ndarray) -> list[bytes]:
+        identity = np.asarray(secp.is_identity(self.curve, elements))
+        bad = [i for i, flag in enumerate(identity) if bool(flag)]
+        if bad:
+            raise ValueError(
+                f"the identity element has no encoding here (entries {bad})"
+            )
+        return [
+            secp.compressed_bytes(self.curve, x, y)
+            for x, y in secp.affine_ints(self.curve, elements)
+        ]
 
     def verify(
         self, public_key: ArrayLike, message: ArrayLike, signature: ArrayLike

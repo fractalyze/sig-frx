@@ -606,6 +606,70 @@ def decompress(data: ArrayLike, n: int) -> tuple[Any, Any]:
     return coefficients, terminated & canonical & padded
 
 
+def compress(coefficients: ArrayLike, length: int) -> tuple[np.ndarray, bool]:
+    """Algorithm 17 — `(enc_s, ok)`, where `ok` is `⊥` inverted.
+
+    Each coefficient becomes a sign bit, seven low bits of its magnitude, then
+    the high part in unary: `⌊|s|/128⌋` zeros closed by a one. So a coefficient
+    costs `9 + ⌊|s|/128⌋` bits and the total is data-dependent, which is why
+    Algorithm 10 line 11 can be handed a `⊥` and has to draw again.
+
+    **Host, and `numpy` rather than the array namespace the rest of this module
+    reads.** Placing the bits is a scatter — `n` runs at positions only their own
+    prefix sum knows — and a scatter has no namespace-generic spelling here.
+    That costs nothing: the caller is signing, which is host-only because the
+    sampler under it is (see [`sampler.py`](sampler.py)), so there is no traced
+    path to serve. [`decompress`](#decompress) is the one that had to be device
+    code, being 69% of a GPU verification, and its shape is deliberately not
+    copied here.
+
+    Nothing it emits can be refused by `decompress`: the sign bit is set only
+    where the magnitude is nonzero, so no `-0` is produced, and the tail past
+    the last terminator is zero-filled.
+    """
+    values = np.asarray(coefficients, dtype=np.int64)
+    if values.ndim != 1:
+        raise ValueError(f"one signature at a time, not {values.ndim} axes")
+    magnitude = np.abs(values)
+    high = magnitude >> 7
+
+    # A run per coefficient, and where each starts: the prefix sum of the
+    # lengths, which is the only thing about the layout that is not local.
+    lengths = _HEADER_BITS + high + 1
+    starts = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(lengths)[:-1]])
+    if int(lengths.sum()) > length:
+        # Line 8's `⊥`. The buffer is still the right length so a caller that
+        # ignores `ok` writes a well-formed rejection rather than a short array.
+        return np.zeros(length // 8, dtype=np.uint8), False
+
+    bits = np.zeros(length, dtype=np.uint8)
+    bits[starts] = (values < 0).astype(np.uint8)
+    for offset in range(7):
+        bits[starts + 1 + offset] = ((magnitude >> (6 - offset)) & 1).astype(np.uint8)
+    # The unary run is already zero; only its terminator has to be written.
+    bits[starts + _HEADER_BITS + high] = 1
+    return np.asarray(bits_to_bytes_high_first(bits), dtype=np.uint8), True
+
+
+def sig_encode(
+    salt: ArrayLike, coefficients: ArrayLike, n: int, sbytelen: int
+) -> tuple[np.ndarray, bool]:
+    """§3.11.3 — `(sig, ok)`, the padded `header ‖ salt ‖ enc_s` a verifier takes.
+
+    The inverse of [`sig_decode`](#sig_decode), and the padding is what makes
+    the two agree: `slen` is every bit the signature has left after the header
+    and the salt, so `compress` fills the whole of it and Algorithm 18's
+    trailing-zero rule reads the remainder as padding rather than as a
+    coefficient.
+    """
+    material = np.asarray(salt, dtype=np.uint8)
+    if material.shape != (SALT_SIZE,):
+        raise ValueError(f"a salt is {SALT_SIZE} bytes, got {material.shape}")
+    body, ok = compress(coefficients, slen(sbytelen))
+    header = np.array([degree_header(n, 0b0011)], dtype=np.uint8)
+    return np.concatenate([header, material, body]), ok
+
+
 def slen(sbytelen: int) -> int:
     """Algorithm 16 line 2's `8·sbytelen − 328`, as the bits it actually names.
 

@@ -63,6 +63,15 @@ Do not sign with a long-lived secret key on a machine an adversary can measure.
   passes every positive known-answer test, so the negative cases — a flipped bit
   in the signature, the message, and the public key — are part of a scheme's gate,
   not an optional extra.
+- **A scheme whose hardness assumption is materially younger or less scrutinized
+  than this shelf's others says so on its page, with the reason.** SHA-2 and
+  SHAKE, the lattice problems under NTRU and module-LWE, and the discrete log
+  each have decades of public analysis behind their lineage; a reader comparing
+  schemes here will assume the rest are alike in that respect unless told
+  otherwise. Where the assumption is ordinary, the page says nothing — this is
+  not a field to fill in. leanSig is the one that owes it today, and
+  [its page](../schemes/leansig.md#what-this-scheme-rests-on) carries the
+  assumption and the cryptanalysis it is under.
 
 ## Changing the posture
 
