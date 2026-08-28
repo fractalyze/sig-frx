@@ -34,10 +34,14 @@ quietly.
 
 ## What traces, and what cannot
 
-The hashing traces as one computation over the whole batch — the ~180 Poseidon
+The hashing traces as one computation over the whole batch — the ~380 Poseidon
 calls a verification runs are the reason the batch-first seam exists, and they
-are all downstream of the encode. The encode itself is host-only and stays
-there:
+are all downstream of the encode. That figure is this verifier's rather than the
+construction's quoted ~180: [`wots.chain`](../wots.py) walks every chain its
+full `base - 1` steps and selects instead of stopping where the codeword names,
+so the chain term is 322 hashes rather than 122 — spent so that no walk branches
+on the codeword ([`leansig.md`](../../../docs/schemes/leansig.md)). The encode
+itself is host-only and stays there:
 
 - `encoding.encode_message` decomposes a 256-bit root base-p, and
   `encode_epoch` does the same to `(slot << 8) | prefix`. A running remainder

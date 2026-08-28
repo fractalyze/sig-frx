@@ -305,7 +305,7 @@ class LeanSigTweakableHash:
     Digests are lane-reversed field vectors throughout, the convention
     [`poseidon.py`](poseidon.py) states and justifies: a digest comes back
     reversed and feeds straight back in, so a chain walk and a Merkle climb move
-    no data between the ~180 permutations a verification runs.
+    no data between the ~380 permutations a verification runs.
     """
 
     def __init__(self, params: LeanSigParams) -> None:
@@ -392,7 +392,7 @@ class LeanSigTweakableHash:
         Upstream's own `lengths`, in its order. A property rather than a cached
         attribute for the reason `poseidon.safe_domain_separator` gives for not
         caching itself: it would be a concrete device array carrying backend
-        affinity, and the cost it saves is one permutation against the ~180 a
+        affinity, and the cost it saves is one permutation against the ~380 a
         verification runs.
         """
         return poseidon.safe_domain_separator(
