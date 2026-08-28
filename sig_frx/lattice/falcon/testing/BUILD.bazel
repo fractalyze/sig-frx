@@ -323,3 +323,32 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# The archive's per-call sampler traces, parsed. `data` reaches the same
+# `falcon_round3` archive the interop oracle compiles, so the sampler and the
+# oracle are pinned by one sha256.
+py_library(
+    name = "sampler_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "sampler_vectors.py",
+    ],
+    data = ["@falcon_round3//:sampler_vectors"],
+    deps = ["@rules_python//python/runfiles"],
+)
+
+# Pure host arithmetic over the published traces — no device, no compile, and
+# `small` covers it with room. The work is parsing two files and running 3 072
+# sampler calls, which is milliseconds; what it is not is a traced target, so
+# neither leg has anything to compile.
+py_test(
+    name = "sampler_test",
+    size = "small",
+    srcs = ["sampler_test.py"],
+    deps = [
+        ":sampler_vectors",
+        "//sig_frx/lattice/falcon:sampler",
+        requirement("absl_py"),
+    ],
+)
