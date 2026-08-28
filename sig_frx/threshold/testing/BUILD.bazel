@@ -38,6 +38,34 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# MR19 Figure 8 against the figure written out one instance at a time, plus
+# the three published breaks that stand in for the vector set this layer has
+# none of, plus one run at DKLs23 §8.2's `lambda_c = 128` — the first size that
+# crosses `secp.DEVICE_MIN_BATCH`, so the only one that compiles the traced
+# kernels a real setup runs on.
+#
+# `medium` from the CPU leg, which is the slower one here: 23.4-23.5 s over
+# three uncached runs alone and 30.1 s alongside the rest of `//...`, against
+# `small`'s 60 s — which the CI executor's 1.6-3.4x would put at the top of
+# that bucket or past it. The GPU leg runs the same
+# target in 9.3-9.4 s, so the device is not what makes this cost what it does —
+# crossing the placement threshold at all is, and both legs pay it. The
+# lambda_c case is nearly all of either number; the rest of the suite is 3.4 s.
+# Deliberately one bucket above what bazel's own timeout warning asks for, per
+# ../../../docs/reference/measurement.md.
+py_test(
+    name = "base_ot_test",
+    size = "medium",
+    srcs = ["base_ot_test.py"],
+    deps = [
+        "//sig_frx/classical:secp",
+        "//sig_frx/threshold:base_ot",
+        "//sig_frx/threshold:hash_to_curve",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 py_test(
     name = "hash_to_curve_test",
     size = "small",
