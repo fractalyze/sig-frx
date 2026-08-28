@@ -119,19 +119,25 @@ def double_precision() -> Iterator[None]:
         yield
 
 
-def _require_scope(*values: object) -> Any:
+def require_scope(*values: object) -> Any:
     """The namespace `values` belong to, refusing a traced call outside the scope.
 
     Traced and outside it, `asarray(..., dtype='complex128')` *warns* and
     returns `complex64`, and 24 bits of mantissa is not a tolerance this
     transform can absorb — it is the difference the security analysis rests on.
     A warning is the wrong shape for that, so it is an error.
+
+    Public because the rational half of Falcon is not only this module:
+    [`keygen`](keygen.py)'s `ffLDL` tree is `float64` arithmetic over the same
+    domain with the same requirement, and a second copy of this check would be a
+    second chance to word the refusal differently. The scope it names lives here,
+    so the guard for it does too.
     """
     xnp = namespace(*values)
     if xnp is not np and not enable_x64.value:
         raise RuntimeError(
-            "a traced Falcon FFT requires double precision, which is off by "
-            "default in this stack; wrap the operation in "
+            "a traced Falcon rational-domain operation requires double "
+            "precision, which is off by default in this stack; wrap it in "
             "`sig_frx.lattice.falcon.fft.double_precision()`"
         )
     return xnp
@@ -175,14 +181,14 @@ def fft(f: ArrayLike) -> Any:
     `ifft` rather than `fft`, scaled — the library's forward transform carries
     the `−i` convention and this ring wants `+i`.
     """
-    xnp = _require_scope(f)
+    xnp = require_scope(f)
     n = np.shape(f)[-1]
     return xnp.fft.ifft(xnp.asarray(f, dtype="complex128") * _twist(n)) * n
 
 
 def ifft(f_fft: ArrayLike) -> Any:
     """Evaluations back to coefficients — the inverse of [`fft`](#fft)."""
-    xnp = _require_scope(f_fft)
+    xnp = require_scope(f_fft)
     n = np.shape(f_fft)[-1]
     return xnp.fft.fft(xnp.asarray(f_fft, dtype="complex128")) / n * np.conj(_twist(n))
 
@@ -192,7 +198,7 @@ def split(f_fft: ArrayLike) -> tuple[Any, Any]:
 
     The pair is a root and its negative, which is `i` and `i + n/2` here.
     """
-    _require_scope(f_fft)
+    require_scope(f_fft)
     half = np.shape(f_fft)[-1] // 2
     lo, hi = f_fft[..., :half], f_fft[..., half:]
     return 0.5 * (lo + hi), (lo - hi) * _split_factor(2 * half)
@@ -200,7 +206,7 @@ def split(f_fft: ArrayLike) -> tuple[Any, Any]:
 
 def merge(f0_fft: ArrayLike, f1_fft: ArrayLike) -> Any:
     """The inverse of [`split`](#split): two half transforms back to one."""
-    xnp = _require_scope(f0_fft, f1_fft)
+    xnp = require_scope(f0_fft, f1_fft)
     half = np.shape(f0_fft)[-1]
     t = f1_fft * _half_roots(2 * half)
     return xnp.concatenate([f0_fft + t, f0_fft - t], axis=-1)
