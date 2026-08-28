@@ -31,6 +31,17 @@ this file is the map plus the rules every change must respect.
   fractal-commit-lint exempts only that form (and `Merge pull request #N`);
   git's default `Merge remote-tracking branch 'origin/X'` wording fails the
   commit-msg hook and leaves the merge stopped before committing.
+- **CI does not run on a stacked pull request.** `ci.yml` triggers
+  `build-and-test` on `pull_request: branches: ["main"]`, so a PR based on
+  another PR's branch shows only Commit Lint and reads as passing. Either land
+  the bottom of the stack first, or verify both legs locally and say so on the
+  PR — a green check list that is one entry long is the tell.
+- **A device XOF squeeze is sized into the program, so a long one does not
+  work.** hash-frx's `Shake256(size).digest(...)` compiles in time and memory
+  super-linear in `size`: 4.6 s at 1 KB, 28 s at 4 KB, nothing inside 400 s at
+  16 KB, and at 64 KB it exhausts the box. A concrete caller wanting more than a
+  few KB uses `hashlib` — the escape hatch [`hashes.py`](sig_frx/hashes.py)
+  names — as Falcon's key generation does for its 64 KB draw.
 
 ## Four non-negotiables
 
