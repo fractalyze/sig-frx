@@ -38,6 +38,34 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# MR19 Figure 8 against the figure written out one instance at a time, plus
+# the three published breaks that stand in for the vector set this layer has
+# none of, plus one run at DKLs23 §8.2's `lambda_c = 128`.
+#
+# `medium` from the CPU leg, which is the slower one here: 13.6-13.8 s over
+# three uncached runs against `small`'s 60 s, which the CI executor's 1.6-3.4x
+# would put at the top of that bucket or past it. The GPU leg runs it in
+# 8.5-8.7 s. Deliberately one bucket above what bazel's own timeout warning
+# asks for, per ../../../docs/reference/measurement.md.
+#
+# Nearly all of either number is the `lambda_c = 128` case, and specifically
+# the fused square root inside the wire decode: that is the only work this
+# module puts on the device, and it compiles once per distinct batch shape.
+# The rest of the suite is 3.4 s.
+py_test(
+    name = "base_ot_test",
+    size = "medium",
+    srcs = ["base_ot_test.py"],
+    deps = [
+        "//sig_frx/classical:secp",
+        "//sig_frx/classical/testing:weierstrass_reference",
+        "//sig_frx/threshold:base_ot",
+        "//sig_frx/threshold:hash_to_curve",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 py_test(
     name = "hash_to_curve_test",
     size = "small",

@@ -8,7 +8,7 @@ from unittest import mock
 import numpy as np
 from absl.testing import absltest, parameterized
 
-from sig_frx.lattice.falcon import arith, fft, keygen, sampler, sign
+from sig_frx.lattice.falcon import fft, keygen, sampler, sign
 from sig_frx.lattice.falcon.testing import falcon_reference, sampler_vectors
 
 _DEGREES = (512, 1024)
@@ -29,22 +29,22 @@ _DEGREES = (512, 1024)
 _SIGMA_TOLERANCE = 1e-11
 
 
-def _target(signed: sampler_vectors.Signature) -> tuple[np.ndarray, np.ndarray]:
-    """Algorithm 10 line 3 — `t = (FFT(c), FFT(0)) · B̂⁻¹`, written out."""
-    c = fft.fft(np.asarray(signed.hashed_message, dtype=np.float64))
-    f = fft.fft(np.asarray(signed.f, dtype=np.float64))
-    big_f = fft.fft(np.asarray(signed.big_f, dtype=np.float64))
-    return -(c * big_f) / arith.Q, (c * f) / arith.Q
+def _loaded(
+    signed: sampler_vectors.Signature, degree: int
+) -> tuple[tuple, keygen.FalconTree]:
+    """The traced signature's own key, through the production loader.
 
+    `signing_basis` rather than a rebuild here: the four transforms and the
+    `gram → ffldl → normalize` composition are exactly what the walk below
+    depends on, so a second spelling would leave the thing under test vouching
+    for itself — and would leave the production path gated only end to end.
 
-def _tree(signed: sampler_vectors.Signature, degree: int) -> keygen.FalconTree:
-    """The Falcon tree of the traced signature's own key."""
-    transformed = [
-        fft.fft(np.asarray(p, dtype=np.float64))
-        for p in (signed.f, signed.g, signed.big_f, signed.big_g)
-    ]
+    `G` is recomputed from `(f, g, F)` rather than taken from the trace, which
+    is what a loaded §3.11.5 key does; the trace publishes it, so any drift
+    shows up in the lattice point rather than silently.
+    """
     sigma = falcon_reference.PARAMETER_SETS[f"Falcon-{degree}"]["sigma"]
-    return keygen.normalize(keygen.ffldl(*keygen.gram(*transformed)), sigma)
+    return sign.signing_basis(signed.f, signed.g, signed.big_f, sigma)
 
 
 class FfSamplingTest(parameterized.TestCase):
@@ -70,7 +70,9 @@ class FfSamplingTest(parameterized.TestCase):
             return z
 
         with mock.patch.object(sign.sampler, "sampler_z", recording):
-            sign.ff_sampling(*_target(signed), _tree(signed, degree), stream)
+            basis, tree = _loaded(signed, degree)
+            t = sign.target(signed.hashed_message, basis[0], basis[2])
+            sign.ff_sampling(*t, tree, stream)
 
         self.assertLen(seen, len(published))
         for index, (got, want) in enumerate(zip(seen, published)):
@@ -99,9 +101,10 @@ class FfSamplingTest(parameterized.TestCase):
         signed = sampler_vectors.signature(degree)
         published = sampler_vectors.calls(degree)
         stream = sampler_vectors.cursor(b"".join(c.randomness for c in published))
-        t0, t1 = _target(signed)
+        basis, tree = _loaded(signed, degree)
+        t0, t1 = sign.target(signed.hashed_message, basis[0], basis[2])
 
-        z0, z1 = sign.ff_sampling(t0, t1, _tree(signed, degree), stream)
+        z0, z1 = sign.ff_sampling(t0, t1, tree, stream)
 
         f = fft.fft(np.asarray(signed.f, dtype=np.float64))
         big_f = fft.fft(np.asarray(signed.big_f, dtype=np.float64))

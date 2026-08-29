@@ -178,7 +178,8 @@ def verify(public_key: bytes, message: bytes, signature: bytes, degree: int) -> 
         return False
 
     library = _library(degree)
-    recovered = ctypes.create_string_buffer(max(len(aggregate), 1))
+    # At least `2 + 40 + 1` bytes by §3.11.6's layout, so never empty.
+    recovered = ctypes.create_string_buffer(len(aggregate))
     length = ctypes.c_ulonglong(0)
     status = library.crypto_sign_open(
         recovered, ctypes.byref(length), aggregate, len(aggregate), public_key

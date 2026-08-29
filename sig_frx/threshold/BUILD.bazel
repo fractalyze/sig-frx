@@ -73,6 +73,24 @@ py_library(
     ],
 )
 
+# Masny-Rindal endemic OT (MR19 Figure 8) over secp256k1 — the base OTs
+# DKLs23 §8.1 names. Depends on the oracle into the group and on secp for the
+# batched point seams; the expansion and the key derivation are hashlib, which
+# is the whole rest of this package's face too.
+py_library(
+    name = "base_ot",
+    srcs = [
+        "__init__.py",
+        "base_ot.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":hash_to_curve",
+        "//sig_frx/classical:secp",
+        requirement("numpy"),
+    ],
+)
+
 # FROST(secp256k1, SHA-256): §6.5's constants over the curated secp substrate.
 py_library(
     name = "secp256k1_sha256",

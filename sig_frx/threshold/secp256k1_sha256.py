@@ -80,27 +80,10 @@ class Secp256k1Sha256:
     def deserialize_elements(self, data: Sequence[bytes]) -> np.ndarray:
         """SEC 1 §2.3.4 compressed decoding plus §3.2.2.1 validation, batched.
 
-        The prefix and range checks are per entry and stay on the host — they
-        read bytes, and a rejected entry has to name itself. The lift is the
-        one piece with an axis to be large along, so it runs once over the
-        whole batch, which is also where `secp` decides the namespace.
+        The substrate's codec, which is where the batched lift and the
+        per-entry byte checks live; this suite only names what was being read.
         """
-        xs, parities = [], []
-        for index, entry in enumerate(data):
-            if len(entry) != 33 or entry[0] not in (2, 3):
-                raise ValueError(
-                    f"a serialized element is 33 bytes, prefix 02 or 03 (entry {index})"
-                )
-            x = int.from_bytes(entry[1:], "big")
-            if x >= self.curve.p:
-                raise ValueError(f"the x-coordinate is out of range (entry {index})")
-            xs.append(x)
-            parities.append(entry[0] & 1)
-        points, on_curve = secp.lift_x_to_parity(self.curve, xs, parities)
-        off = [i for i, ok in enumerate(np.asarray(on_curve)) if not bool(ok)]
-        if off:
-            raise ValueError(f"the x-coordinate is not on the curve (entries {off})")
-        return points.astype(self.curve.accumulator)
+        return secp.decompressed(self.curve, data, "serialized element")
 
     def elements_add(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
         return left + right
@@ -114,8 +97,7 @@ class Secp256k1Sha256:
         return secp.sum_points(self.curve, elements)
 
     def serialize_elements(self, elements: np.ndarray) -> list[bytes]:
-        identity = np.asarray(secp.is_identity(self.curve, elements))
-        bad = [i for i, flag in enumerate(identity) if bool(flag)]
+        bad = secp.identity_entries(self.curve, elements)
         if bad:
             raise ValueError(
                 f"the identity element has no encoding here (entries {bad})"

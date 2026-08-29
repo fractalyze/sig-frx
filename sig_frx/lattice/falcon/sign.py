@@ -147,6 +147,30 @@ def ff_sampling(
     )
 
 
+def signing_basis(
+    f: ArrayLike, g: ArrayLike, big_f: ArrayLike, sigma: float
+) -> tuple[tuple[Any, Any, Any, Any], keygen.FalconTree]:
+    """Algorithm 4 lines 3-7 over the three polynomials §3.11.5 carries.
+
+    A key that arrives as bytes has neither `B̂` nor the tree — the encoding
+    stores `f`, `g` and `F` and `keygen` deliberately builds no tree — so both
+    are rebuilt on load. `G` is recovered rather than decoded, being the quarter
+    of the trapdoor the encoding leaves out.
+
+    Returned together because they come from one pass and every caller needs
+    both: `gram` consumes the four transforms and so does [`target`](#target),
+    so a caller that rebuilt either half would transform twice. Here rather than
+    at the seam for the reason this module exists — it is the arithmetic, and
+    the seam is the salt, the encoding and the loop.
+    """
+    basis_hat = tuple(
+        fft.fft(np.asarray(entry, dtype=np.float64))
+        for entry in (f, g, big_f, keygen.recover_g(f, g, big_f))
+    )
+    tree = keygen.normalize(keygen.ffldl(*keygen.gram(*basis_hat)), sigma)
+    return basis_hat, tree
+
+
 def target(point: ArrayLike, f_hat: Any, big_f_hat: Any) -> tuple[Any, Any]:
     """Algorithm 10 line 3 — `t = (FFT(c), FFT(0)) · B̂⁻¹`.
 

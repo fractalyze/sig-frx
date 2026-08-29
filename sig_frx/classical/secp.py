@@ -410,6 +410,60 @@ def compressed_bytes(curve: Curve, x: int, y: int) -> bytes:
     return (2 + (y & 1)).to_bytes(1, "big") + x.to_bytes(width, "big")
 
 
+def decompressed(curve: Curve, data: Sequence[bytes], role: str) -> np.ndarray:
+    """SEC 1 §2.3.4 decompression plus §3.2.2.1's validation: `[B]` jacobian.
+
+    The batch half of `compressed_bytes`, and the shape every consumer that
+    reads a compressed point off the wire wants: a rejected entry names itself
+    and the call raises, because a batch is one protocol message and half of
+    one is not something a caller can act on.
+
+    The prefix and range checks are per entry and stay on the host — they read
+    bytes, and the entry index is what makes a rejection actionable. The
+    on-curve test is the one piece with an axis to be large along, so it runs
+    once over the whole batch through `lift_x_to_parity`, which is also where
+    `secp` decides the namespace.
+
+    `role` names what the caller was reading, so one message can serve a group
+    public key, a signature's `R`, and an OT pad without any of them reading
+    like the others.
+
+    Unlike the encoder, this makes no identity decision, and does not need to:
+    the identity reads back as `(0, 0)` and `x = 0` is on no point of either
+    curve here, so an identity encoding is refused as off-curve rather than
+    accepted. A caller whose *own* points may be the identity still owns that
+    question — see `compressed_bytes`.
+    """
+    width = (curve.p.bit_length() + 7) // 8
+    xs, parities = [], []
+    for index, entry in enumerate(data):
+        if len(entry) != width + 1 or entry[0] not in (2, 3):
+            raise ValueError(
+                f"a {role} is {width + 1} bytes, prefix 02 or 03 (entry {index})"
+            )
+        x = int.from_bytes(entry[1:], "big")
+        if x >= curve.p:
+            raise ValueError(f"a {role}'s x-coordinate is out of range (entry {index})")
+        xs.append(x)
+        parities.append(entry[0] & 1)
+    points, on_curve = lift_x_to_parity(curve, xs, parities)
+    off = np.flatnonzero(~np.asarray(on_curve)).tolist()
+    if off:
+        raise ValueError(f"a {role} is not on the curve (entries {off})")
+    return points.astype(curve.accumulator)
+
+
+def identity_entries(curve: Curve, points: ArrayLike) -> list[int]:
+    """Which entries of a batch are the group identity, as indices.
+
+    The readback every caller of `is_identity` actually wants: an encoder
+    refusing the identity and a protocol step aborting on one both need to say
+    *which* rows, not that some row was. Answered on the host for the reason
+    `is_identity` states.
+    """
+    return np.flatnonzero(np.asarray(is_identity(curve, points))).tolist()
+
+
 def uncompressed_rows(curve: Curve, points: ArrayLike, ok: ArrayLike) -> np.ndarray:
     """Each point as SEC 1 `04 ‖ X ‖ Y`, masked rows zeroed: `uint8[B, 65]`.
 

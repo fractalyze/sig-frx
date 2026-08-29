@@ -127,7 +127,7 @@ from sig_frx import context as context_rules
 from sig_frx.batch import require_batch
 from sig_frx.hashes import shake256
 from sig_frx.lattice import rejection
-from sig_frx.lattice.falcon import arith, encoding, fft, keygen, sign
+from sig_frx.lattice.falcon import arith, encoding, keygen, sign
 from sig_frx.lattice.falcon.arith import Q
 from sig_frx.signature import Signature
 
@@ -505,14 +505,9 @@ class Falcon:
         f, g, big_f, ok = encoding.sk_decode(key, n)
         if not bool(np.asarray(ok)):
             raise ValueError("the secret key is not a well-formed §3.11.5 encoding")
-        big_g = keygen.recover_g(f, g, big_f)
-        basis = tuple(
-            fft.fft(np.asarray(entry, dtype=np.float64))
-            for entry in (f, g, big_f, big_g)
-        )
-        # Algorithm 4 lines 4-7, rebuilt here because §3.11.5 encodes the
-        # trapdoor and not the tree — `keygen` deliberately does not build one.
-        tree = keygen.normalize(keygen.ffldl(*keygen.gram(*basis)), self.params.sigma)
+        # Algorithm 4 lines 3-7, rebuilt because §3.11.5 encodes the trapdoor
+        # and not the tree — `keygen` deliberately does not build one.
+        basis, tree = sign.signing_basis(f, g, big_f, self.params.sigma)
 
         body = np.asarray(message, dtype=np.uint8)
         # Line 2, and `verify` hashes `r ‖ m` the same way — the salt ahead of
