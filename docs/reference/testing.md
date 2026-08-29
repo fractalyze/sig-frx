@@ -111,6 +111,32 @@ trip over it — a declaration that stops describing its set fails the same way 
 wrong interface does, so an accepted case arriving deletes the entry rather than
 going unnoticed.
 
+### A signature the standard does not fix is verified, not compared
+
+Reproducing the published signature byte for byte is the signing gate wherever a
+standard determines one signature per `(key, message, randomness)` — the
+deterministic modes by construction, and the hedged ones once the published
+randomness is fed back in. Not every standard does. Falcon draws a salt per
+signature and expands the sampler's stream from it by a route §3.9 never fixes,
+so two correct implementations disagree on the output bytes and the published
+signature is one valid answer among many. A byte comparison there fails a
+correct signer, which is a broken gate rather than a strict one.
+
+So the call site declares it, the way it declares an interface, and the harness
+checks the produced signature with the scheme's own verifier instead. That is
+the round trip this page calls no evidence, and three things are what keep it
+from being only that: the verifier it leans on is gated independently, against
+those same published signatures; the keypair is upstream's, so a pass binds the
+signer to a key it did not choose; and the declaration is held to its set like
+any other — a call whose cases all reproduce their published bytes is told to
+compare them rather than allowed the weaker check.
+
+It remains the weaker claim and does not stand alone. Where a reference
+implementation exists, what carries the gate is that implementation **accepting
+what this repo produces** — the authority order below, applied to the one
+operation the published set cannot pin. Signing is not gated by the round trip;
+it is gated there, and the round trip is what the published corpus adds on top.
+
 ### A standard that publishes no vectors still gets gated
 
 Not every standard ships known-answer tests, and the validation program does not
