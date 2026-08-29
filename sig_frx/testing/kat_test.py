@@ -199,6 +199,48 @@ class _WrongSignature(ChecksumScheme):
         )
 
 
+class _AnotherValidSignature(ChecksumScheme):
+    """A verifier that accepts more than one signature per case.
+
+    The trailing byte is not checked, so a case has 256 valid signatures and the
+    published one is not privileged — Falcon's situation in miniature, where the
+    salt and the sampler's stream leave a correct signer free to produce bytes
+    the published set does not contain. Signing moves that byte, so every case
+    disagrees with its published signature and every one still verifies.
+
+    It is the *trailing* byte rather than the leading one because the harness
+    tampers with the first: a scheme that ignored byte zero would accept
+    `_flip_first_bit`'s output and fail the pass that exists to catch exactly
+    that.
+    """
+
+    def sign(
+        self,
+        secret_key: ArrayLike,
+        message: ArrayLike,
+        *,
+        randomness: ArrayLike | None = None,
+        context: ArrayLike | None = None,
+    ) -> Array:
+        signature = super().sign(
+            secret_key, message, randomness=randomness, context=context
+        )
+        return fnp.concatenate([signature[:-1], 255 - signature[-1:]])
+
+    def verify(
+        self,
+        public_key: ArrayLike,
+        message: ArrayLike,
+        signature: ArrayLike,
+        *,
+        context: ArrayLike | None = None,
+        position: ArrayLike | None = None,
+    ) -> Array:
+        secret_key = 255 - fnp.asarray(public_key)
+        expected = self._mask(secret_key, message, context)
+        return fnp.all(expected[..., :-1] == fnp.asarray(signature)[..., :-1], axis=-1)
+
+
 class _WrongKeygen(ChecksumScheme):
     """A key derivation that is self-consistent and not the standard's."""
 
@@ -248,6 +290,72 @@ class KatHarnessTest(absltest.TestCase):
     def test_catches_a_wrong_signature(self) -> None:
         with self.assertRaisesRegex(kat.KatError, "wrong signature"):
             kat.check(_WrongSignature(domain=7), _reference_vectors())
+
+    def test_a_signer_the_published_bytes_do_not_fix_passes_when_declared(
+        self,
+    ) -> None:
+        """The case the declaration exists for: correct, and not byte-identical.
+
+        Undeclared, the same scheme against the same set is the test above — the
+        byte comparison fails it. So this pins that the declaration is what moves
+        it, rather than the set or the scheme being different.
+        """
+        vectors = _reference_vectors()
+        with self.assertRaisesRegex(kat.KatError, "wrong signature"):
+            kat.check(_AnotherValidSignature(domain=7), vectors)
+
+        kat.check(
+            _AnotherValidSignature(domain=7),
+            vectors,
+            not_the_published_signature="under test",
+        )
+
+    def test_catches_a_signature_the_declared_schemes_own_verifier_refuses(
+        self,
+    ) -> None:
+        """What the weaker comparison still catches, and the reason to run it."""
+        with self.assertRaisesRegex(kat.KatError, "own verifier refuses"):
+            kat.check(
+                _WrongSignature(domain=7),
+                _reference_vectors(),
+                not_the_published_signature="under test",
+            )
+
+    def test_refuses_a_declaration_the_set_turns_out_to_fix(self) -> None:
+        """A scheme that reproduces its published bytes is told to compare them.
+
+        The declaration buys a weaker check, so a call that does not need it is
+        an error rather than a harmless extra argument.
+        """
+        with self.assertRaisesRegex(kat.KatError, "reproduced theirs exactly"):
+            kat.check(
+                ChecksumScheme(domain=7),
+                _reference_vectors(),
+                not_the_published_signature="under test",
+            )
+
+    def test_refuses_a_declaration_about_cases_this_call_does_not_sign(self) -> None:
+        vectors = [
+            kat.KatVector(**{**vars(vector), "secret_key": None})
+            for vector in _reference_vectors()
+        ]
+        with self.assertRaisesRegex(kat.KatError, "not one case in this call signs"):
+            kat.check(
+                _AnotherValidSignature(domain=7),
+                vectors,
+                not_the_published_signature="under test",
+            )
+
+    def test_refuses_a_declared_case_with_nothing_to_check_it_under(self) -> None:
+        """Verifying what was produced needs a public key the record may not carry."""
+        vectors = _reference_vectors()
+        vectors[0] = kat.KatVector(**{**vars(vectors[0]), "public_key": None})
+        with self.assertRaisesRegex(kat.KatError, "no public key to check it under"):
+            kat.check(
+                _AnotherValidSignature(domain=7),
+                vectors,
+                not_the_published_signature="under test",
+            )
 
     def test_catches_a_wrong_key(self) -> None:
         with self.assertRaisesRegex(kat.KatError, "wrong secret key"):

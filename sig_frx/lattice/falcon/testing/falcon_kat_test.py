@@ -9,22 +9,27 @@ tests "because the gap is a property of how the vectors are published, not of an
 one scheme — a per-scheme fix would be written once per scheme for one cause",
 and a Falcon-shaped copy would be the third.
 
-**A verification-only scheme is drivable here, which is the part worth naming.**
-`_check_keygen` skips a vector carrying no seed and `_check_sign` one carrying no
-secret key, and Falcon's records carry neither — so `keygen` and `sign` raising
-until [#26](https://github.com/fractalyze/sig-frx/issues/26) and
-[#27](https://github.com/fractalyze/sig-frx/issues/27) is not a reason to opt
-out.
+**Key generation stays uncovered by this set, and will.** The reason is not that
+the vectors are missing it — every record carries a `seed` — but that it is not
+reproducible here: the seed expands through NIST's AES-256-CTR-DRBG rather than
+this repo's `SHAKE256(seed ‖ attempt)`, a decision recorded on
+[#26](https://github.com/fractalyze/sig-frx/issues/26).
+[`falcon_vectors`](falcon_vectors.py) withholds the field for that reason and
+says so; this is where the consequence is recorded, because "the harness skipped
+it" and "the harness cannot check it" read identically from a green run.
 
-**Key generation and signing stay uncovered by this set, and will.** The reason
-is not that the vectors are missing them — every record carries `sk`, and a
-`seed` besides — but that neither is reproducible here: the seed expands through
-NIST's AES-256-CTR-DRBG rather than this repo's `SHAKE256(seed ‖ attempt)`, and
-a `secret_key` on a record drives the harness into a `sign` that #27 has not
-finished. [`falcon_vectors`](falcon_vectors.py) withholds both fields for those
-two reasons and says so; this is where the consequence is recorded, because "the
-harness skipped it" and "the harness cannot check it" read identically from a
-green run.
+**Signing is covered by this set, and not from here — `sign_limit` is 0 below.**
+Every record carries `sk`, so the harness can sign from published inputs, and
+[`falcon_sweep_test`](falcon_sweep_test.py) is where it does. What keeps it out
+of the merge gate is arithmetic rather than doubt: signing a record costs tens
+of seconds against roughly a second for the verification passes, and this target
+already sits at 44% of `large` — so signing even the four records it verifies
+took it 2.3x, past the half-a-budget rule in
+../../../../docs/reference/measurement.md and into the next bucket. The bucket
+is not what the coverage is worth. Every pull request already holds signing to
+the reference implementation itself in
+[`falcon_interop_test`](falcon_interop_test.py), which `testing.md` ranks above
+the round trip the harness pass would add.
 
 ## The bound, and why it is stated at the call rather than defaulted
 
@@ -73,7 +78,10 @@ class FalconKatTest(parameterized.TestCase):
         self, name: str, **params: Any
     ) -> None:
         del params
-        kat.check(falcon.named(name), falcon_vectors.vectors(name, limit=_GATE_VECTORS))
+        kat.check(
+            falcon.named(name),
+            falcon_vectors.vectors(name, limit=_GATE_VECTORS, sign_limit=0),
+        )
 
     @parameterized.parameters(*ref.parameter_cases())
     def test_the_bound_does_not_empty_the_gate(self, name: str, **params: Any) -> None:
@@ -86,7 +94,7 @@ class FalconKatTest(parameterized.TestCase):
         """
         del params
         published = falcon_vectors.records(name)
-        gated = falcon_vectors.vectors(name, limit=_GATE_VECTORS)
+        gated = falcon_vectors.vectors(name, limit=_GATE_VECTORS, sign_limit=0)
 
         self.assertLen(gated, _GATE_VECTORS)
         self.assertLess(_GATE_VECTORS, len(published), "the bound is not a bound")
@@ -94,7 +102,9 @@ class FalconKatTest(parameterized.TestCase):
             [vector.case_id for vector in gated],
             [
                 vector.case_id
-                for vector in falcon_vectors.vectors(name, limit=None)[:_GATE_VECTORS]
+                for vector in falcon_vectors.vectors(name, limit=None, sign_limit=0)[
+                    :_GATE_VECTORS
+                ]
             ],
         )
 

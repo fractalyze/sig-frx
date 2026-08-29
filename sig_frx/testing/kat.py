@@ -41,6 +41,16 @@ has none to be handed. `check` refuses that instead of shrinking quietly; a
 caller that means it declares it, and the declaration is itself an error once the
 set stops matching it.
 
+**One scheme's signature is not fixed by its standard, so signing compares
+something else there.** The shape above — load, run, compare bytes — assumes the
+standard determines a signature from a case's inputs, and Falcon does not: a salt
+is drawn per signature and the sampler's stream is expanded from it by a route
+§3.9 never fixes, so two correct implementations disagree by construction. Byte
+comparison would fail a correct signer, so a call site says that is its situation
+and `check` verifies the produced signature instead. It is the weaker check and
+what makes it not circular is stated where it happens: the verifier it leans on
+is gated on the same published signatures, and the keypair is upstream's.
+
 **A vector the harness cannot run faithfully is an error, not a skip.** Silently
 dropping a field — a published failure verdict, a mode marker selecting a
 different operation — reports a pass for a case that was never run, which is the
@@ -435,6 +445,7 @@ def check(
     pre_hash: str | None = None,
     accepted_case: KatVector | None = None,
     no_accepted_case: str | None = None,
+    not_the_published_signature: str | None = None,
 ) -> None:
     """Run every check the standard requires, plus the tampering it does not.
 
@@ -462,6 +473,16 @@ def check(
     nothing else, which the caller knows to expect and a green run cannot say. It
     is declared for the same reason `interface` is, and like a wrong interface it
     fails once it stops describing the set.
+
+    `not_the_published_signature` is the caller's statement that this scheme does
+    not produce the published signature bytes, and why. Signing then verifies what
+    it produced instead of comparing it, which is the only comparison available
+    where the standard fixes no map from a case's inputs to a signature. It is
+    weaker than the byte comparison it replaces and says so: what it catches is a
+    signer that produces something its own verifier refuses, not a signer that
+    disagrees with the standard. Like the declarations above it fails once it stops
+    describing the set — a call where every case *does* reproduce its published
+    bytes is one that should be comparing them.
     """
     if not vectors:
         raise KatError("no vectors: an empty set passes trivially and proves nothing")
@@ -478,12 +499,13 @@ def check(
     # meant to be this operation's, and one belonging to another would gate the
     # wrong thing while looking like coverage.
     _reject_unrunnable(scheme, [*vectors, *supplied], interface, pre_hash)
+    operation = _operation(vectors, interface, pre_hash)
     _check_keygen(scheme, vectors)
-    _check_sign(scheme, vectors)
+    _check_sign(scheme, vectors, operation, not_the_published_signature)
     _check_verify(
         scheme,
         vectors,
-        _operation(vectors, interface, pre_hash),
+        operation,
         accepted_case,
         no_accepted_case,
     )
@@ -583,13 +605,55 @@ def _check_keygen(scheme: Signature, vectors: Sequence[KatVector]) -> None:
             raise KatError(f"{vector.case_id}: keygen produced the wrong secret key")
 
 
-def _check_sign(scheme: Signature, vectors: Sequence[KatVector]) -> None:
-    """Signing reproduces the published signature, byte for byte."""
+def _check_sign(
+    scheme: Signature,
+    vectors: Sequence[KatVector],
+    operation: str,
+    not_the_published_signature: str | None,
+) -> None:
+    """Signing reproduces the published signature, byte for byte.
+
+    That comparison is the whole check wherever a standard fixes one signature per
+    `(key, message, randomness)`, which is most of them: the deterministic modes by
+    construction, and the hedged ones once the published `rnd` is fed back in.
+
+    **Where it does not, the call site says so and this verifies instead.** Falcon
+    draws a salt per signature and expands the sampler's stream from it by a route
+    the specification never fixes, so two correct implementations disagree on the
+    output bytes and the published signature is one valid answer among many.
+    Comparing bytes there fails a correct signer, so the declaration switches the
+    comparison rather than dropping the case.
+
+    **What that costs is stated rather than papered over.** A produced signature
+    checked by this repo's own verifier is a round trip, and
+    `docs/reference/testing.md` ranks a round trip below the published bytes for
+    the reason a self-consistent wrong implementation round-trips forever. Two
+    things keep it from being circular. The verifier on the other side of it is
+    gated independently, by `_check_verify` against those same published
+    signatures. And the key is upstream's: signing runs under the published secret
+    key and verifies under the published public key of the same record, so a pass
+    binds this signer to a keypair it did not choose.
+
+    The declaration is held to the set like every other one here. A call that
+    reproduces its published bytes everywhere has no need of it and is told to
+    compare them, and a call that declares it while signing nothing has made a
+    claim about cases it never ran.
+    """
+    signed: list[KatVector] = []
+    reproduced = 0
     for vector in vectors:
         if vector.secret_key is None or vector.message is None:
             continue
         if vector.signature is None or not vector.valid:
             continue
+        if not_the_published_signature is not None and vector.public_key is None:
+            raise KatError(
+                f"{vector.case_id}: declared as not producing the published "
+                f"signature ({not_the_published_signature}), so the produced one is "
+                f"checked by this scheme's verifier instead — and this case carries "
+                f"no public key to check it under. Expose one on the record or "
+                f"leave the secret key off it."
+            )
         randomness = None if vector.randomness is None else _as_array(vector.randomness)
         signature = scheme.sign(
             _as_array(vector.secret_key),
@@ -597,8 +661,45 @@ def _check_sign(scheme: Signature, vectors: Sequence[KatVector]) -> None:
             randomness=randomness,
             context=None if vector.context is None else _as_array(vector.context),
         )
-        if to_bytes(signature) != vector.signature:
-            raise KatError(f"{vector.case_id}: signing produced the wrong signature")
+        produced = to_bytes(signature)
+        if not_the_published_signature is None:
+            if produced != vector.signature:
+                raise KatError(
+                    f"{vector.case_id}: signing produced the wrong signature"
+                )
+            continue
+        reproduced += produced == vector.signature
+        signed.append(replace(vector, signature=produced))
+
+    if not_the_published_signature is None:
+        return
+    if not signed:
+        raise KatError(
+            f"{operation}: declared as not producing the published signature "
+            f"({not_the_published_signature}), and not one case in this call signs "
+            f"— every one is missing a secret key, a message, or an accepted "
+            f"verdict. The declaration is about cases that ran, so drop it or give "
+            f"the records what signing takes."
+        )
+    if reproduced == len(signed):
+        plural = "" if len(signed) == 1 else "s"
+        raise KatError(
+            f"{operation}: declared as not producing the published signature "
+            f"({not_the_published_signature}), and all {len(signed)} signed "
+            f"case{plural} reproduced theirs exactly. The declaration buys a weaker "
+            f"check than the byte comparison it replaces, so drop it and compare "
+            f"the bytes this set turns out to fix."
+        )
+
+    # One call per equal-shape group, never one per case: the seam's unit is the
+    # batch here for the same reason it is in `_check_verify`.
+    for group in _group_by_shape(signed):
+        for vector, verdict in zip(group, _verify_batch(scheme, group), strict=True):
+            if not verdict:
+                raise KatError(
+                    f"{vector.case_id}: signing produced a signature this scheme's "
+                    f"own verifier refuses"
+                )
 
 
 def _check_verify(

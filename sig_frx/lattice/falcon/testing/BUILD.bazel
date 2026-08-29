@@ -58,11 +58,12 @@ py_library(
 # `kat.KatVector`, and on the reference for §3.11.6's regrouping — which the
 # oracle runs too, so it lives in the transcription rather than in either caller.
 #
-# Visible to the rest of the lattice tree, not just to this package: Falcon
-# cannot sign here yet, so these vectors are the only published signature a
-# lattice-wide measurement can drive `verify` with, and
-# `//sig_frx/lattice/testing:compaction_bench` is one. Scoped to `lattice` and
-# not to `sig_frx` because no other family has a reason to read Falcon's KAT.
+# Visible to the rest of the lattice tree, not just to this package: these are
+# the published signatures a lattice-wide measurement drives `verify` with, and
+# `//sig_frx/lattice/testing:compaction_bench` is one. A signature produced here
+# would not do — a measurement wants the bytes the standard's own generator
+# emitted. Scoped to `lattice` and not to `sig_frx` because no other family has a
+# reason to read Falcon's KAT.
 py_library(
     name = "falcon_vectors",
     testonly = True,
@@ -98,6 +99,20 @@ py_library(
 # a ratio measured on one of them does not carry to the other. A local run had
 # predicted 250-344 s on the GPU leg from a 1.46x workstation ratio; the GPU
 # number came in under that and the CPU number came in over it. Measure both.
+#
+# **Signing is not in this target, and the measurement is why.** Putting the
+# harness's signing pass on the four records it already verifies took the
+# workstation CPU leg from 194.3 s to 447.6 s — 2.3x for eight signed records,
+# so ~32 s each averaged over the two degrees, against roughly a second per
+# record for the verification passes. Both numbers are the same machine in the
+# same session with only the bound changed, which is what makes the ratio worth
+# carrying; the ~978 s it implies on the 393.1 s above is past `large` outright,
+# and even one record per degree lands near 60% of it. The half-a-budget rule in
+# ../../../../docs/reference/measurement.md is reached either way, so the pass
+# runs in `falcon_sweep_test` instead. What holds signing on a pull request is
+# `falcon_interop_test`: the reference implementation accepting what this repo
+# produces, which ../../../../docs/reference/testing.md ranks above the round
+# trip the harness pass would add.
 py_test(
     name = "falcon_kat_test",
     size = "large",
@@ -143,10 +158,36 @@ py_test(
 # real; the way under it is fewer records per run, which is what the gate next
 # door already does.
 #
+# **This target owns the harness's signing pass, bounded rather than swept, and
+# the bound is 2 because 4 was measured and cost too much.** Against the
+# max 1016.5 s / min 575.8 s above, which signs nothing:
+#
+#   2 signed records per degree:  max 1042.2 s, min 576.4 s, avg  809.3 s
+#   4 signed records per degree:  max 1578.1 s, min 817.1 s, avg 1197.6 s
+#
+# Two is inside the spread of signing none; four is +55% on the deciding shard,
+# for a target whose deadline is already the last bucket there is
+# (../../../../docs/reference/measurement.md), so there is nowhere to be promoted
+# to if it breaches.
+#
+# **That jump is not linear in the bound, and the reason is worth knowing before
+# raising it.** Algorithm 10 restarts on the norm bound and on a compression that
+# does not fit, so a record's signing cost is its trip count and that is data:
+# the third and fourth Falcon-1024 records cost multiples of the first two. The
+# corpus is fixed and the salts are the published ones, so each record's cost is
+# reproducible — but it is a per-record draw rather than a rate, and a new bound
+# has to be measured rather than scaled from this one.
+#
+# Sweeping signing is not a lever that exists — 100 records per degree would be
+# hours — and it would buy the one thing signing does not charge for.
+# `Falcon.sign` is concrete, so a longer message is a longer hash rather than
+# another compilation, and the 100 message lengths that justify sweeping
+# verification produce no such spread here.
+#
 # These are workstation numbers and `slow_kat` keeps the target off every pull
 # request, so `eternal` is sized against an unmeasured leg. The levers if it
-# ever breaches: fewer records, or one target per degree so each is a single
-# process over a single set. More shards is not one of them.
+# ever breaches: fewer records, fewer signed records, or one target per degree
+# so each is a single process over a single set. More shards is not one of them.
 py_test(
     name = "falcon_sweep_test",
     size = "large",
