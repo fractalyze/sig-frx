@@ -49,9 +49,9 @@ py_test(
 # asks for, per ../../../docs/reference/measurement.md.
 #
 # Nearly all of either number is the `lambda_c = 128` case, and specifically
-# the fused square root inside the wire decode: that is the only work this
-# module puts on the device, and it compiles once per distinct batch shape.
-# The rest of the suite is 3.4 s.
+# the fused square root inside the wire decode — it compiles once per distinct
+# batch shape, which is why the module decodes the wire at one shape rather
+# than one per slot. The rest of the suite is 3.4 s.
 py_test(
     name = "base_ot_test",
     size = "medium",

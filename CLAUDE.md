@@ -45,6 +45,17 @@ this file is the map plus the rules every change must respect.
   `pre-commit run --all-files` before pushing any removal from a module other
   files import, and grep the bare symbol name — `from x import NAME` matches
   neither `x\.NAME` nor `NAME\[`.
+- **A local `python3` probe answers about the interpreter's frx, not the pinned
+  wheel.** They disagree silently: `secp._admits` says the `secp256k1_g1_*`
+  point dtypes are *not* traceable under a bare `python3` and *are* under the
+  wheel bazel pins, so a batch that reads as host-only locally is placed in CI.
+  Probe inside an already-built target's runfiles instead —
+  `PYTHONPATH="<t>.runfiles/_main:<site-packages>" python3` from outside the
+  repo, and print `frx.__file__` to confirm it resolved there. `secp_device_test`
+  does not cover this: it forces the device with an explicit `fnp.asarray`
+  rather than relying on `_place`. A claim about a *static shape* against the
+  threshold — `curve.generator` is `[1]`, so a base-point multiply never places
+  — is environment-free and needs no probe.
 - **A device XOF squeeze is sized into the program, so a long one does not
   work.** hash-frx's `Shake256(size).digest(...)` compiles in time and memory
   super-linear in `size`: 4.6 s at 1 KB, 28 s at 4 KB, nothing inside 400 s at
