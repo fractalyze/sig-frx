@@ -33,6 +33,8 @@ signature is that regrouping of `sm`, which
 [`falcon_reference.signature_from_aggregate`](falcon_reference.py) performs and
 asserts its way through — the same transform `falcon_oracle` runs to hand the
 reference's own output to the seam, held in one place so the two cannot drift.
+Its inverse sits beside it, which is what puts a signature produced here back to
+the reference, so a change to either direction is a change to both.
 
 Regrouping bytes is not the same as inventing them: every byte is upstream's,
 and which field each lands in is what the two sections state. The padding is
@@ -106,6 +108,15 @@ class Record(NamedTuple):
     public_key: bytes
     secret_key: bytes
     signature: bytes
+    aggregate: bytes
+    """The `sm` column as published, before the regrouping produced `signature`.
+
+    Kept rather than discarded because it is the only published expected value
+    the *inverse* regrouping has. Composing the two directions and asserting the
+    identity would not do: the forward half re-pads to `sbytelen`, so it restores
+    whatever the inverse failed to strip and an inverse that never stripped at
+    all still round-trips. Only `sm` itself distinguishes them.
+    """
 
 
 def _parse(text: str) -> list[dict[str, str]]:
@@ -158,9 +169,8 @@ def _load(name: str) -> tuple[tuple[Record, ...], tuple[int, ...]]:
         case = int(block["count"])
         if len(message) != int(block["mlen"]):
             raise ValueError(f"{name}: `msg` and `mlen` disagree at {case}")
-        signature = falcon_reference.signature_from_aggregate(
-            bytes.fromhex(block["sm"]), message, name
-        )
+        aggregate = bytes.fromhex(block["sm"])
+        signature = falcon_reference.signature_from_aggregate(aggregate, message, name)
         if signature is None:
             dropped.append(case)
             continue
@@ -171,6 +181,7 @@ def _load(name: str) -> tuple[tuple[Record, ...], tuple[int, ...]]:
                 public_key=bytes.fromhex(block["pk"]),
                 secret_key=bytes.fromhex(block["sk"]),
                 signature=signature,
+                aggregate=aggregate,
             )
         )
     return tuple(out), tuple(dropped)

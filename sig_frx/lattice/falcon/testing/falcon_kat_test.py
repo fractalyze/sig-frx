@@ -122,6 +122,59 @@ class FalconKatTest(parameterized.TestCase):
             )
 
     @parameterized.parameters(*ref.parameter_cases())
+    def test_the_way_back_reproduces_the_published_aggregate(
+        self, name: str, **params: Any
+    ) -> None:
+        """The inverse regrouping against upstream's `sm`, byte for byte.
+
+        The expected value is published rather than derived, which is the bar
+        every other claim in this file is held to. Composing the two directions
+        and asserting the identity would look like the same test and is a much
+        weaker one: `signature_from_aggregate` re-pads to `sbytelen`, so it
+        restores whatever the inverse failed to strip. An inverse that dropped
+        `rstrip` entirely — passing on 621 bytes of padding the reference would
+        read as a malformed signature — still round-trips to the byte.
+
+        So the padding rule this direction has to get exactly right is precisely
+        what a round trip cannot see, and `sm` is what sees it. The header
+        nibbles, the two-byte length prefix and the message offset come along:
+        every field of §3.11.6's layout is compared, not just the ones the
+        forward direction happens to re-derive.
+
+        Cheap enough to run unbounded and worth running that way: a fault here
+        rejects **every** case at the seam, which is indistinguishable from a
+        broken signer — the confusion [`falcon_oracle`](falcon_oracle.py) warns
+        about, reached over 100 records a degree instead of through one
+        `ctypes` signature.
+        """
+        del params
+        for record in falcon_vectors.records(name):
+            self.assertEqual(
+                ref.aggregate_from_signature(record.signature, record.message, name),
+                record.aggregate,
+                f"count={record.case} does not regroup back to the published `sm`",
+            )
+
+    @parameterized.parameters(*ref.parameter_cases())
+    def test_the_way_back_refuses_a_header_it_would_otherwise_repair(
+        self, name: str, **params: Any
+    ) -> None:
+        """The one corruption the regrouping must not carry through.
+
+        Every other byte of §3.11.3's form survives into the aggregate, so a
+        flip in one is the reference's to judge. The header is not: §3.11.6's
+        nonce-less byte is written from `n` rather than read, so a corrupted
+        `0011nnnn` would leave as a well-formed `0010nnnn` and the signature
+        would verify. Refusing it keeps
+        [`falcon_oracle.verify`](falcon_oracle.py)'s verdict about the bytes it
+        was handed rather than about the ones the regrouping made.
+        """
+        del params
+        record = falcon_vectors.records(name)[0]
+        corrupted = bytes([record.signature[0] ^ 0x01]) + record.signature[1:]
+        self.assertIsNone(ref.aggregate_from_signature(corrupted, record.message, name))
+
+    @parameterized.parameters(*ref.parameter_cases())
     def test_the_records_without_an_encoding_are_the_ones_stated(
         self, name: str, **params: Any
     ) -> None:

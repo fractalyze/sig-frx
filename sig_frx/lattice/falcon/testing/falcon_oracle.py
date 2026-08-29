@@ -54,13 +54,8 @@ import ctypes
 import functools
 import pathlib
 
-from sig_frx.lattice.falcon import encoding, falcon
+from sig_frx.lattice.falcon import falcon
 from sig_frx.lattice.falcon.testing import falcon_reference
-
-# `nist.c`'s aggregate: a big-endian signature length, then the salt, then the
-# message, then the nonce-less signature. §3.11.6 rather than §3.11.3, which is
-# what the seam speaks — `signature` below is the regrouping between them.
-_SIGLEN_SIZE = 2
 
 
 @functools.cache
@@ -118,7 +113,7 @@ def sign(
     goes through [`falcon_reference.signature_from_aggregate`](falcon_reference.py)
     — the same call the `.rsp` loader makes on the published records, since a
     live signature and a published one arrive in the same packaging.
-    [`verify`](#verify) below runs that regrouping backwards, by hand.
+    [`verify`](#verify) below takes the inverse from the same file.
     """
     params = falcon.PARAMETER_SETS[f"Falcon-{degree}"]
     if len(secret_key) != params.secret_key_size:
@@ -131,8 +126,14 @@ def sign(
 
     # `crypto_sign` writes the message back out between the salt and the
     # signature, so the buffer holds the aggregate rather than the signature.
+    # Its two leading fields are sized from the transcription, which is where
+    # §3.11.6's layout is written down — `encoding` describes the wire format
+    # the submission API wraps, not the wrapper.
     signed = ctypes.create_string_buffer(
-        _SIGLEN_SIZE + encoding.SALT_SIZE + len(message) + params.signature_size
+        falcon_reference.SIGLEN_SIZE
+        + falcon_reference.SALT_SIZE
+        + len(message)
+        + params.signature_size
     )
     signed_len = ctypes.c_ulonglong(0)
     status = library.crypto_sign(
@@ -160,39 +161,23 @@ def sign(
 def verify(public_key: bytes, message: bytes, signature: bytes, degree: int) -> bool:
     """The reference's verdict on a signature produced here.
 
-    Takes the seam's §3.11.3 form and regroups it into §3.11.6's aggregate,
-    which is [`sign`](#sign)'s regrouping run backwards — `crypto_sign_open`
-    reads `siglen ‖ r ‖ M ‖ header ‖ enc_s` and nothing else. Feeding it the
-    seam's form directly rejects **every** case, which looks exactly like a
-    broken signer, so the regrouping is the first thing to doubt if this starts
-    refusing everything at once.
+    The seam's §3.11.3 form goes back to §3.11.6's aggregate through
+    [`falcon_reference.aggregate_from_signature`](falcon_reference.py) — the
+    regrouping [`sign`](#sign) runs, backwards, and next to it in that file,
+    which is where the reasoning for both directions is kept.
 
-    The trailing zeros §3.11.3 pads to `sbytelen` are dropped rather than
-    passed on: the aggregate carries an explicit length and the reference
-    checks the compressed run against it, so padding it never saw would be
-    read as a malformed signature.
+    What belongs here is only what this function decides: a `None` is refused
+    rather than raised, because bytes the reference would have no opinion on
+    are still an answer about the signature and not a broken call.
     """
-    from sig_frx.lattice.falcon import falcon
-
-    params = falcon.PARAMETER_SETS[f"Falcon-{degree}"]
-    # Where §3.11.3's compressed run starts, past the header byte and the salt.
-    body = 1 + encoding.SALT_SIZE
-    if len(signature) != params.signature_size:
-        raise ValueError(
-            f"a Falcon-{degree} signature is {params.signature_size} bytes, "
-            f"got {len(signature)}"
-        )
-    if signature[0] != encoding.degree_header(degree, 0x3):
-        return False
-    salt = signature[1:body]
-    compressed = signature[body:].rstrip(b"\x00")
-    nonceless = bytes([encoding.degree_header(degree, 0x2)]) + compressed
-    aggregate = (
-        len(nonceless).to_bytes(_SIGLEN_SIZE, "big") + salt + message + nonceless
+    aggregate = falcon_reference.aggregate_from_signature(
+        signature, message, f"Falcon-{degree}"
     )
+    if aggregate is None:
+        return False
 
     library = _library(degree)
-    # At least `2 + 40 + 1` bytes by the guards above, so never empty.
+    # At least `2 + 40 + 1` bytes by §3.11.6's layout, so never empty.
     recovered = ctypes.create_string_buffer(len(aggregate))
     length = ctypes.c_ulonglong(0)
     status = library.crypto_sign_open(

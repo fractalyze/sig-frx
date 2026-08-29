@@ -373,7 +373,6 @@ py_library(
     deps = [
         ":falcon_reference",
         "//sig_frx/lattice/falcon",
-        "//sig_frx/lattice/falcon:encoding",
     ],
 )
 
