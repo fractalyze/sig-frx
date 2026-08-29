@@ -56,19 +56,21 @@ each for its own reason, and neither is an oversight:
 - **`sk` is exposed separately** as [`secret_key`](#secret_key) rather than on
   the record, because [`kat.check`](../../../testing/kat.py)'s `_check_sign`
   compares the produced signature against the published one **byte for byte**,
-  and Falcon cannot reproduce those bytes. §3.9 draws a salt per signature, so
-  `Falcon.deterministic` is `False` and the output is a function of randomness
-  the set does not publish in any form this repo consumes — its own seed
-  expansion is a choice recorded on
-  [#27](https://github.com/fractalyze/sig-frx/issues/27), not a transcription.
-  A `secret_key` on the record would therefore fail a **correct**
-  implementation, which is worse than not gating it.
+  and Falcon cannot reproduce those bytes. Not because it is randomized —
+  `randomness` on this seam is the salt and §3.11.3 publishes the salt, so a
+  loader could supply it, and BIP-340 is `deterministic = False` and byte-gated
+  all the same. The reason is one layer down: the sampler's stream is expanded
+  from the salt and the key by this repo's own choice, where the reference runs
+  a ChaCha20 PRNG no part of the standard fixes
+  ([#178](https://github.com/fractalyze/sig-frx/issues/178)). A `secret_key` on
+  the record would therefore fail a **correct** implementation, which is worse
+  than not gating it — and it fails loudly, since `_check_sign` reaches `sign`
+  with no salt and it refuses.
 
-  Signing is gated instead where a randomized scheme can be: by a round trip
-  under this published pair in [`falcon_test`](falcon_test.py), and by the
-  reference implementation's own verdict on signatures produced here in
-  [`falcon_interop_test`](falcon_interop_test.py). §3.11.5's decoder is gated on
-  these same bytes by [`keygen_test`](keygen_test.py).
+  These bytes gate §3.11.5's decoder in [`keygen_test`](keygen_test.py) and
+  serve as the negative control in
+  [`falcon_interop_test`](falcon_interop_test.py). Signing itself is gated
+  there too, by the reference's verdict on signatures produced here.
 - **`seed` is not exposed at all.** `_check_keygen` would take it and require
   `keygen(seed)` to reproduce the published pair, and this repo's expansion is
   `SHAKE256(seed ‖ attempt)` rather than the NIST harness's AES-256-CTR-DRBG —
@@ -206,8 +208,9 @@ def secret_key(name: str) -> bytes:
     """The count-0 record's `sk` — §3.11.5's decoder gated on published bytes.
 
     A `Record` carries this and a `kat.KatVector` does not: [`vectors`](#vectors)
-    is what withholds it, because the harness drives any vector carrying one into
-    a `sign` that does not exist yet.
+    is what withholds it, because `_check_sign` drives any vector carrying one
+    into a byte comparison Falcon cannot satisfy — the module docstring above
+    gives the reason and names where these bytes are gated instead.
     """
     return records(name)[0].secret_key
 

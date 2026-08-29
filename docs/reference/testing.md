@@ -192,7 +192,23 @@ express instead of dropping it, and the harness refuses the case. Running the
 plain operation against a vector published for another one reports a pass for a
 case nobody ran, which is worse than a failure because it looks like coverage.
 
-### The per-PR gate's cost is distinct shapes, not vectors
+**The refusal is vector-granular, and a boundary can be narrower than that.**
+`unsupported` makes the harness refuse the whole case, which is right when the
+vector is for another operation — and wrong when the set covers the operation
+under test and only one *field* is unusable. Falcon is the case that forced the
+distinction: its records carry a seed and a secret key that no correct
+implementation here can reproduce an output from, while their public key,
+message and signature are exactly what verification is gated on. Declaring them
+`unsupported` would delete the gate that works to describe the two passes that
+cannot.
+
+So a field-granular boundary is stated by the loader instead — it withholds the
+field and says why, next to the values. That is a narrower licence than it
+sounds: it applies where the withheld field would drive a pass the scheme
+cannot satisfy *by a recorded decision*, and it owes the reason and the pointer
+to wherever that operation is gated instead. What it does not need is a test
+asserting the absence, because a field that reappears drives the pass it was
+withheld from and fails there, with the cause named.
 
 Both validation programs vary the message length per case, so a published set is
 nearly all singletons and a traced implementation compiles about once per case.
