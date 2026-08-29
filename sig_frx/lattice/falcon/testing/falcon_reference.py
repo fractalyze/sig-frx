@@ -163,14 +163,19 @@ def aggregate_from_signature(
     compressed run against it, so padding it never saw reads as malformed. The
     strip is exact rather than approximate — Algorithm 17 ends each coefficient
     with a terminating `1`, so the last byte of a well-formed `enc_s` is never
-    zero and there is nothing but padding to take.
+    zero and there is nothing but padding to take. That is the one claim here a
+    round trip cannot check, since the forward direction re-pads whatever this
+    one leaves behind, so [`falcon_kat_test`](falcon_kat_test.py) holds the
+    result against upstream's published `sm` instead.
 
-    `None` for a header that is not §3.11.3's, which the caller has to be told
-    about rather than the reference: the byte written here is `0x20 | logn`
-    whatever byte was read, so a corrupted header would be repaired on the way
-    through and the signature accepted. A wrong *length* is a caller error
-    instead — §3.11.3's form is fixed-width, so those bytes are not a signature
-    at all.
+    `None` for a header that is not §3.11.3's, rather than a raise: those bytes
+    come from the implementation under test, so refusing them is a verdict about
+    it. It has to be refused *here* and cannot be left to the reference — the
+    byte written on the way out is `0x20 | logn` whatever byte came in, so a
+    corrupted header would be repaired in transit and the signature would
+    verify. A wrong *length* is the caller's error instead, since §3.11.3's form
+    is fixed-width and bytes of another width are not a signature to have an
+    opinion about.
     """
     params = PARAMETER_SETS[name]
     logn = params["n"].bit_length() - 1

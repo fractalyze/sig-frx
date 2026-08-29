@@ -162,14 +162,13 @@ def verify(public_key: bytes, message: bytes, signature: bytes, degree: int) -> 
     """The reference's verdict on a signature produced here.
 
     The seam's §3.11.3 form goes back to §3.11.6's aggregate through
-    [`falcon_reference.aggregate_from_signature`](falcon_reference.py), which is
-    [`sign`](#sign)'s regrouping run backwards and lives beside it so a change
-    to §3.11.3's padding rule or to a header nibble is one edit rather than two.
+    [`falcon_reference.aggregate_from_signature`](falcon_reference.py) — the
+    regrouping [`sign`](#sign) runs, backwards, and next to it in that file,
+    which is where the reasoning for both directions is kept.
 
-    `None` from it is a header that is not §3.11.3's, and refusing on it here is
-    the point rather than a formality: the regrouping writes the nonce-less
-    header itself, so a corrupted one would be repaired on the way through and
-    the reference would accept a signature this repo should not have produced.
+    What belongs here is only what this function decides: a `None` is refused
+    rather than raised, because bytes the reference would have no opinion on
+    are still an answer about the signature and not a broken call.
     """
     aggregate = falcon_reference.aggregate_from_signature(
         signature, message, f"Falcon-{degree}"

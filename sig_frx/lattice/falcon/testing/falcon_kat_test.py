@@ -122,40 +122,37 @@ class FalconKatTest(parameterized.TestCase):
             )
 
     @parameterized.parameters(*ref.parameter_cases())
-    def test_the_regrouping_undoes_itself_on_every_published_case(
+    def test_the_way_back_reproduces_the_published_aggregate(
         self, name: str, **params: Any
     ) -> None:
-        """The way back from §3.11.3, against the way out that upstream pins.
+        """The inverse regrouping against upstream's `sm`, byte for byte.
 
-        `signature_from_aggregate` is gated on upstream's own bytes — the method
-        above puts every record it produced to the reference verifier, so a
-        field it misplaced fails there. Its inverse has no published bytes to be
-        checked against, because upstream publishes `sm` and never the §3.11.3
-        form; what it has instead is that composing the two is the identity, and
-        the forward direction's own assertions are the check. A wrong nibble
-        raises on §3.11.6's header, a wrong offset moves the message out from
-        where §3.11.6 puts it, and a wrong length prefix disagrees with the tail
-        it counts.
+        The expected value is published rather than derived, which is the bar
+        every other claim in this file is held to. Composing the two directions
+        and asserting the identity would look like the same test and is a much
+        weaker one: `signature_from_aggregate` re-pads to `sbytelen`, so it
+        restores whatever the inverse failed to strip. An inverse that dropped
+        `rstrip` entirely — passing on 621 bytes of padding the reference would
+        read as a malformed signature — still round-trips to the byte.
 
-        Cheap enough to run unbounded and worth running that way: the failure it
-        catches rejects **every** case at the seam, which is indistinguishable
-        from a broken signer — the confusion
-        [`falcon_oracle`](falcon_oracle.py) warns about, reached here over 100
-        records a degree instead of only through the `ctypes` oracle.
+        So the padding rule this direction has to get exactly right is precisely
+        what a round trip cannot see, and `sm` is what sees it. The header
+        nibbles, the two-byte length prefix and the message offset come along:
+        every field of §3.11.6's layout is compared, not just the ones the
+        forward direction happens to re-derive.
+
+        Cheap enough to run unbounded and worth running that way: a fault here
+        rejects **every** case at the seam, which is indistinguishable from a
+        broken signer — the confusion [`falcon_oracle`](falcon_oracle.py) warns
+        about, reached over 100 records a degree instead of through one
+        `ctypes` signature.
         """
         del params
         for record in falcon_vectors.records(name):
-            aggregate = ref.aggregate_from_signature(
-                record.signature, record.message, name
-            )
-            self.assertIsNotNone(
-                aggregate, f"count={record.case} carries no §3.11.3 header"
-            )
-            assert aggregate is not None  # narrowing, for the type checker
             self.assertEqual(
-                ref.signature_from_aggregate(aggregate, record.message, name),
-                record.signature,
-                f"count={record.case} does not survive the round trip",
+                ref.aggregate_from_signature(record.signature, record.message, name),
+                record.aggregate,
+                f"count={record.case} does not regroup back to the published `sm`",
             )
 
     @parameterized.parameters(*ref.parameter_cases())
