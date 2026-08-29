@@ -47,18 +47,13 @@ holds. Exactly one of the 200 does. [`unencodable`](#unencodable) reports which,
 and [`falcon_kat_test`](falcon_kat_test.py) pins the answer — the boundary is
 data, so the loader states it and a test asserts it.
 
-## What the records carry, and the two things they deliberately do not
+## What the records carry, and the one thing they deliberately do not
 
 A record carries the public key, the message and the signature — the three
-inputs verification takes. Both secrets are withheld from the record itself,
-each for its own reason, and neither is an oversight:
+inputs verification takes — and the secret key besides, which is what lets
+[`vectors`](#vectors) drive signing too. One published field is withheld, and
+it is not an oversight:
 
-- **`sk` is exposed separately** as [`secret_key`](#secret_key) rather than on
-  the record, because [`kat.check`](../../../testing/kat.py)'s `_check_sign`
-  drives any vector carrying one into `Falcon.sign` — still
-  `NotImplementedError` until [#27](https://github.com/fractalyze/sig-frx/issues/27)
-  lands its signing loop. §3.11.5's decoder is gated on those bytes today by
-  [`keygen_test`](keygen_test.py), which is what they are for.
 - **`seed` is not exposed at all.** `_check_keygen` would take it and require
   `keygen(seed)` to reproduce the published pair, and this repo's expansion is
   `SHAKE256(seed ‖ attempt)` rather than the NIST harness's AES-256-CTR-DRBG —
@@ -66,36 +61,70 @@ each for its own reason, and neither is an oversight:
   Reproducing these keys would mean transcribing that DRBG and the reference's
   own sampler and restart order, none of which is Falcon's specification.
 
-So **key generation and signing are not covered by this set**, and that is a
-property of what the generator published against what this repo chose to be,
-not a gap to be closed later by loading more of the same file.
+So **key generation is not covered by this set**, and that is a property of what
+the generator published against what this repo chose to be, not a gap to be
+closed later by loading more of the same file.
 
-## Volume is bounded for the per-PR gate, and unbounded for the sweep
+**Signing is covered, and by a different comparison from everything else here.**
+§3.9 draws a salt per signature and fixes no map from it to the sampler's
+stream, so this implementation's bytes are not upstream's and comparing them
+would fail a correct signer — the decision recorded on
+[#178](https://github.com/fractalyze/sig-frx/issues/178). The call site says so
+through [`kat.check`](../../../testing/kat.py)'s `not_the_published_signature`,
+which checks the produced signature with this scheme's verifier instead: from
+the published secret key, over the published message, under the published salt,
+and accepted under the published public key. `_check_sign` states what that is
+worth and what it is not.
+
+That pass runs in [`falcon_sweep_test`](falcon_sweep_test.py) and not in the
+merge gate, for the budget reason the two bounds below exist for. What holds
+signing on a pull request is [`falcon_interop_test`](falcon_interop_test.py),
+where the reference implementation itself accepts what this repo produces —
+the stronger of the two claims, and the one `testing.md` ranks above a round
+trip.
+
+## Two bounds, because verifying and signing cost two different things
 
 The generator gives record `i` a message of `33·(i+1)` bytes, so a published
 set is 100 distinct message lengths per degree and nothing repeats. A traced
 `hash_to_point` compiles per distinct shape, which is exactly the cost
 `testing.md` describes for ML-DSA's set — so [`vectors`](#vectors) takes a
-bound and the per-PR gate passes a small one, while
+`limit` and the per-PR gate passes a small one, while
 [`falcon_sweep_test`](falcon_sweep_test.py) passes none and runs behind
 `slow_kat`. The bound takes the *shortest* messages, which is the cheapest
 subset rather than an arbitrary one.
+
+`sign_limit` is the second bound, over the same records, and it exists because
+signing costs tens of seconds a record where the verification passes cost about
+one. One bound would price the cheap coverage at the expensive one's rate:
+signing the gate's four records per degree measured 2.3x the whole gate, which
+//sig_frx/lattice/falcon/testing/BUILD.bazel records against the bucket that
+would have broken.
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from python.runfiles import Runfiles
 
+from sig_frx.lattice.falcon import encoding
 from sig_frx.lattice.falcon.testing import falcon_reference
 from sig_frx.testing import kat
 
 _RUNFILES = Runfiles.Create()
 
 _PATH = "falcon_round3/KAT/falcon{}-KAT.rsp"
+
+# `kat.check`'s declaration for this set. Held here rather than at each call so
+# the gate and the sweep cannot drift into two reasons for one fact.
+NOT_THE_PUBLISHED_SIGNATURE = (
+    "Falcon draws a salt per signature (§3.9) and fixes no map from it to the "
+    "sampler's stream, so the published bytes are one valid signature among many "
+    "and this implementation produces another — the decision on #178"
+)
 
 
 class Record(NamedTuple):
@@ -193,26 +222,60 @@ def unencodable(name: str) -> tuple[int, ...]:
 
 
 def secret_key(name: str) -> bytes:
-    """The count-0 record's `sk` — §3.11.5's decoder gated on published bytes.
+    """The count-0 record's `sk`, for a caller that wants a key and not a case.
 
-    A `Record` carries this and a `kat.KatVector` does not: [`vectors`](#vectors)
-    is what withholds it, because the harness drives any vector carrying one into
-    a `sign` that does not exist yet.
+    [`vectors`](#vectors) puts every record's on its `kat.KatVector`, which is
+    what gates signing. This is the shorthand for the two tests that want the
+    bytes on their own: §3.11.5's decoder in [`keygen_test`](keygen_test.py),
+    and the reference signing under a published key in
+    [`falcon_interop_test`](falcon_interop_test.py).
     """
     return records(name)[0].secret_key
 
 
-def vectors(name: str, limit: int | None) -> list[kat.KatVector]:
+def _signing_fields(record: Record, signed: bool) -> dict[str, Any]:
+    """The three fields that turn a verification case into a signing one.
+
+    They travel together because [`kat.check`](../../../testing/kat.py) reads
+    them together: it drives any case carrying a secret key into `Falcon.sign`,
+    and requires a case declaring the hedged mode to carry its randomness. So a
+    record brings all three or none, and [`vectors`](#vectors) decides which from
+    the bound its caller states.
+    """
+    if not signed:
+        return {}
+    return {
+        "secret_key": record.secret_key,
+        # §3.11.3 puts the salt between the header byte and `enc_s`, so the case
+        # signs under the one upstream drew rather than a fresh one. Every input
+        # is then published, which leaves the sampler's stream as the only thing
+        # that can differ.
+        "randomness": record.signature[1 : 1 + encoding.SALT_SIZE],
+        # Falcon defines only the hedged mode.
+        "deterministic": False,
+    }
+
+
+def vectors(name: str, limit: int | None, sign_limit: int) -> list[kat.KatVector]:
     """One parameter set's cases as the shared harness's record.
 
     `limit` keeps the first `limit` records, which are the shortest messages
     because the generator grows `mlen` with `count`. `None` is every record —
-    what the sweep takes.
+    what the sweep takes. `sign_limit` is the same bound over the first
+    `sign_limit` of those, and decides how many of them carry what signing takes.
 
-    It has no default on purpose. Every caller states the volume it is paying
-    for, so a bound is a decision in the reading rather than one inherited from
-    here — `testing.md`'s point that a gate which quietly stopped exercising
-    something reads exactly like one that got cheaper.
+    **They are two bounds because they buy two things at very different prices.**
+    Verifying a record is one entry in a batch; signing one is Algorithm 10, and
+    it measures ~32 s per record on a workstation CPU — averaged over the two
+    degrees, and Falcon-1024 is the dearer of them — against roughly a second for
+    the verification passes. A single bound would price the cheap coverage at the
+    expensive one's rate: the merge gate wants many records verified and none
+    signed, and the scheduled sweep wants the reverse.
+
+    Neither has a default. Every caller states the volume it is paying for, so a
+    bound is a decision in the reading rather than one inherited from here —
+    `testing.md`'s point that a gate which quietly stopped exercising something
+    reads exactly like one that got cheaper.
 
     `valid=True` throughout: every case here is one the reference implementation
     accepts, which is what the harness's derived passes need as their starting
@@ -228,6 +291,7 @@ def vectors(name: str, limit: int | None) -> list[kat.KatVector]:
             public_key=record.public_key,
             message=record.message,
             signature=record.signature,
+            **_signing_fields(record, index < sign_limit),
         )
-        for record in chosen
+        for index, record in enumerate(chosen)
     ]

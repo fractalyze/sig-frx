@@ -48,6 +48,15 @@ of the three operations. It is:
   produced here and refuses it corrupted. `testing.md` puts "the reference
   implementation the standard points at" last in the order of authorities, and
   Falcon reaches it because FN-DSA is still draft and publishes no ACVP set.
+  **This is what gates signing**, and it runs on every pull request;
+- **signing from the published corpus**, which the scheduled sweep adds on top
+  of that rather than in place of it: from the published secret key, over the
+  published message, under the salt §3.11.3 carries, and accepted under the
+  published public key. It cannot compare bytes for the reason above, so the
+  harness takes [a declaration](../reference/testing.md#a-signature-the-standard-does-not-fix-is-verified-not-compared)
+  and checks the result with this repo's own verifier. That is the weaker of the
+  two claims and it is bounded to a couple of records per degree, because
+  signing one costs tens of seconds where verifying one costs about a second.
 
 Two representation choices are this repo's and are not interchangeable with the
 reference's. The ffLDL tree is held **one array per depth** rather than one
