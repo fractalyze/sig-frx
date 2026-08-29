@@ -15,14 +15,25 @@ is protocol-specific, and that a non-threshold consumer of hash-to-curve would
 reach across for it, is a fair argument for moving the pair rather than for
 separating them.
 
-Host-only for the reason the rest of this package is: protocol-side work over
-bytes and integers, at `B = 1`. The base-field arithmetic here is plain
-`pow`/`%` on Python integers rather than `secp`'s field dtype, because a
-single map has no batch to place and an exact host integer is what
+The base-field arithmetic here is plain `pow`/`%` on Python integers rather
+than `secp`'s field dtype: an exact host integer is what
 [`security.md`](../../docs/reference/security.md) asks of protocol-side
-values. What is *not* re-derived here is the group: the two points are summed
-through `secp.sum_points` and read back through `secp.affine_ints`, so no
-curve arithmetic exists in this module.
+values, and the map is a straight line of modular operations with no axis to
+be large along. What is *not* re-derived here is the group — the two points
+are added through the point dtype's own group law and read back through
+`secp.affine_ints`, so no curve arithmetic exists in this module.
+
+## The batch is the entry point, and `B = 1` is a call to it
+
+`hash_to_curve_batch` maps a whole message batch and `hash_to_curve` is that
+call at one message, rather than the other way around. The seam was widened
+when its second consumer arrived, which is what
+[`conventions.md`](../../docs/reference/conventions.md#generalize-a-component-when-its-second-consumer-arrives)
+asks for: RFC 9591's ciphersuites want one point at a time, and MR19's base
+OT ([`base_ot.py`](base_ot.py)) wants `2 * lambda_c = 256` of them per party
+pair. Only the curve addition gains an axis — the map itself stays a Python
+loop over host integers, because that is the namespace its arithmetic is
+exact in and it has no array form to move to.
 
 ## The suite is fixed, not injected
 
@@ -47,6 +58,8 @@ the saving is unmeasurable and the localization is not.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -165,9 +178,16 @@ def hash_to_field(message: bytes, dst: bytes) -> list[int]:
 def _map_to_curve_simple_swu(u: int) -> tuple[int, int]:
     """RFC 9380 §6.6.2 on `E'`, transcribed as its ten numbered operations.
 
-    Straight-line rather than App. F.2's optimized form: this runs once per
-    map at `B = 1`, and the numbered version is the one a reader can check
-    against the document line by line.
+    Straight-line rather than App. F.2's optimized form: the numbered version
+    is the one a reader can check against the document line by line, and this
+    map is what the published vectors pin `Q0` and `Q1` against.
+
+    That trade was free while the only caller was `B = 1`, and is not any
+    more — a batch makes these five modular exponentiations the hot loop, and
+    two of them are avoidable (the squareness test duplicates the square root
+    that follows it, and the isogeny inverts twice where one inverse serves).
+    Taking them is a change to the arithmetic the standard's own values gate,
+    so it is worth doing deliberately rather than in passing.
     """
     # 1-3. `x1`, with the exceptional case the condition on `Z` exists to make
     # safe: where the denominator vanishes, `B / (Z * A)` has a square `g(x1)`.
@@ -218,20 +238,44 @@ def map_to_curve(u: int) -> tuple[int, int]:
     return _iso_map(*_map_to_curve_simple_swu(u))
 
 
-def hash_to_curve(message: bytes, dst: bytes) -> tuple[int, int]:
-    """RFC 9380 §3's random-oracle encoding: `bytes -> (x, y)` on secp256k1.
+def hash_to_curve_batch(messages: Sequence[bytes], dsts: Sequence[bytes]) -> np.ndarray:
+    """RFC 9380 §3's random-oracle encoding over a batch: `[B]` curve points.
+
+    Each message carries its own `dst`, because a caller that needs a batch
+    generally needs the domain separators to differ across it — MR19's two
+    oracles `H_0` and `H_1` are one function under two separators, and the
+    base OT wants both for every instance in the batch.
 
     `clear_cofactor` is the identity map here — secp256k1 has `h = 1`, so
-    §8.7 sets `h_eff = 1` and the sum is already in the prime-order group.
+    §8.7 sets `h_eff = 1` and each sum is already in the prime-order group.
 
-    The sum runs through `secp`, not through affine formulas written here:
-    every special case a hand-rolled addition would have to get right — equal
-    `x`, opposite `y`, a doubling — is already decided in the dtype's group
-    law, and the two points genuinely can coincide.
+    The addition is the dtype's, not affine formulas written here: every
+    special case a hand-rolled one would have to get right — equal `x`,
+    opposite `y`, a doubling — is already decided in the group law, and `Q0`
+    and `Q1` genuinely can coincide. It is a single elementwise `+` over the
+    `[B, 2]` of mapped points rather than a reduction, because the pairs sum
+    within their own rows and never across them.
     """
-    u = hash_to_field(message, dst)
-    points = np.array(
-        [_CURVE.point(map_to_curve(value)) for value in u], dtype=_CURVE.point
-    )
-    total = secp.sum_points(_CURVE, points)
-    return secp.affine_ints(_CURVE, total)[0]
+    if len(messages) != len(dsts):
+        raise ValueError("every message carries its own dst")
+    if not messages:
+        raise ValueError("a batch has at least one message")
+    mapped = np.array(
+        [
+            _CURVE.point(map_to_curve(value))
+            for message, dst in zip(messages, dsts)
+            for value in hash_to_field(message, dst)
+        ],
+        dtype=_CURVE.point,
+    ).reshape(len(messages), 2)
+    return mapped[:, 0] + mapped[:, 1]
+
+
+def hash_to_curve(message: bytes, dst: bytes) -> tuple[int, int]:
+    """RFC 9380 §3's encoding at one message: `bytes -> (x, y)` on secp256k1.
+
+    The batch's `B = 1` case, read back to affine integers — which is the
+    form RFC 9591's ciphersuites and the appendix's published vectors are
+    both written in.
+    """
+    return secp.affine_ints(_CURVE, hash_to_curve_batch([message], [dst]))[0]
