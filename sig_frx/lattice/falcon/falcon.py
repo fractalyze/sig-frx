@@ -123,6 +123,7 @@ from frx import Array
 from frx.typing import ArrayLike
 from hash_frx import SHAKE256_RATE
 
+from sig_frx import arrays
 from sig_frx import context as context_rules
 from sig_frx.batch import require_batch
 from sig_frx.hashes import shake256
@@ -256,13 +257,49 @@ def hash_to_point(message: ArrayLike, n: int) -> Any:
     and it agrees with §3.11.1's byte order, so the two bytes of a draw read the
     way the encoder writes a field.
     """
-    body = fnp.asarray(message, dtype=np.uint8)
     blocks = rejection.budget(n, _HASH_ACCEPT, _HASH_PER_BLOCK)
+    if not arrays.traced(message):
+        return _host_hash_to_point(message, n, blocks)
+    body = fnp.asarray(message, dtype=np.uint8)
     stream = shake256(body)(blocks * SHAKE256_RATE).digest(body[None, :])
     pairs = stream.reshape(1, -1, _DRAW_BITS // 8).astype(np.uint32)
     draws = (pairs[..., 0] << np.uint32(8)) | pairs[..., 1]
     accepted = draws < np.uint32(_HASH_ACCEPT[0])
     return rejection.first_accepted(draws, accepted, n, "HashToPoint")[0] % np.uint32(Q)
+
+
+def _host_hash_to_point(message: ArrayLike, n: int, blocks: int) -> np.ndarray:
+    """Algorithm 3 for a caller that is not tracing — same draws, host arithmetic.
+
+    The device row above compiles a program sized to its squeeze, which a
+    concrete caller pays per distinct message length and cannot amortise:
+    measured at 7.2 s the first time at Falcon-512 and 16.8 s at Falcon-1024,
+    against 0.9 ms warm and 0.007 ms here. Signing is the caller that made that
+    visible — it hashes once per signature and is host code throughout — and
+    [`hashes.py`](../../hashes.py) names this exact remedy, since hash-frx
+    retired its host rows: reach for `hashlib` where it matters, as ECDSA's
+    `host_constructor` already does for RFC 6979.
+
+    **Not a second transcription of Algorithm 3.** The two faces share the draw
+    width, the acceptance bound, the block budget and the reduction — everything
+    the standard fixes. What differs is the compaction: the device path cannot
+    branch on a trip count, so it ranks a fixed budget with
+    [`first_accepted`](../rejection.py), where here the survivors are simply the
+    ones that survived. `falcon_test` runs both faces against the reference
+    transcription so they cannot drift apart.
+    """
+    body = np.asarray(message, dtype=np.uint8).reshape(-1)
+    stream = np.frombuffer(
+        hashlib.shake_256(body.tobytes()).digest(blocks * SHAKE256_RATE),
+        dtype=np.uint8,
+    )
+    draws = (stream[0::2].astype(np.uint32) << np.uint32(8)) | stream[1::2]
+    kept = draws[draws < np.uint32(_HASH_ACCEPT[0])]
+    # The budget is sized so a shortfall is below the margin every sampler here
+    # is written against, but this path can see the count, so it checks rather
+    # than resting on the argument that stands in where a tracer cannot.
+    rejection.require_enough(kept.size, n, "HashToPoint")
+    return (kept[:n] % np.uint32(Q)).astype(np.uint32)
 
 
 def _draw_bytes(seed: bytes, attempt: int) -> np.ndarray:
