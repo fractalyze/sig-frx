@@ -126,17 +126,72 @@ class Sizes(parameterized.TestCase):
         self.assertIsInstance(falcon.named("Falcon-512"), Signature)
 
 
+# The messages both faces of Algorithm 3 are held to. The last three straddle a
+# SHAKE256 block, which is where a squeeze that miscounted its blocks would
+# first disagree.
+_HASH_MESSAGES = (
+    b"",
+    b"\x00",
+    bytes(range(64)) * 3,
+    b"a" * 167,
+    b"b" * 168,
+    b"c" * 169,
+)
+
+
 class HashToPoint(parameterized.TestCase):
     """Algorithm 3's fixed budget against a stream that has no bound."""
 
     @parameterized.parameters(*_PARAMETER_SETS)
-    def test_agrees_with_the_reference(self, name: str, **params: Any) -> None:
+    def test_the_traced_face_agrees_with_the_reference(
+        self, name: str, **params: Any
+    ) -> None:
+        """The device row `verify` reaches, ranked against a fixed budget."""
         del name
         n = params["n"]
-        for message in (b"", b"\x00", bytes(range(64)) * 3):
+        for message in _HASH_MESSAGES:
+            got = falcon.hash_to_point(
+                fnp.asarray(np.frombuffer(message, dtype=np.uint8)), n
+            )
+            np.testing.assert_array_equal(
+                np.asarray(got), ref.hash_to_point(message, n), f"len={len(message)}"
+            )
+
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_the_host_face_agrees_with_the_reference(
+        self, name: str, **params: Any
+    ) -> None:
+        """The `hashlib` row signing reaches, compacted by plain indexing.
+
+        Held to the same reference as the traced face rather than to the traced
+        face itself: two spellings agreeing with each other says only that they
+        agree, where this says each is Algorithm 3.
+        """
+        del name
+        n = params["n"]
+        for message in _HASH_MESSAGES:
             got = falcon.hash_to_point(np.frombuffer(message, dtype=np.uint8), n)
             np.testing.assert_array_equal(
-                np.asarray(got), ref.hash_to_point(message, n)
+                np.asarray(got), ref.hash_to_point(message, n), f"len={len(message)}"
+            )
+
+    @parameterized.parameters(*_PARAMETER_SETS)
+    def test_the_two_faces_are_one_function(self, name: str, **params: Any) -> None:
+        """What stops the namespace branch from becoming a fork.
+
+        Both faces are checked against the reference above, so this is not the
+        gate — it is what fails first and most cheaply if one face is edited and
+        the other is not, and it is the claim `_host_hash_to_point`'s docstring
+        makes about them sharing everything the standard fixes.
+        """
+        del name
+        n = params["n"]
+        for message in _HASH_MESSAGES:
+            body = np.frombuffer(message, dtype=np.uint8)
+            np.testing.assert_array_equal(
+                np.asarray(falcon.hash_to_point(body, n)),
+                np.asarray(falcon.hash_to_point(fnp.asarray(body), n)),
+                f"len={len(message)}",
             )
 
     @parameterized.parameters(*_PARAMETER_SETS)
