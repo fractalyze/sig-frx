@@ -215,3 +215,24 @@ bound, so the bound cannot silently eat coverage.
 
 The exhaustive run over every published length stays behind `slow_kat`, so
 nothing is lost overall — only the per-PR gate shrinks.
+
+### The hash-frx pin carries its own gate
+
+Every scheme here hashes through hash-frx, pinned by commit in
+[`MODULE.bazel`](../../MODULE.bazel) and moved by the scheduled `hash-frx Update`
+workflow. A bump that changed what a hash returns reaches the schemes as wrong
+signatures and the known-answer tests say so — but they say it once per scheme,
+in whichever one runs first, without naming the row that moved.
+
+So [`hash_frx_byte_pin_test`](../../sig_frx/testing/hash_frx_byte_pin_test.py)
+pins each consumed row on its own: the digest face and the XOF one, eagerly and
+under a trace, against bytes `hashlib` produced on the host rather than bytes the
+row produced for itself. That is what makes hash-frx's retirement of its per-hash
+composite markers checkable from here — the retirement changes how a hash lowers,
+and the pins are the claim that nothing else moved with it.
+
+A bump arrives as a pull request onto `main`, so the target that gates it is one
+carrying **no tag**: `slow_kat` and `local_only` each drop a target from the
+per-PR run, and a pin gate that first runs after the bump has landed is not a
+gate. A newly consumed row is a new entry beside the others, never a tag on the
+target.

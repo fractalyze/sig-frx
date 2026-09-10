@@ -113,12 +113,37 @@ py_test(
     ],
 )
 
-# The hash-frx wiring guard: the only target that reaches across the module pin
-# into @hash_frx, so a broken dependency fails here rather than inside a scheme.
+# The hash-frx wiring guard: it reaches across the module pin into @hash_frx so a
+# broken dependency fails here rather than inside a scheme.
 py_test(
     name = "hash_frx_dep_test",
     size = "small",
     srcs = ["hash_frx_dep_test.py"],
+    deps = [
+        "@hash_frx//hash_frx",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# What every consumed hash-frx row returns, pinned byte for byte, so a bump that
+# moved one is a red check naming the row rather than a wrong signature some
+# scheme reports later.
+#
+# `medium`: 61.5 s on the GPU leg against 25.2 s on the CPU one, so the GPU leg
+# is the slower of the two here and is already past `small`'s 60 s. Sized from
+# it per ../../docs/reference/measurement.md. Nearly all of that is compiling —
+# each case traces once, and a hash's decomposition costs its message's block
+# count.
+#
+# Deliberately carries no tag: `slow_kat` and `local_only` each drop a target
+# from the per-PR run, and this one has to gate the hash-frx bump PR that the
+# scheduled `hash-frx Update` workflow opens.
+py_test(
+    name = "hash_frx_byte_pin_test",
+    size = "medium",
+    srcs = ["hash_frx_byte_pin_test.py"],
     deps = [
         "@hash_frx//hash_frx",
         requirement("absl_py"),
