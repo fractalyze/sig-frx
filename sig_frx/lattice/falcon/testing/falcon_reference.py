@@ -326,7 +326,7 @@ def negacyclic_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """
     n = len(a)
     full = np.convolve(a.astype(np.int64), b.astype(np.int64))
-    wrapped = full[:n].copy()
+    wrapped = np.array(full[:n], dtype=np.int64)
     wrapped[: n - 1] -= full[n:]
     return wrapped % Q
 

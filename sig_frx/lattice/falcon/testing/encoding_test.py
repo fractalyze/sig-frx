@@ -86,7 +86,8 @@ class Bits(parameterized.TestCase):
         data = bytes(random.Random(12).randrange(256) for _ in range(64))
         bits = encoding.bytes_to_bits_high_first(fnp.asarray(bytearray(data), np.uint8))
         np.testing.assert_array_equal(
-            np.asarray(encoding.bits_to_bytes_high_first(bits)), bytearray(data)
+            np.asarray(encoding.bits_to_bytes_high_first(bits)),
+            np.frombuffer(data, dtype=np.uint8),
         )
 
     @parameterized.parameters(1, 3, 5, 6, 7, 8, 14)
