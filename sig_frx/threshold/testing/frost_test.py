@@ -149,6 +149,9 @@ class _GroupOnly:
     def elements_scalar_mult(self, elements: Any, scalars: Sequence[int]) -> Any:
         return self._suite.elements_scalar_mult(elements, scalars)
 
+    def select_elements(self, elements: Any, indices: Sequence[int]) -> Any:
+        return self._suite.select_elements(elements, indices)
+
     def sum_elements(self, elements: Any) -> Any:
         return self._suite.sum_elements(elements)
 

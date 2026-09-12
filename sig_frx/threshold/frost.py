@@ -33,13 +33,13 @@ vectors start from).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Generic, Protocol, runtime_checkable
 
-from sig_frx.threshold.group import PrimeOrderGroup
+from sig_frx.threshold.group import E, PrimeOrderGroup
 
 
 @runtime_checkable
-class Ciphersuite(PrimeOrderGroup, Protocol):
+class Ciphersuite(PrimeOrderGroup[E], Protocol[E]):
     """What RFC 9591 §6 instantiates per suite: the group and five hashes.
 
     The group half is [`PrimeOrderGroup`](group.py), and it is not this
@@ -137,7 +137,7 @@ def _require_nonzero_scalar(group: PrimeOrderGroup, identifier: int) -> None:
 
 
 @dataclass(frozen=True)
-class _Decoded:
+class _Decoded(Generic[E]):
     """A validated commitment list: two element batches and their order.
 
     `identifiers` is what indexes the batches — the list is sorted and
@@ -148,18 +148,22 @@ class _Decoded:
     """
 
     identifiers: list[int]
-    hidings: Any
-    bindings: Any
+    hidings: E
+    bindings: E
 
-    def entry(self, identifier: int) -> tuple[Any, Any]:
-        """One participant's `(hiding, binding)`, still batch-shaped at `B = 1`."""
-        index = self.identifiers.index(identifier)
-        return self.hidings[index : index + 1], self.bindings[index : index + 1]
+    def index_of(self, identifier: int) -> int:
+        """Where a participant sits in the batches.
+
+        Returning the index rather than the elements is what keeps `E` opaque:
+        taking them out is `select_elements`, which is the group's operation
+        because only the group knows what a batch is made of.
+        """
+        return self.identifiers.index(identifier)
 
 
 def _validated_commitment_list(
-    group: PrimeOrderGroup, commitment_list: list[Commitment]
-) -> tuple[list[int], Any, Any]:
+    group: PrimeOrderGroup[E], commitment_list: list[Commitment]
+) -> tuple[list[int], E, E]:
     """§5.2's MUST-checks on the list: sorted, distinct, deserializable.
 
     Returns `(identifiers, hidings, bindings)` — the two element batches
@@ -213,12 +217,12 @@ def compute_binding_factors(
 
 
 def compute_group_commitment(
-    group: PrimeOrderGroup,
+    group: PrimeOrderGroup[E],
     identifiers: list[int],
-    hidings: Any,
-    bindings: Any,
+    hidings: E,
+    bindings: E,
     binding_factors: dict[int, int],
-) -> Any:
+) -> E:
     """RFC 9591 §4.5: `Σ (D_i + [ρ_i]E_i)`, over already-decoded elements.
 
     The sum is a reduction over the participant axis, not an accumulator
@@ -263,11 +267,11 @@ def derive_interpolating_value(
 
 
 def _signing_context(
-    cs: Ciphersuite,
+    cs: Ciphersuite[E],
     commitment_list: list[Commitment],
     group_public_key: bytes,
     message: bytes,
-) -> tuple[_Decoded, dict[int, int], Any, int]:
+) -> tuple[_Decoded[E], dict[int, int], E, int]:
     """The round-two prologue all three §5 surfaces share.
 
     Validate the list, bind, commit, challenge — one home so the surfaces
@@ -326,7 +330,7 @@ def sign_share(
 
 
 def aggregate(
-    cs: Ciphersuite,
+    cs: Ciphersuite[E],
     commitment_list: list[Commitment],
     message: bytes,
     group_public_key: bytes,
@@ -348,7 +352,7 @@ def aggregate(
 
 
 def verify_share(
-    cs: Ciphersuite,
+    cs: Ciphersuite[E],
     identifier: int,
     participant_public_key: bytes,
     signature_share: bytes,
@@ -369,7 +373,9 @@ def verify_share(
     share = cs.deserialize_scalar(signature_share)
     participants = [c.identifier for c in commitment_list]
     lambda_i = derive_interpolating_value(cs, participants, identifier)
-    hiding, binding_commitment = decoded.entry(identifier)
+    index = decoded.index_of(identifier)
+    hiding = cs.select_elements(decoded.hidings, [index])
+    binding_commitment = cs.select_elements(decoded.bindings, [index])
     commitment_share = cs.elements_add(
         hiding,
         cs.elements_scalar_mult(binding_commitment, [binding_factors[identifier]]),
@@ -427,7 +433,7 @@ def vss_commit(
 
 
 def vss_verify(
-    group: PrimeOrderGroup, identifier: int, share: int, commitment: list[bytes]
+    group: PrimeOrderGroup[E], identifier: int, share: int, commitment: list[bytes]
 ) -> bool:
     """RFC 9591 Appendix C.2: `[f(i)]B = Σ i^j·φ_j` — a participant's check."""
     _require_nonzero_scalar(group, identifier)
